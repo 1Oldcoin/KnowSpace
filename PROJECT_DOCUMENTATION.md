@@ -46,16 +46,18 @@ MyFirstMafAgent/
 │  ├─ Models/                           # ONNX Embedding 和模型客户端
 │  ├─ Options/                          # 配置项和校验
 │  ├─ Persistence/                      # SqlSugar Store、表结构和检索
+│  ├─ Hosting/                          # 模块化组合根：选项/持久化/知识/分身/工具/MCP/Worker/管线
 │  ├─ ExternalTools/                    # FFmpeg、Embedding 模型与 pg0 便携 PostgreSQL
 │  ├─ wwwroot/                          # Vue 构建产物（发布脚本自动写入）
 │  ├─ App_Data/                         # 上传文件、分块暂存及模型缓存
-│  ├─ ApiHost.cs                        # 可复用 Web 主机（API + 静态文件 + 便携数据库）
+│  ├─ ApiHost.cs                        # 业务组合根：启动顺序与生命周期
 │  └─ Program.cs                        # 控制台入口：Build → Start → 打开浏览器
 ├─ MyFirstMafAgent.Desktop/             # Photino 桌面壳：进程内 Kestrel + WebView2 窗口
+├─ desktop-electron/                    # Electron 桌面壳：主进程 + preload + .NET API sidecar
 ├─ MyFirstMafAgent.Api.Tests/           # xUnit 单元测试
-├─ MyFirstMafAgent/                     # 独立的 MAF 控制台示例，不参与 Web 主流程
+├─ docs/                                # 阶段 0 基线与执行口径
 ├─ assets/app.ico                       # 应用图标（exe / 窗口 / 安装包 / 快捷方式共用）
-├─ scripts/                             # 一键发布脚本与便携版说明
+├─ scripts/                             # 发布、架构检查、基线与桌面契约脚本
 └─ FrontEnd/myfist-agent/               # Vue 3 + TypeScript + Vite 前端
    └─ src/
 	  ├─ App.vue                        # 页面状态与视图切换
@@ -69,7 +71,8 @@ MyFirstMafAgent/
 | 文件/目录 | 职责 |
 | --- | --- |
 | `Program.cs` | 控制台入口：构建并启动 `ApiHost`，按配置自动打开浏览器。 |
-| `ApiHost.cs` | 可复用 Web 主机：日志、CORS、异常处理、依赖注入、SqlSugar、后台任务、启动初始化与 Vue 静态文件托管；控制台版和桌面版共用。 |
+| `ApiHost.cs` | 业务组合根：内容根解析、数据目录重定向、便携数据库启动/停止、构建、初始化与端点映射的顺序；控制台版和桌面版共用。 |
+| `Hosting/` | 模块化注册：`HostBootstrap`、`HostOptionsModule`、`PersistenceModule`、`KnowledgeModule`、`DocumentsChatsModule`、`AvatarModule`、`AgentModule`、`McpModule`、`WorkerModule`、`HostPipeline`、`DatabaseInitializer`。新增宿主只能复用这些模块，不得复制注册。 |
 | `Infrastructure/PortablePostgres/PortablePostgresHost.cs` | 启动/停止 pg0 子进程，等待数据库就绪、创建数据库并执行 `CREATE EXTENSION IF NOT EXISTS vector`。 |
 | `Infrastructure/PortablePostgres/PortablePostgresOptions.cs` | 便携数据库配置：实例名、端口、数据目录、账号、超时与 pg0 路径。 |
 | `Endpoints/ApiEndpointMappings.cs` | 统一注册业务路由模块。 |

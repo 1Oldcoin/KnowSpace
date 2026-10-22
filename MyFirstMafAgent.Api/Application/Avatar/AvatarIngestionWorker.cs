@@ -1,5 +1,4 @@
 using MyFirstMafAgent.Api.Domain.Avatar;
-using MyFirstMafAgent.Api.Infrastructure;
 
 namespace MyFirstMafAgent.Api.Application.Avatar;
 

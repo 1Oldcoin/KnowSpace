@@ -64,6 +64,11 @@ coverage/
 # 前端构建结果（发布时复制到 Kestrel 静态目录，属于生成物）
 MyFirstMafAgent.Api/wwwroot/
 
+# Electron 壳：依赖与打包生成物
+desktop-electron/node_modules/
+desktop-electron/dist/
+desktop-electron/out/
+
 # ---------------------------------------------------------------------------
 # 3. 运行时数据 / 本地数据库
 #    根目录 App_Data 与 MyFirstMafAgent.Api/App_Data 都会被忽略：

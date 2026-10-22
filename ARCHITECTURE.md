@@ -223,6 +223,57 @@ PDF 和 DOCX 在 API 进程内提取文字；图片描述走当前选择的聊�
 
 发布目录**不能放在桌面/文档/下载**：Windows「受控文件夹访问」会阻止从这些位置启动的未签名程序写入用户目录，便携数据库会启动失败。应用目录本身可以含中文，`PortablePostgresHost` 会把 pg0 复制到 `%LOCALAPPDATA%\MyFirstMafAgent\tools` 后运行（pg0 要求可执行路径与数据目录均为纯 ASCII）。
 
+### 9.1 宿主分层：模块化组合根
+
+`ApiHost.cs` 只保留启动顺序与生命周期（内容根解析、数据目录重定向、便携数据库、构建、初始化、映射、退出）。具体注册项拆到 `MyFirstMafAgent.Api/Hosting/`：
+
+| 文件 | 职责 |
+| --- | --- |
+| `HostBootstrap.cs` | 数据目录重定向、JSON/文件日志、Kestrel 请求体上限、ProblemDetails、OpenAPI、CORS |
+| `HostOptionsModule.cs` | 所有配置项的绑定与启动校验（Llm/Storage/Embedding/Media/Indexing/Agent/Mcp/WebSearch/PortablePostgres） |
+| `PersistenceModule.cs` | `SqlSugarScope` 与全部仓储；领域端口在这里绑定到 Infrastructure 实现 |
+| `KnowledgeModule.cs` | 向量规格、索引生命周期、检索路由、摘要、摄取与检索应用服务 |
+| `DocumentsChatsModule.cs` | 资料处理、上传、转写、聊天、伴侣，以及笔记/主题/学习服务 |
+| `AvatarModule.cs` | 分身记忆、摄取、证据链、人格候选、反馈与评测 |
+| `AgentModule.cs` | 模型客户端、运行期设置/偏好、工具来源与 `ToolCallingAgent` |
+| `McpModule.cs` | MCP 服务端（Streamable HTTP）与外部 MCP 客户端注册表 |
+| `WorkerModule.cs` | 资料处理、索引生命周期、分身摄取三个后台 Worker |
+| `HostPipeline.cs` | 请求日志、异常处理、静态前端、REST/MCP/OpenAPI 映射与 SPA 回退 |
+| `DatabaseInitializer.cs` | 建表/补列、恢复中断资料、加载设置、注册向量规格、准备默认索引 |
+
+新增宿主（Electron.NET 或原生 Electron sidecar）**必须复用 `ApiHost.BuildAsync`**，不得复制服务注册或中间件；宿主差异只体现在监听地址、窗口生命周期和用户数据目录参数上。控制台入口与 Photino 桌面入口保留为回滚路径，直到 Electron 桌面壳在真实 Windows 安装环境中验证通过。
+
+依赖方向为 `Endpoints/Adapters → Application → Domain`，`Infrastructure` 实现应用与领域端口。可用以下命令持续检查（Domain 不得引用 SqlSugar/ASP.NET Core/Application，Application 不得引用 SqlSugar/Infrastructure，Endpoints 不得直接使用 SqlSugar）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Check-Architecture.ps1
+```
+
+阶段 0 的性能与向量索引基线采集方法见 `docs/PHASE0-BASELINE.md`；在该基线完成前，不得以“加线程”“换向量库”作为性能结论。
+
+### 9.2 桌面宿主：Electron sidecar（阶段 2）
+
+Electron.NET 现阶段不能作为基线：`ElectronNET.Core` 最新为 `0.6.0`（预览重写版），`ElectronNET.API` 停留在 Electron 23。按方案启用既定备选方案——**原生 Electron 主进程 + .NET API sidecar**，REST/MCP 契约完全不变，控制台与 Photino 入口保留为回滚路径。
+
+| 组件 | 位置 | 说明 |
+| --- | --- | --- |
+| Electron 主进程 | `desktop-electron/main.js` | 单实例锁、随机端口、一次性令牌、子进程生命周期、外链拦截、菜单与退出 |
+| Preload | `desktop-electron/preload.js` | 白名单：`desktopHost.platform`、`desktopHost.openExternal`；**不**下发令牌 |
+| 本机鉴权 | `Hosting/DesktopSecurity.cs` | `X-Api-Token` 仅覆盖 `/api` 与 `/mcp`；固定时间比较；未配置令牌时整体禁用 |
+| 启动契约 | `Hosting/DesktopHostArguments.cs` | `--desktop-ready-file`、`--desktop-data-root`；ready 文件只含 `url`/`pid`，不含令牌 |
+| 控制面 | `Endpoints/DesktopEndpoints.cs` | `GET /api/desktop/info`、`POST /api/desktop/shutdown`（仅桌面模式注册） |
+| 渲染安全 | `ApiHost` + `DESKTOP_STRICT_CSP=1` | 严格 CSP 响应头；`contextIsolation`/`sandbox` 开启、`nodeIntegration` 关闭 |
+
+启动顺序：pg0 → API（`http://127.0.0.1:0`）→ 轮询 ready 文件 → 轮询 `/api/health` → 创建窗口。退出顺序：`POST /api/desktop/shutdown` → 等待 API 退出（≤20s）→ 强制结束；`ApplicationStopping` 只停止本次启动的 pg0。
+
+令牌不入 URL、日志、ready 文件或渲染进程；主进程用 `webRequest.onBeforeSendHeaders` 注入请求头，因此前端 `api.ts` 无需改动。
+
+契约验证（不需要 Electron）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Test-DesktopContract.ps1 -ApiExe <published>\MyFirstMafAgent.Api.exe
+```
+
 AI 伴侣导入端点为 `POST /api/companions/import`（multipart 字段：`name`、`targetSender`、`platform`、`file`），格式为 UTF-8 JSON/TXT，最大 20 MB。`targetSender` 必须匹配导出中的发言者名称。生成画像、开启会话及对话需调用当前选择的聊天模型；云端模式会将提示、相关历史片段及本轮对话发送给配置的 API 服务商。该功能用于生成 AI 模拟，不应被呈现为逝者本人；导入前应确认有权处理聊天记录。
 
 Embedding 使用 `Microsoft.ML.OnnxRuntime` 和 `Microsoft.ML.Tokenizers` NuGet 包在 API 内运行本地 BGE-small-zh-v1.5，不需要独立 Embedding 服务；模型目录随构建和发布输出部署。视频处理使用 `Whisper.net` 与其 CPU runtime NuGet 包，不需要 Python 或 Whisper CLI；Whisper 模型文件首次转写时下载并缓存。FFmpeg 仍是原生可执行工具，项目会将其复制到构建和发布目录；重新分发时需遵守 FFmpeg 对应构建的许可要求。

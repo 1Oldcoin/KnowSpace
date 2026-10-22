@@ -1,0 +1,14 @@
+{
+  "name": "myfirstmafagent-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MyFirstMafAgent desktop shell: native Electron main process + .NET API sidecar",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "start:packaged": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.4.11"
+  }
+}

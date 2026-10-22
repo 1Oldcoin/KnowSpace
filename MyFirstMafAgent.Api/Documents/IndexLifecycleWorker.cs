@@ -1,6 +1,6 @@
 using Microsoft.Extensions.Options;
+using MyFirstMafAgent.Api.Application;
 using MyFirstMafAgent.Api.Application.Knowledge;
-using MyFirstMafAgent.Api.Infrastructure;
 using MyFirstMafAgent.Api.Options;
 
 namespace MyFirstMafAgent.Api.Documents;

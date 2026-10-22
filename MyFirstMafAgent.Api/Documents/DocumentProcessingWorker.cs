@@ -1,4 +1,4 @@
-using MyFirstMafAgent.Api.Infrastructure;
+using MyFirstMafAgent.Api.Application;
 using MyFirstMafAgent.Api.Persistence;
 
 namespace MyFirstMafAgent.Api.Documents;

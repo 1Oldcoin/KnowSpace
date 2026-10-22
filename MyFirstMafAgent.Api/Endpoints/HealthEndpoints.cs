@@ -1,4 +1,4 @@
-using SqlSugar;
+using MyFirstMafAgent.Api.Application.Health;
 
 namespace MyFirstMafAgent.Api.Endpoints;
 
@@ -8,11 +8,11 @@ public static class HealthEndpoints
     {
         endpoints.MapGroup("/api/health")
             .WithTags("系统")
-            .MapGet("", async (SqlSugarScope database, ILoggerFactory loggerFactory, CancellationToken cancellationToken) =>
+            .MapGet("", async (IDatabaseHealthProbe probe, ILoggerFactory loggerFactory, CancellationToken cancellationToken) =>
             {
                 try
                 {
-                    await Task.Run(() => database.Ado.CheckConnection(), cancellationToken);
+                    await probe.CheckAsync(cancellationToken);
                     return Results.Ok(new { status = "ok", database = "connected" });
                 }
                 catch (Exception exception)

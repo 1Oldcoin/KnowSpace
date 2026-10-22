@@ -1,4 +1,4 @@
-namespace MyFirstMafAgent.Api.Infrastructure;
+namespace MyFirstMafAgent.Api.Application;
 
 /// <summary>
 /// 后台 Worker 的执行上下文隔离器。
@@ -17,8 +17,13 @@ namespace MyFirstMafAgent.Api.Infrastructure;
 /// 让每个 Worker 在独立的 ExecutionContext 中运行，SqlSugar 便会为各自创建独立的连接。
 /// 同时把循环从启动线程挪到线程池，避免长时间运行的循环阻塞宿主启动。
 /// </para>
+///
+/// <para>
+/// 这是所有长期后台循环的强制入口：不要用 <c>Task.Run</c> 或直接调用循环方法替代。
+/// 验证必须在真实宿主上进行（单元测试无法复现该并发问题）。
+/// </para>
 /// </summary>
-internal static class BackgroundLoop
+public static class BackgroundLoop
 {
     /// <summary>在独立 ExecutionContext 中启动后台循环。</summary>
     public static Task RunIsolatedAsync(Func<CancellationToken, Task> loop, CancellationToken stoppingToken)
