@@ -1,0 +1,36 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>a456929d-2232-47e0-acf4-730f85728684</UserSecretsId>
+    <!-- exe / 任务栏图标（共享 assets 目录） -->
+    <ApplicationIcon>..\assets\app.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ElBruno.QwenTTS.VoiceCloning" Version="1.10.2" />
+    <PackageReference Include="Microsoft.Agents.AI.OpenAI" Version="1.23.0" />
+    <PackageReference Include="Microsoft.Extensions.AI" Version="10.10.0" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="2.2.0" />
+    <PackageReference Include="OpenAI" Version="2.14.0" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.12" />
+    <PackageReference Include="Scalar.AspNetCore" Version="2.17.13" />
+    <PackageReference Include="SqlSugarCore" Version="5.1.4.221" />
+    <PackageReference Include="Npgsql" Version="9.0.4" />
+    <PackageReference Include="PdfPig" Version="0.1.9" />
+    <PackageReference Include="DocumentFormat.OpenXml" Version="3.3.0" />
+    <PackageReference Include="Whisper.net" Version="1.9.1" />
+    <PackageReference Include="Whisper.net.Runtime" Version="1.9.1" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.30.0" />
+    <PackageReference Include="Microsoft.ML.Tokenizers" Version="2.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="ExternalTools\ffmpeg\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Update="ExternalTools\Embedding\bge-small-zh-v1.5\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Update="ExternalTools\pgSQL\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,602 @@
+# 知间本地学习知识库系统｜项目技术说明
+
+> 本文说明当前代码库中已经实现的系统组成、主要处理流程、技术选型和运行边界。规划功能不作为现状描述。
+
+## 1. 项目概述
+
+本项目提供本地学习资料管理与知识库问答能力。用户上传文档后，系统提取文本、切分内容并生成向量，保存到 PostgreSQL/pgvector；提问时检索相关内容，将问题、检索片段和最近对话交给配置的聊天模型，返回回答及资料引用。
+
+系统由 Vue 前端、ASP.NET Core API、PostgreSQL 数据库和本地文件目录组成。聊天模型可配置为本地或 OpenAI 兼容的在线服务；Embedding 使用 API 进程内的 ONNX 模型生成。AI 伴侣功能是独立的数据域，支持导入通用聊天记录、生成表达风格描述并基于历史样本进行对话。
+
+### 当前功能范围
+
+- 创建和切换知识库；默认知识库在 API 启动时自动初始化。
+- 上传 PDF、DOCX、TXT、MD、HTML/HTM、常见图片和视频文件，查看资料处理进度、摘要或错误；在资料卡的更多菜单中可阅读原文、重新解析、复制名称、下载原文件或删除资料。
+- 按知识库管理专题：创建、重命名、删除专题，将资料归入专题，并在侧栏、专题页和资料页按专题筛选；删除专题只解除资料归属。
+- 根据资料内容进行向量检索和带引用问答；问答会话及消息写入数据库。
+- 管理问答历史：新建、重命名、单条删除、批量删除和 Markdown 导出。
+- 导入 UTF-8 JSON/TXT 聊天记录，生成人物表达风格描述，并创建独立的 AI 伴侣会话。
+- 前端“设置”可修改聊天模型来源（本地/在线）、接口地址、模型、API Key、显示名称和每日学习目标；配置保存在本机数据库，保存后立即生效。
+- 学习打卡：记录每日学习时长与备注，统计连续学习天数、最长连续天数、累计天数和本周学习节奏；总览页展示打卡状态与本周图表。
+- 学习笔记完整持久化：新建、编辑、删除、置顶、分类、标签、关键词检索，可从原文阅读器一键存为摘录笔记。
+- 原文阅读：对已解析的资料按字符偏移分页加载解析文本，支持字号调整、复制已加载文本和存为笔记。
+- 全局搜索支持资料、笔记文本匹配，以及基于向量检索的知识库语义片段；命中项可直接打开原文阅读。
+- “我的分身”：随手写或导入文件即可投喂，AI 自动整理成记忆卡、归纳人格并向量化，再以第一人称回答“如果是我会怎么做”。分身数据与知识库完全隔离。
+- 聊天模型可调用工具（知识库检索、授权本机目录读写、工作目录读写、分身投喂/分析/代答），并支持双向 MCP 互操作。
+
+学习笔记已写入数据库（`kb_notes`），支持分类、标签、置顶与检索；原文阅读基于已解析切片重建文本页面。
+
+## 2. 项目组成与目录结构
+
+解决方案 `MyFirstMafAgent.slnx` 包含四个 .NET 项目；Vue 前端是独立的 npm 工程，不在 `.slnx` 项目清单中。
+
+```text
+MyFirstMafAgent/
+├─ MyFirstMafAgent.slnx
+├─ MyFirstMafAgent.Api/                 # 主 Web API
+│  ├─ Domain/                           # 领域层：聚合根、值对象、领域规则、仓储端口
+│  ├─ Application/                      # 应用层：用例编排、DTO、命令
+│  ├─ Infrastructure/                   # 基础设施层：SqlSugar 仓储、设置、便携数据库、日志
+│  ├─ Endpoints/                        # 按业务分组的 HTTP 路由
+│  ├─ Contracts/                        # API 请求/响应契约
+│  ├─ Agents/                           # 知识库 Agent
+│  ├─ Chats/                            # 知识库问答编排
+│  ├─ Companions/                       # 聊天记录解析与伴侣对话
+│  ├─ Documents/                        # 上传、存储、解析和后台处理
+│  ├─ Models/                           # ONNX Embedding 和模型客户端
+│  ├─ Options/                          # 配置项和校验
+│  ├─ Persistence/                      # SqlSugar Store、表结构和检索
+│  ├─ ExternalTools/                    # FFmpeg、Embedding 模型与 pg0 便携 PostgreSQL
+│  ├─ wwwroot/                          # Vue 构建产物（发布脚本自动写入）
+│  ├─ App_Data/                         # 上传文件、分块暂存及模型缓存
+│  ├─ ApiHost.cs                        # 可复用 Web 主机（API + 静态文件 + 便携数据库）
+│  └─ Program.cs                        # 控制台入口：Build → Start → 打开浏览器
+├─ MyFirstMafAgent.Desktop/             # Photino 桌面壳：进程内 Kestrel + WebView2 窗口
+├─ MyFirstMafAgent.Api.Tests/           # xUnit 单元测试
+├─ MyFirstMafAgent/                     # 独立的 MAF 控制台示例，不参与 Web 主流程
+├─ assets/app.ico                       # 应用图标（exe / 窗口 / 安装包 / 快捷方式共用）
+├─ scripts/                             # 一键发布脚本与便携版说明
+└─ FrontEnd/myfist-agent/               # Vue 3 + TypeScript + Vite 前端
+   └─ src/
+	  ├─ App.vue                        # 页面状态与视图切换
+	  ├─ services/api.ts                # HTTP API 客户端
+	  ├─ components/                    # 总览、资料、笔记、问答、伴侣等页面
+	  └─ types.ts                       # 前端页面数据类型
+```
+
+### 主要后端文件职责
+
+| 文件/目录 | 职责 |
+| --- | --- |
+| `Program.cs` | 控制台入口：构建并启动 `ApiHost`，按配置自动打开浏览器。 |
+| `ApiHost.cs` | 可复用 Web 主机：日志、CORS、异常处理、依赖注入、SqlSugar、后台任务、启动初始化与 Vue 静态文件托管；控制台版和桌面版共用。 |
+| `Infrastructure/PortablePostgres/PortablePostgresHost.cs` | 启动/停止 pg0 子进程，等待数据库就绪、创建数据库并执行 `CREATE EXTENSION IF NOT EXISTS vector`。 |
+| `Infrastructure/PortablePostgres/PortablePostgresOptions.cs` | 便携数据库配置：实例名、端口、数据目录、账号、超时与 pg0 路径。 |
+| `Endpoints/ApiEndpointMappings.cs` | 统一注册业务路由模块。 |
+| `Endpoints/KnowledgeEndpoints.cs` | 知识库、资料、分块上传、检索、问答及问答历史接口。 |
+| `Endpoints/CompanionEndpoints.cs` | 聊天记录导入、档案、风格画像及伴侣会话接口。 |
+| `Endpoints/HealthEndpoints.cs` | API/数据库健康检查。 |
+| `Documents/LocalDocumentStore.cs` | 校验文件类型和大小，将原始文件安全保存到本地目录。 |
+| `Documents/ResumableUploadService.cs` | 分块上传会话、偏移量校验和断点续传。 |
+| `Documents/KnowledgeIngestionService.cs` | 文档解析、分块、Embedding 和视频摘要处理。 |
+| `Documents/DocumentProcessingWorker.cs` | 从数据库领取待处理资料并执行后台处理。 |
+| `Persistence/KnowledgeBaseStore.cs` | 知识库、资料、上传状态、分块和向量检索数据访问。 |
+| `Persistence/KnowledgeChatStore.cs` | 知识库问答会话及消息持久化和历史管理。 |
+| `Persistence/CompanionStore.cs` | 伴侣档案、导入消息和会话数据访问。 |
+| `Persistence/*SchemaEntities.cs` | SqlSugar CodeFirst 表、列和普通索引映射。 |
+| `Persistence/PgVectorSql.cs` | 集中封装 pgvector 专属 SQL（扩展 DDL、余弦距离运算符、vector 类型转换），其余数据访问均走 SqlSugar 原生 API。 |
+| `Models/LocalOnnxEmbeddingService.cs` | 在 API 进程内加载 BGE ONNX 模型并生成归一化向量。 |
+| `Agents/KnowledgeAgent.cs` | 通过 Microsoft Agent Framework 调用聊天模型并组织 RAG 上下文。 |
+| `Chats/KnowledgeChatService.cs` | 组合历史消息、检索结果、Agent 回答和引用信息。 |
+
+`MyFirstMafAgent` 是独立的 .NET 控制台示例，演示使用 MAF 调用兼容 OpenAI 的聊天模型进行流式对话；它不属于 Vue/API 主系统的启动依赖。
+
+## 3. 架构与实现方式
+
+```text
+浏览器
+  │ HTTP/JSON
+  ▼
+Vue 3 + TypeScript 前端
+  │ REST API
+  ▼
+ASP.NET Core 10 Minimal API
+  ├─ Endpoints：请求路由和参数校验
+  ├─ Documents / Chats / Companions：业务流程编排
+  ├─ Agents / Models：Embedding 与聊天模型调用
+  ├─ SqlSugar + Npgsql ───────── PostgreSQL + pgvector
+  └─ LocalDocumentStore ───────── 本地文件目录
+```
+
+后端采用按业务域拆分的 Minimal API，不使用 MVC Controller。`Program.cs` 只负责 Host、依赖注入、中间件及启动初始化；API 定义位于 `Endpoints/`，路由按知识库、问答、资料上传、AI 伴侣等功能分组，并带 OpenAPI 标签。该组织方式保留轻量端点定义，同时可以从文件结构直接定位接口。
+
+开发环境映射 OpenAPI JSON 与 Scalar 页面：`/openapi/v1.json`、`/scalar/v1`。两者仅在 Development 环境开启。
+
+前端以 `App.vue` 管理当前页面、知识库选择和问答数据；各视图由独立 Vue 组件实现；`services/api.ts` 统一封装 API 请求。前后端通过 HTTP/JSON 通信，问答接口当前返回完整响应，不使用 SSE 流式传输。
+
+## 4. 核心业务流程
+
+### 4.1 资料上传与索引
+
+1. 前端将资料提交到 `POST /api/documents`；大文件通过 `POST /api/uploads` 创建会话，使用 `PUT /api/uploads/{uploadId}/chunks?offset={bytes}` 上传分块，再调用 `POST /api/uploads/{uploadId}/complete` 完成归档。
+2. API 校验扩展名、文件大小及知识库是否存在。默认普通文件上限为 50 MiB、视频上限为 5 GiB，分块默认 16 MiB；具体值由 `Storage` 配置控制。
+3. 原文件写入 `App_Data/uploads/{knowledgeBaseId}/` 下的随机文件名路径；数据库保存资料元数据、受控存储路径和处理状态。断点续传期间的数据写入暂存文件。
+4. 资料记录进入 `Queued` 状态。`DocumentProcessingWorker` 在后台轮询数据库队列，领取任务后更新 `Processing` 状态、进度和阶段；API 重启时会将未完成的 `Processing` 项重新排队。
+5. 文本、Markdown 直接读取；HTML/HTM 使用 `HtmlTextExtractor` 抽取正文（标题层级、列表、表格单元格，不执行脚本、不加载外部资源），非 UTF-8 页面按 BOM 与 `<meta charset>` 解码（含 GBK/GB18030）；DOCX 使用 DocumentFormat.OpenXml；PDF 使用 PdfPig；图片由所选聊天模型生成可检索描述。
+6. 视频由 FFmpeg 抽取单声道 16 kHz 音频，Whisper.net 生成带时间段的转写文本。关键帧分析可选，默认关闭；启用后按配置抽帧并调用支持图像输入的模型描述画面。视频摘要与转写内容进入后续索引流程。
+7. 文本按约 1,400 字符切片，并保留约 180 字符重叠；切片边界优先选择换行、句末标点或空格。
+8. 每个切片由本地 ONNX Embedding 模型生成向量，并写入 `kb_chunks`；全部完成后资料状态变为 `Ready`，失败时记录错误信息并标记为 `Failed`。
+
+后台处理队列保存在 PostgreSQL 中，由 API 进程内的 `BackgroundService` 消费；不是独立消息队列服务。
+
+### 4.2 知识库问答（RAG）
+
+1. `KnowledgeChatService` 校验会话所属知识库，并读取该会话最近 30 条消息作为对话历史。
+2. `KnowledgeRetrievalService` 使用本地 ONNX 模型对问题生成向量，再按当前知识库和 `Ready` 状态过滤资料块。
+3. `KnowledgeBaseStore` 使用 pgvector 的余弦距离运算符 `<=>` 排序。聊天默认取前 5 个片段；显式检索接口的结果数限制为 1–10 条。
+4. `KnowledgeAgent` 将资料片段、最近对话和本轮问题组装成上下文交给聊天模型。提示词要求资料不足时明确说明、标记来源，并将检索内容视为不可信引用数据而非系统指令。
+5. API 返回回答和引用资料名/相似度；本轮用户消息与助手回答保存到 `knowledge_chat_messages`，会话标题初始为首个问题的前 100 个字符。
+6. “AI 知识问答”页提供三个单轮开关：工具调用（总开关）、联网搜索、本地文件。它们随请求体（`enableToolCalling` / `enableWebSearch` / `enableFileAccess`）发送，为空时沿用设置页保存的偏好，非空时只对本次提问生效且不落库。关闭总开关后不向模型下发任何 `tools`，模型只能用预检索的资料片段回答；关闭联网或本地文件时由 `AgentToolRegistry` 按工具分类过滤，知识库与分身工具不受影响。
+
+聊天历史表保存角色、文本内容和时间；引用信息随问答响应返回，但目前不单独持久化到历史消息表。
+
+### 4.3 问答历史管理
+
+会话按知识库隔离。历史列表按最近更新时间倒序显示，删除会话会通过数据库级联删除对应消息。管理接口包括重命名、单条删除、一次最多 100 条的批量删除和 Markdown 导出。前端在删除当前会话后自动切换到其他会话；没有剩余会话时清空当前对话视图。
+
+### 4.4 AI 伴侣
+
+1. 用户上传 UTF-8 JSON/TXT 导出文件，并提供档案名、目标人物发言者名称和平台信息。
+2. `ChatHistoryParser` 支持顶层 JSON 数组或 `messages`/`records` 数组；TXT 支持 `[时间] 发言者: 消息` 行，未匹配的续行并入上一条消息。不直接读取微信/QQ 私有或加密数据库。
+3. 解析后的档案和原始消息在事务中写入 PostgreSQL。导入文件最大 20 MB，最多 100,000 条消息，单条消息不超过 20,000 字符。
+4. 风格画像使用所选聊天模型根据历史样本生成；会话消息单独存储。对话时按关键词检索最多 8 条相关原始消息，再结合当前会话历史构造提示词。
+5. UI 和提示词均明确该功能是 AI 模拟，不代表现实人物本人；导入前应确认数据处理授权。
+
+### 4.5 向量索引生命周期与模型切换
+
+资料解析、内容版本与向量索引已经解耦：
+
+- `kb_documents` 保存 `file_hash`、`content_hash` 和 `content_version`；`kb_chunks` 按 `document_version` 保存每个内容版本的切片，旧版本保留用于审计和回滚。
+- 资料发布在单个数据库事务内完成：写入分块版本 → 更新资料状态 → 写入 `kb_outbox_events`（幂等键形如 `document:{id}:v{version}:published`）。
+- `kb_embedding_specs` 注册向量模型规格（provider、模型、维度、序列长度、revision），指纹唯一。
+- `kb_indexes` 表示索引实例，状态为 `Building → Ready → Active → Retired`；`kb_index_vectors` 按索引独立存储向量；`kb_active_indexes` 单行保存活动索引及指纹，检索路由只读这一行。
+- `IndexLifecycleManager` 负责：创建阴影索引 → 全量重建 → 增量重放 → 一致性检查 → 质量评测 → 原子切换 → 回滚窗口 → 清理。
+- `IndexLifecycleWorker` 在进程内后台推进构建与变更追赶；API 重启后从数据库检查点继续。
+- `RetrievalRouter` 原子读取活动索引 → 用同指纹模型生成查询向量 → 校验指纹/维度 → 只查询该索引的向量；指纹不一致时阻止跨模型检索。
+- `SummaryService` 只读取已发布分块文本，按「内容哈希 + 摘要模型指纹」缓存，与向量索引和摘要模型切换互不影响；摘要失败不会阻断资料发布。
+- 每个知识库可通过 `kb_model_bindings` 绑定自己的向量规格与摘要模型，实现不同用户/知识库使用不同模型。
+
+切换向量模型（设置页即可完成）：
+
+1. 进入“设置 → 向量模型（Embedding）”。
+2. 本地模型：上传 `.onnx` 与 `tokenizer.json`，服务端自动识别维度、校验词表并做一次真实推理；在线模型：填写 OpenAI 兼容端点、模型名、密钥与维度，注册前会调用一次 `/embeddings` 验证。
+3. 在已注册列表中选择目标规格，点击底部“保存设置”。系统会把它持久化为默认向量模型，并为所有知识库创建阴影索引、排队全量重建。
+4. 设置页展示每个知识库的重建进度（`Building → Active`）；构建期间检索继续使用旧的活动索引。
+5. 构建完成后执行一致性检查与质量评测并原子切换；切换失败或一致性不通过时活动索引不受影响，可在回滚窗口内调用 rollback。
+
+也可以按知识库单独绑定：`PUT /api/knowledge-bases/{id}/model-binding`。
+
+### 4.6 Function Calling（工具调用）
+
+聊天模型不再通过 SDK Agent 抽象调用，而是由 API 自己实现 OpenAI `tools` / `tool_calls` 循环：
+
+- `Agents/ToolCallingAgent.cs`：组装系统提示（含预检索结果）→ 调用 `POST /chat/completions`（带 `tools`）→ 执行模型请求的工具 → 把结果作为 `tool` 消息回填 → 直到模型给出文本回答。达到 `Agent:MaxToolIterations` 后强制收口，模型不支持 `tools` 或首次调用报错时自动退化为普通问答（`CompleteChatAsync`）。
+- `Agents/Tooling/AgentWorkspace.cs`：本地沙箱，路径经 `Resolve` 归一化，拒绝 `..`、绝对路径逃逸；读写按字符数分页与截断。
+- `Agents/Tooling/WorkspaceToolSource.cs`：`workspace_list_files`、`workspace_read_file`、`workspace_write_file`、`workspace_delete_file`、`workspace_search`（`Agent:AllowWorkspaceWrite=false` 时不注册写/删工具）。
+- `Agents/Tooling/AgentFileAccess.cs` + `LocalFileToolSource.cs`：访问 `Agent:FileRoots` 授权的本机目录（如 `D:\学习资料`）。工具为 `list_file_roots`、`local_list_directory`、`local_read_file`、`local_search_files`、`local_grep`、`local_write_file`、`local_delete_file`；路径支持绝对路径与“根名称/子路径”，自动识别 UTF-8/UTF-16/GB18030，未授权目录与 `..` 穿越一律拒绝。
+- `Agents/Tooling/KnowledgeToolSource.cs`：`list_knowledge_bases`、`list_documents`、`search_knowledge_base`、`read_document_content`。
+- `Agents/Tooling/AvatarToolSource.cs`：`avatar_get_persona`、`avatar_feed`（自动整理 + 向量化）、`avatar_search_memories`、`avatar_digest`、`avatar_ask_as_me`（分类 `avatar`，只读写分身数据，不触碰知识库）。
+- `Agents/Tooling/AgentToolRegistry.cs`：聚合多个 `IAgentToolSource`，单个来源失败不影响其他工具，同名工具按注册顺序去重。
+- 每次工具调用的名称、参数、结果摘要、耗时、成功与否以 `AgentToolCallTrace` 随 `/api/chat` 与会话问答响应返回，前端在消息下方显示“工具调用”标签。
+
+### 4.7 MCP 双向互操作
+
+- **本机知识库作为 MCP 服务端**：`KnowledgeMcpTools`（`Mcp/KnowledgeMcpTools.cs`）、`LocalFileMcpTools`（`Mcp/LocalFileMcpTools.cs`）与 `AvatarMcpTools`（`Mcp/AvatarMcpTools.cs`）通过 `ModelContextProtocol.AspNetCore` 以 Streamable HTTP 暴露在 `Mcp:ServerPath`（默认 `/mcp`，无状态模式）。其他大模型/智能体可调用 `list_knowledge_bases`、`list_documents`、`search_knowledge_base`、`get_document_content`、`get_document_summary`、`workspace_*`、`list_file_roots`、`local_*`，以及 `avatar_get_persona`、`avatar_feed`、`avatar_search_memories`、`avatar_digest`、`avatar_ask_as_me`、`avatar_list_fragments`。
+- **本机作为 MCP 客户端**：`Mcp/McpClientRegistry.cs` 按 `Mcp:Servers` 惰性连接外部服务器（`http` Streamable HTTP 或 `stdio`），工具列表缓存 30 秒；`Mcp/McpToolSource.cs` 把远端工具桥接为 `mcp__{server}__{tool}`（名称清洗、去重、≤64 字符）供聊天模型调用。
+- 连接失败只影响对应服务器，状态通过 `GET /api/mcp/status` 暴露；设置页“AI 工具与 MCP”卡片展示 MCP 端点、连接数与工具清单。
+
+典型配置（`appsettings.json`）：
+
+```json
+"Agent": {
+  "EnableToolCalling": true,
+  "MaxToolIterations": 6,
+  "WorkspaceRootPath": "App_Data/agent-workspace",
+  "AllowWorkspaceWrite": true,
+  "MaxReadChars": 8000,
+  "MaxWriteChars": 200000,
+  "MaxToolResultChars": 12000,
+  "EnableMcpToolBridge": true,
+  "MaxDirectoryEntries": 300,
+  "MaxSearchMatches": 60,
+  "FileRoots": [
+    { "Name": "学习资料", "Path": "D:\\学习资料", "AllowWrite": false, "AllowDelete": false, "Enabled": true }
+  ]
+},
+"Mcp": {
+  "EnableServer": true,
+  "ServerPath": "/mcp",
+  "EnableClient": true,
+  "Servers": []
+}
+```
+
+要让 AI 读取知识库以外的本机文件，只需在 `Agent:FileRoots` 中追加一项：`Path` 写绝对目录，`Name` 用作路径前缀；默认只读，需要模型写文件时把 `AllowWrite` 设为 `true`（删除同理）。修改后重启 API，设置页“AI 工具与 MCP”卡片会显示已授权目录及其权限。
+
+新增接口：`GET /api/agent/tools`、`GET /api/agent/info`、`GET /api/mcp/status`，以及 MCP 端点 `{Mcp:ServerPath}`。
+
+### 4.8 分身（数字孪生）：证据链记忆 + 反馈评测闭环
+
+分身回答的不是“资料里怎么说”，而是“**如果是我，我会怎么做**”。整个模块只有两个界面：**投喂**与**问答**。
+
+> **与知识库隔离**：分身数据只写入 `avatar_*` 表，不进入 `kb_documents` / `kb_chunks` / `kb_index_vectors`，不参与知识库语义检索，也不会被知识库问答引用；反之，分身问答只读分身记忆与洞察，不读知识库文档。
+
+**投喂：异步整理，不阻塞问答**
+
+- 用户只有一个输入框：想到什么写什么（日记、吐槽、聊天记录、观点、自我介绍、和谁关系近、说话习惯……），也可以直接导入文件。
+- `POST /api/avatar/feed` / `POST /api/avatar/feed/upload`：原文先落 `avatar_fragments`，同时创建 `avatar_ingestions` 任务并立即返回 `ingestionId`。相同文件用 `source_hash + segment_index + extractor_version` 做幂等，重复导入不会重复建记忆。
+- `AvatarIngestionWorker` 后台轮询任务，失败可重试；长内容按段落分批提取，不会因为单次模型输入长度限制而静默丢内容。整个流水线不修改知识库的 `DocumentProcessingWorker`。
+- **记忆提取**（`AvatarOrganizer`，契约 `avatar-extractor-v2`）只提取“用户说了什么”：
+  - `memory_type`：`fact / value / semantic / episodic / procedural / relationship / expression_style / goal_habit`；
+  - `stability`：`stable / phase / situational`；`confidence`：0–100；
+  - `evidence_span`：必须逐字摘录原文，保存到 `avatar_memory_evidence`；
+  - `supersedesMemoryId`：只在明确矛盾时指向旧记忆；
+  - `structured_data`、`privacy_level`、`people`、`tags`、`importance`；
+  - 同时输出候选洞察 `insights[]` 与实体 `entities[]`，但候选洞察不会直接覆盖稳定人格。
+- **去重 / 冲突 / 版本**：低风险且一致的内容合并证据；推断性内容进入 `candidate / pending_confirmation`；新旧矛盾时旧记忆只改状态为 `historical / superseded / corrected`，并写 `avatar_memory_versions`，绝不删除旧记忆，也不静默合并冲突。
+- 模型异常或 JSON 无法解析时自动兜底：原文仍写入一条记忆与证据并标记 `usedFallback`，可稍后重试。
+- 旧版碎片可通过 `POST /api/avatar/memories/migrate` 排入同一整理队列，平滑升级。
+- 知识库问答与学习打卡仍会经 `AvatarActivityRecorder` 自动写入一条碎片 + 一条记忆（同一来源+分类 30 分钟内只记一次），并补写证据与版本。
+
+**记忆状态与证据**
+
+- `avatar_memories` 新增 `memory_type / stability / confidence / lifecycle_status / valid_from / valid_to / supersedes_id / structured_data / privacy_level / last_confirmed_at / last_used_at / evidence_count`。`vector_state` 只表示向量化状态，与生命周期完全独立。
+- 每条记忆至少有一条 `avatar_memory_evidence`（原文摘录、偏移、来源哈希、发生/记录时间）；用户纠正时可以回到最初出处。
+- `GET /api/avatar/memories/{id}/evidence` 查看证据，`GET /api/avatar/memories/{id}/versions` 查看修订历史。
+
+**人格归纳：候选版本，不直接覆盖**
+
+- `AvatarInsightService` 在积累到新记忆后运行：输入多条相关记忆及证据，输出“维度、结论、置信度、适用范围、支持证据”。
+- 与现有洞察一致且置信度 ≥75、证据 ≥2 条时，才更新 `avatar_insights` 当前快照；否则只写 `avatar_insight_versions` 候选。
+- `GET /api/avatar/insights/candidates` 查看候选，`POST /api/avatar/insights/candidates/{id}/confirm` 由用户确认后升级为稳定人格。
+
+**向量化**
+
+- `AvatarMemoryIndexer` 复用知识库已注册的默认向量模型（`EmbeddingSpecService.GetDefaultAsync`），只写 `avatar_memory_vectors`，与知识库索引完全隔离。
+- 每条记忆把 `title + summary + content`（截断 4000 字符）生成向量；记录 `embedding_spec_id`、`embedding_fingerprint`、`dimensions`，检索时按指纹过滤。
+- 记忆先入库、后向量化：向量模型不可用时记忆保持 `pending`（词面检索仍可用），前端提供“补向量”和“全部重向量化”。
+
+**问答：先理解问题，再混合召回**
+
+- 会话与消息落在 `avatar_chat_sessions` / `avatar_chat_messages`；`POST /api/avatar/chat` 返回 `chatMessageId`，供反馈绑定。
+- `AvatarQueryClassifier` 规则优先地把问题分为：自我认知 / 历史原因 / 未来选择 / 关系态度 / 表达模仿 / 事实查询，并识别实体与时间意图（当前 / 历史 / 变化）。
+- `AvatarMemoryRetriever` 多路召回并重排：
+  - 结构化过滤（生命周期、类型、实体、时间、隐私）；
+  - 中文二元组词面检索；
+  - `avatar_memory_vectors` 语义检索（按指纹过滤）；
+  - 表达风格样本与决策模式分别召回；
+  - 综合语义、词面、类型、实体、重要度、置信度、时间、反馈历史与冲突惩罚。
+- 矛盾观点默认只展示当前有效状态；只有问“以前为什么/后来怎么变”时才召回历史与已被取代的记忆。
+- `AvatarPersonaChatService` 提示词分为 A 稳定人格 / B 当前有效记忆 / C 情境与历史 / D 表达风格样本 / E 决策模式 / F 当前任务；系统提示强制第一人称“我”、禁止编造、禁止“作为 AI/根据资料”、150–400 字，记忆不足时明确说“这点我记得不够清楚”。
+- 回答随引用记忆返回（`memoryId / kind / title / score`），前端在气泡下展示“记忆类型 · 标题”。没有任何记忆和洞察时接口返回 400 并提示先投喂。
+
+**反馈闭环**
+
+- `POST /api/avatar/feedback`：
+  - `like`：弱正向信号，只用于后续重排与风格加权，不直接改人格；
+  - `unlike`：必须带原因（记错事实 / 判断不符 / 过度推断 / 语气不对 / 关系错误 / 时间错误 / 漏掉记忆）；
+  - `correction` / `supplement`：创建新的 `avatar_ingestions` 任务，重新走记忆提取；旧记忆标为 `corrected / superseded` 并写版本。
+- 模型自己生成的回答永远不会被当作关于用户的新事实。
+
+**固定评测集与回归**
+
+- `avatar_eval_cases` 保存问题、认可答案、必须引用/禁止引用的记忆、评分维度与公开/隐藏集；推荐 30–50 题，覆盖价值观、重要经历、人际关系、决策、表达、拒绝、冲突、记忆不足。
+- `POST /api/avatar/eval/run` 逐题调用分身回答并计算：通过率、必须引用记忆命中率（引用准确率）、禁止引用（事实错误）次数、表达评分、记忆不足题是否承认不知道；结果写入 `avatar_eval_runs` / `avatar_eval_results`。
+- 每次调整整理器、检索或提示词后跑一遍，以实际表现而非投喂数量衡量成熟度。
+
+**完备度**
+
+`AvatarService.EvaluateReadiness(profile, memoryCount, insightCount, chatCount)`：记忆 ≥10 条得 45 分（否则每条 4 分），洞察 ≥5 条得 25 分（否则每条 5 分），基础画像已配置得 20 分，至少 1 个会话得 10 分；同时返回缺失项提示，分数只用于提示“还缺什么”。
+
+**工具与 MCP**
+
+- 聊天模型工具（`AvatarToolSource`，分类 `avatar`）：`avatar_get_persona`、`avatar_feed`（创建异步整理任务）、`avatar_search_memories`、`avatar_digest`、`avatar_ask_as_me`。
+- MCP 工具（`AvatarMcpTools`）：`avatar_get_persona`、`avatar_feed`、`avatar_search_memories`、`avatar_digest`、`avatar_ask_as_me`、`avatar_list_fragments`。
+
+**保留能力**：`avatar_profile`（基础画像）、`avatar_experiences`、`avatar_behaviors`、`avatar_relationships`、`avatar_simulations`（未来轨迹推演，`POST /api/avatar/simulations`）仍在后端可用，前端不再作为独立页签展示。
+
+分身数据只保存在本机 PostgreSQL；使用云端聊天模型/向量模型时，投喂文本摘录、记忆与人格洞察会发送给所配置的服务商。若希望个人隐私只留在本地，需要同时把聊天推理、记忆提取与向量生成都切到本地实现，并审查备份、日志与工具访问权限。
+
+
+## 5. 数据存储
+
+### 5.1 数据库表
+
+| 表 | 用途 | 关系/说明 |
+| --- | --- | --- |
+| `kb_knowledge_bases` | 知识库元数据。 | 含固定默认知识库和用户创建的知识库。 |
+| `kb_topics` | 知识库下的专题名称、颜色和时间。 | 关联知识库；资料通过 `kb_documents.topic_id` 归属专题。 |
+| `kb_documents` | 资料文件名、存储路径、状态、进度、摘要、错误信息、文件哈希、内容哈希和当前内容版本。 | 关联知识库；可关联专题，删除专题时置空。 |
+| `kb_notes` | 学习笔记标题、正文、分类、颜色、标签、置顶状态和来源资料。 | 关联知识库；`tags` 以 JSON 数组文本保存。 |
+| `kb_chunks` | 资料切片文本、序号、内容版本和内容哈希；`embedding` 仅保留为历史兼容列。 | 关联资料；`(document_id, document_version, chunk_index)` 唯一。 |
+| `kb_document_versions` | 资料每次内容变化产生的分块版本、内容哈希和切片数。 | 关联资料；`(document_id, version)` 唯一。 |
+| `kb_embedding_specs` | 向量模型规格、维度、序列长度、revision 和唯一指纹。 | 指纹相同的模型视为同一向量空间。 |
+| `kb_model_bindings` | 知识库绑定的向量规格与摘要模型设置。 | 每个知识库一行；为空时回退到全局配置。 |
+| `kb_indexes` | 索引实例、所属规格、状态、构建进度、检查点、质量分和回滚时间。 | 状态 `Building/Ready/Active/Retired/Failed`。 |
+| `kb_active_indexes` | 每个知识库当前活动索引及指纹、维度。 | 检索路由单行原子读取；切换索引只更新此表。 |
+| `kb_index_vectors` | 按索引隔离的切片向量。 | 关联索引与切片；`(index_id, chunk_id)` 唯一。 |
+| `kb_outbox_events` | 事务性变更事件、幂等键和发生时间。 | 索引检查点按事件 ID 顺序重放。 |
+| `kb_document_summaries` | 按内容哈希与摘要模型指纹缓存的摘要。 | 与向量索引生命周期完全解耦。 |
+| `kb_upload_sessions` | 断点续传会话、暂存路径和已上传字节数。 | 关联知识库，可关联完成后的资料记录。 |
+| `knowledge_chat_sessions` | 知识库问答会话标题与时间。 | 关联知识库，删除知识库时级联删除会话。 |
+| `knowledge_chat_messages` | 问题和回答文本、角色与时间。 | 关联问答会话，删除会话时级联删除消息。 |
+| `companion_profiles` | AI 伴侣档案、目标发言者、平台及风格描述。 | 档案独立于知识库问答。 |
+| `companion_messages` | 导入的原始聊天记录。 | 关联档案。 |
+| `companion_sessions` | 伴侣对话会话。 | 关联档案。 |
+| `companion_session_messages` | 伴侣会话中的用户和 AI 消息。 | 关联会话。 |
+| `app_settings` | 前端设置页保存的 JSON 配置。 | 单机密钥存储，接口只返回掩码提示。 |
+| `study_checkins` | 每日学习打卡日期、时长和备注。 | 日期唯一；用于计算连续学习与本周节奏。 |
+| `avatar_fragments` | 分身原始投喂底稿：类型、标题、正文、发生时间、来源、标签、是否已整理。 | 与知识库表完全隔离；`tags` 以 JSON 数组文本保存。 |
+| `avatar_memories` | 规范化记忆：类型、标题、归纳、原话细节、时间、人物、标签、情绪、重要度、置信度、生命周期、有效期、版本取代关系、结构化数据、隐私级别与向量状态。 | 分身的检索单位；`fragment_id` 关联底稿，删除记忆不删底稿；旧记忆只改状态不删除。 |
+| `avatar_memory_vectors` | 记忆向量：`memory_id` 主键、规格 id、指纹、维度与 pgvector 列。 | 只被分身检索使用；读取时必须投影，禁止整行读取 vector 列。 |
+| `avatar_feed_entries` | 聊天式投喂流水：用户原文与 AI 整理回执。 | `bigint` 自增主键；`payload` 保存本次新增记忆的摘要 JSON。 |
+| `avatar_insights` | 人格洞察：维度、标题、结论、置信度、证据。 | `(dimension, title)` 唯一，重复整理覆盖更新。 |
+| `avatar_chat_sessions` | 第一人称问答会话标题与时间。 | 删除会话时级联删除消息。 |
+| `avatar_chat_messages` | 会话消息角色、内容与引用记忆。 | `bigint` 自增主键；`citations` 以 JSON 文本保存。 |
+| `avatar_profile` | 分身单例画像：定位、性格、价值观、优势/短板、技能、资源、约束、目标与风险偏好。 | 整个部署只有一行；`values` 列名为 `values_text`。 |
+| `avatar_experiences` | 用户投喂的经历：时间、分类、结果、情绪、影响强度与标签。 | `tags` 以 JSON 数组文本保存。 |
+| `avatar_behaviors` | 日常行为流：分类、描述、时长、情绪、来源（manual/chat/tool/import）。 | 自动记录与手动记录共用。 |
+| `avatar_relationships` | 关键关系人：角色、亲近度、影响力与说明。 | 推演时作为支持/阻力输入。 |
+| `avatar_simulations` | 轨迹推演：情景、跨度、状态、成功率、置信度、结构化因素/里程碑/风险/行动与完整报告。 | JSON 字段以 `text` 保存；失败也落库便于重试。 |
+| `avatar_ingestions` | 异步投喂任务：来源、状态、阶段、错误、统计、幂等键、片段与待取代记忆。 | 由 `AvatarIngestionWorker` 消费；失败可重试。 |
+| `avatar_memory_evidence` | 记忆到原文的证据：摘录、字符偏移、页码/消息 id、来源哈希、发生与记录时间。 | 每条记忆至少一条；纠正时可回溯最初出处。 |
+| `avatar_memory_versions` | 记忆修订历史：版本号、快照 JSON、变更类型、取代关系与原因。 | 创建/合并/被取代/纠正/确认都留痕。 |
+| `avatar_insight_versions` | 人格洞察候选与历史版本：维度、结论、置信度、状态、范围、证据记忆 id。 | 候选只有被确认或证据足够才升级到 `avatar_insights`。 |
+| `avatar_feedback` | 回答反馈：聊天消息、引用记忆、类型、原因、评论、纠正文本与关联投喂任务。 | `like` 仅弱信号；`correction/supplement` 创建新投喂任务。 |
+| `avatar_entities` | 人物/组织/项目实体：类型、名称、别名与元数据。 | 与记忆多对多关联，用于按“对谁/关于什么”聚拢记忆。 |
+| `avatar_memory_entities` | 记忆与实体的关联及角色。 | `(memory_id, entity_id)` 主键。 |
+| `avatar_eval_cases` | 固定评测题：分类、问题、认可答案、必须/禁止引用的记忆、评分维度、公开/隐藏集与启用状态。 | 建议维护 30–50 题。 |
+| `avatar_eval_runs` | 一次评测运行：总数、通过数、事实错误数、引用准确率、表达评分与摘要。 | 每次调整检索/提示词后回归。 |
+| `avatar_eval_results` | 单题评测结果：回答、引用记忆、是否通过、得分与原因。 | 关联运行与评测题。 |
+
+### 5.2 初始化和迁移
+
+表结构由 SqlSugar CodeFirst 实体（`SugarTable`、`SugarColumn`、`SugarIndex`）定义，启动时按顺序调用 `CodeFirst.InitTables`；普通索引也由实体元数据维护。数据库连接串必须指向一个已存在的 PostgreSQL 数据库，API 不负责创建数据库本身。
+
+数据访问已全部改用 SqlSugar 原生 API：Store 使用 `Queryable`、`Insertable`、`Updateable`、`Deleteable`、`Storageable` 和 `SqlFunc` 完成读写与检索，事务通过 `Ado.BeginTranAsync`/`CommitTranAsync`/`RollbackTranAsync` 管理，不再手写查询或更新语句。仅 pgvector 相关能力因 SqlSugar 没有原生 API 而保留 SQL：启用 `vector` 扩展的 DDL、余弦距离运算符 `<=>` 以及 `vector` 列插入时的类型转换，这些统一封装在 `Persistence/PgVectorSql.cs`，并通过 `SqlFunc.MappingColumn`、`OrderBy` 和 `SugarColumn.InsertSql` 扩展点注入。`database/schema.sql` 与 `database/create-database.sql` 作为可选的完整建库脚本保留，运行时不加载。
+
+原始资料位于本地文件系统，数据库仅保存受控文件路径及元数据。备份需要同时覆盖 PostgreSQL 数据库和 API 的 `App_Data` 目录。
+
+## 6. 技术方案
+
+| 层次 | 技术 | 使用方式 |
+| --- | --- | --- |
+| API 运行时 | .NET 10、ASP.NET Core | Web API 宿主、依赖注入、后台服务、异常处理和 CORS。 |
+| API 风格 | Minimal API、`Microsoft.AspNetCore.OpenApi`、Scalar | 按功能路由分组；开发环境提供 OpenAPI JSON 和 Scalar 页面。 |
+| 数据访问 | SqlSugar Core、Npgsql | CodeFirst 创建表和普通索引；Store 的数据读写和检索使用 SqlSugar 原生 API；仅 pgvector 专属 SQL 通过 `PgVectorSql` 扩展点保留。 |
+| 数据库 | PostgreSQL、pgvector | 保存元数据、状态、聊天历史、文本切片及向量；余弦距离检索。 |
+| 前端 | Vue 3、TypeScript、Vite、lucide-vue-next | SPA 视图、交互状态、API 请求和图标组件。 |
+| Agent/聊天 | Microsoft Agent Framework、OpenAI SDK、OpenAI 兼容 Chat Completions | 知识库问答 Agent、摘要、图片描述、风格画像和伴侣对话。 |
+| Embedding | Microsoft.ML.OnnxRuntime、Microsoft.ML.Tokenizers、BGE-small-zh-v1.5 | API 进程内运行 WordPiece tokenizer 和 ONNX 推理；当前配置 512 维、最多 512 token，输出做均值池化和归一化。 |
+| 文档处理 | PdfPig、DocumentFormat.OpenXml | PDF 文本提取和 DOCX 正文提取。 |
+| 视频处理 | FFmpeg、Whisper.net、Whisper.net.Runtime | 音轨抽取、语音识别及可选关键帧描述。 |
+| 测试 | xUnit、Microsoft.NET.Test.Sdk | 覆盖文件存储、聊天记录解析和 Markdown 导出等单元逻辑。 |
+
+Embedding 与聊天模型采用分离配置：切换本地/云端聊天模型不会改变 Embedding 推理位置。向量模型通过 `kb_embedding_specs` 注册并由索引生命周期管理；切换模型或维度时创建阴影索引重建，完成后原子切换，不能在同一索引内混用不同模型产生的向量。摘要模型可按知识库单独绑定，切换摘要模型只影响后续摘要生成与缓存命中，不触发索引重建。
+
+## 7. API 接口概览
+
+详细路由实现分别位于 `Endpoints/HealthEndpoints.cs`、`Endpoints/KnowledgeEndpoints.cs` 和 `Endpoints/CompanionEndpoints.cs`。
+
+| 方法 | 路由 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/health` | 检查 API 与 PostgreSQL 连接。 |
+| `GET` / `POST` | `/api/knowledge-bases` | 列出/创建知识库。 |
+| `GET` / `POST` | `/api/embedding-specs` | 列出/注册向量模型规格。 |
+| `POST` | `/api/embedding-specs/import-local` | multipart 导入本地 ONNX 模型（`modelFile` + `tokenizerFile`），自动识别维度并验证推理。 |
+| `POST` | `/api/embedding-specs/register-cloud` | 注册 OpenAI 兼容向量模型，注册前调用一次 `/embeddings` 验证。 |
+| `POST` | `/api/embedding-specs/{specId}/probe` | 对指定规格做一次真实向量化探测。 |
+| `GET` / `POST` | `/api/knowledge-bases/{id}/indexes` | 列出索引/创建阴影索引。 |
+| `POST` | `/api/knowledge-bases/{id}/indexes/{indexId}/rebuild` | 排队全量重建；活动索引会自动创建阴影索引。 |
+| `POST` | `/api/knowledge-bases/{id}/indexes/{indexId}/activate` | 一致性检查后原子切换活动索引。 |
+| `POST` | `/api/knowledge-bases/{id}/indexes/{indexId}/check` | 执行一致性检查与质量评测。 |
+| `POST` | `/api/knowledge-bases/{id}/rollback` | 回滚到回滚窗口内的历史索引。 |
+| `GET` | `/api/knowledge-bases/{id}/retrieval-status` | 查看活动索引、模型与检查点状态。 |
+| `GET` | `/api/knowledge-bases/{id}/changelog?after=&limit=` | 查看 Outbox 变更事件与重放检查点。 |
+| `GET` / `PUT` | `/api/knowledge-bases/{id}/model-binding` | 读取/设置知识库的向量与摘要模型绑定。 |
+| `GET` | `/api/documents/{documentId}/summary` | 读取资料最新摘要。 |
+| `POST` | `/api/documents/{documentId}/summary/regenerate` | 使用当前摘要模型重新生成摘要。 |
+| `GET` | `/api/documents?knowledgeBaseId={id}` | 查询资料列表及处理状态。 |
+| `GET` | `/api/documents/{documentId}` | 查询资料详情。 |
+| `POST` | `/api/documents` | 普通文件上传。 |
+| `POST` / `GET` / `PUT` | `/api/uploads...` | 创建、查询和分块上传续传会话并完成归档。 |
+| `GET` | `/api/documents/{documentId}/download` | 下载原始文件（支持 Range 分段）。 |
+| `GET` | `/api/documents/{documentId}/content?offset=&length=` | 分页读取已解析原文，用于原文阅读器。 |
+| `POST` | `/api/documents/{documentId}/retry` | 重新解析 `Failed` 或 `Ready` 状态的资料。 |
+| `DELETE` | `/api/documents/{documentId}` | 删除资料及其分块，并清理本地原始文件。 |
+| `POST` | `/api/search` | 显式向量检索。 |
+| `POST` | `/api/chat` | 不创建会话的知识库问答。 |
+| `GET` / `POST` | `/api/knowledge-bases/{knowledgeBaseId}/sessions` | 列出/创建持久化问答会话。 |
+| `GET` / `POST` | `/api/knowledge-bases/{knowledgeBaseId}/sessions/{sessionId}/messages` / `.../chat` | 读取消息和在会话中继续问答。 |
+| `PUT` / `DELETE` | `/api/knowledge-bases/{knowledgeBaseId}/sessions/{sessionId}` | 重命名/删除会话。 |
+| `POST` | `/api/knowledge-bases/{knowledgeBaseId}/sessions/batch-delete` | 批量删除会话，JSON 请求体为 `{"sessionIds":[...]}`，最多 100 条。 |
+| `GET` | `/api/knowledge-bases/{knowledgeBaseId}/sessions/{sessionId}/export` | 下载 Markdown 对话记录。 |
+| `GET` / `POST` | `/api/knowledge-bases/{knowledgeBaseId}/topics` | 列出/创建专题。 |
+| `PUT` / `DELETE` | `/api/knowledge-bases/{knowledgeBaseId}/topics/{topicId}` | 重命名/删除专题（删除时资料移回未分类）。 |
+| `GET` / `POST` | `/api/knowledge-bases/{knowledgeBaseId}/notes` | 列出（可按 `query`/`category` 过滤）/创建笔记。 |
+| `GET` / `PUT` / `DELETE` | `/api/knowledge-bases/{knowledgeBaseId}/notes/{noteId}` | 读取/更新/删除笔记。 |
+| `POST` | `/api/knowledge-bases/{knowledgeBaseId}/notes/{noteId}/pin` | 设置或取消笔记置顶。 |
+| `PUT` / `GET` | `/api/documents/{documentId}/topic` | 设置/读取资料所属专题。 |
+| `GET` / `PUT` | `/api/settings` | 读取/保存模型与学习偏好设置；密钥只返回掩码提示。 |
+| `GET` / `POST` | `/api/study/checkins` | 读取学习打卡统计/记录今日打卡。 |
+| `DELETE` | `/api/study/checkins/today` | 撤销今日打卡。 |
+| `GET` / `PUT` | `/api/avatar` / `/api/avatar/profile` | 读取分身总览（完备度、记忆/洞察/会话计数、最近记忆与投喂流水）与保存基础画像。 |
+| `POST` / `GET` | `/api/avatar/feed` | 创建异步投喂任务（返回 `ingestionId`）/ 读取投喂流水。 |
+| `POST` | `/api/avatar/feed/upload` | 导入 `.txt/.md/.json/.log/.csv`（≤10 MB），按 `source_hash` 幂等排入整理队列。 |
+| `DELETE` | `/api/avatar/feed` | 清空投喂流水（记忆与洞察保留）。 |
+| `GET` | `/api/avatar/memories` | 列出当前有效记忆；带 `query` 时走问题分类 + 多路混合检索。 |
+| `DELETE` | `/api/avatar/memories/{id}` | 删除单条记忆（同时删除其向量）。 |
+| `POST` | `/api/avatar/memories/reindex` | 重新向量化：`{ "all": false }` 只补待处理，`true` 全部重跑。 |
+| `POST` | `/api/avatar/memories/migrate` | 把旧版未整理的碎片排入同一异步整理队列。 |
+| `GET` | `/api/avatar/memories/{id}/evidence` | 查看某条记忆的原文证据。 |
+| `GET` | `/api/avatar/memories/{id}/versions` | 查看某条记忆的修订历史。 |
+| `GET` | `/api/avatar/ingestions` / `/api/avatar/ingestions/{id}` | 查看投喂任务列表/单任务状态（`queued/running/completed/partial/failed`）。 |
+| `POST` | `/api/avatar/ingestions/{id}/retry` | 重试失败或部分完成的投喂任务。 |
+| `POST` / `GET` | `/api/avatar/feedback` | 提交/列出回答反馈（`like/unlike/correction/supplement`）。 |
+| `GET` | `/api/avatar/insights/candidates` | 列出待确认的人格候选版本。 |
+| `POST` | `/api/avatar/insights/candidates/{id}/confirm` | 确认候选，升级为稳定人格快照。 |
+| `GET` / `POST` | `/api/avatar/eval/cases` | 列出/新增固定评测题；`DELETE /api/avatar/eval/cases/{id}` 删除。 |
+| `POST` | `/api/avatar/eval/run` | 运行回归评测（`{ includeHidden, limit }`）。 |
+| `GET` | `/api/avatar/eval/runs` / `/api/avatar/eval/runs/{id}` | 查看评测批次与逐题结果。 |
+| `GET` / `POST` | `/api/avatar/fragments` | 兼容旧版：列出/投喂原始碎片。 |
+| `POST` | `/api/avatar/fragments/bulk` | 兼容旧版：批量投喂分段文本。 |
+| `POST` | `/api/avatar/fragments/upload` | 兼容旧版：上传文件并按段落切成多段碎片。 |
+| `DELETE` | `/api/avatar/fragments/{id}` | 删除单条原始碎片。 |
+| `GET` / `DELETE` | `/api/avatar/insights` | 列出或清空人格洞察（清空保留记忆）。 |
+| `POST` | `/api/avatar/digest` | 兼容旧版：分析未整理碎片，产出/更新人格洞察。 |
+| `GET` / `POST` | `/api/avatar/chat/sessions` | 列出/新建第一人称问答会话；`DELETE /api/avatar/chat/sessions/{id}` 删除会话。 |
+| `GET` | `/api/avatar/chat/sessions/{id}/messages` | 读取会话消息与引用片段。 |
+| `POST` | `/api/avatar/chat` | 以“我”的身份回答（`{ sessionId, message }`，`sessionId` 为空时自动建会话）。 |
+| `GET` / `POST` | `/api/avatar/experiences` | 保留：列出/投喂经历；`DELETE /api/avatar/experiences/{id}` 删除。 |
+| `GET` / `POST` | `/api/avatar/behaviors` | 保留：列出（`days` 默认 30）/记录行为；`DELETE /api/avatar/behaviors/{id}` 删除。 |
+| `GET` / `POST` | `/api/avatar/relationships` | 保留：列出/新增关系人；`PUT`、`DELETE /api/avatar/relationships/{id}` 修改与删除。 |
+| `GET` / `POST` | `/api/avatar/simulations` | 保留：列出/发起未来轨迹推演；`GET`、`DELETE /api/avatar/simulations/{id}` 查看与删除。 |
+| `/api/companions/*` | — | 导入历史、查询/删除档案、生成画像、创建会话、读取消息和发送伴侣对话。 |
+
+知识库问答会话接口的路径均包含 `knowledgeBaseId`，后端据此校验会话归属，避免通过其他知识库 ID 操作会话。
+
+## 8. 配置与启动
+
+### 8.1 必要配置
+
+| 配置项 | 用途 | 当前默认/要求 |
+| --- | --- | --- |
+| `ConnectionStrings:KnowledgeBase` | PostgreSQL 连接串。 | 可留空：留空时自动启动 `ExternalTools/pgSQL/pg0-windows-x86_64.exe`（内置 PostgreSQL 18 + pgvector），并自动执行 `CREATE EXTENSION IF NOT EXISTS vector`。填写则优先使用外部数据库。 |
+| `PortablePostgres:Enabled` | 是否启用便携 PostgreSQL。 | 默认 `true`。 |
+| `PortablePostgres:RespectExternalConnectionString` | 有外部连接串时是否跳过 pg0。 | 默认 `true`，便于开发机继续使用已有 PostgreSQL。 |
+| `PortablePostgres:Port` | pg0 监听端口。 | 默认 `55432`；端口占用时自动向后寻找可用端口。 |
+| `PortablePostgres:DataDirectory` | pg0 数据目录。 | 留空时使用 `%LOCALAPPDATA%\MyFirstMafAgent\pgsql\{InstanceName}`；该路径必须是纯 ASCII。 |
+| `PortablePostgres:CacheExecutableInLocalAppData` | 安装路径含中文时是否把 pg0 缓存到纯英文目录。 | 默认 `true`，规避 pg0 在非 ASCII 路径下解压失败（`os error 5`）。 |
+| `Desktop:OpenBrowser` | 控制台版启动后是否自动打开浏览器。 | 默认 `true`；开发环境默认不打开。 |
+| `Llm:UseCloudApi` | 选择 `Llm:Online` 或 `Llm:Local` 配置。 | `true` 使用在线配置，`false` 使用本地配置。在线密钥不要提交到仓库。 |
+| `Embedding:ModelDirectory` | 本地 ONNX 模型与 tokenizer 目录。 | 默认位于 `ExternalTools/Embedding/bge-small-zh-v1.5`，目录应包含 `model.onnx` 与 `tokenizer.json`。 |
+| `Embedding:ModelRootPath` | 设置页导入的本地向量模型存放目录。 | 默认 `App_Data/models/embedding`，导入的模型会自动识别维度。 |
+| `Embedding:MaxModelFileSizeBytes` | 单个本地模型文件上限。 | 默认 1 GiB；同时决定 API 请求体上限。 |
+| `Embedding:DefaultSpecName` | 默认向量规格名称。 | 设置页保存的默认规格优先于该配置。 |
+| `Indexing:RollbackWindowMinutes` | 旧索引可回滚的时间窗口。 | 默认 60 分钟，超时后由后台清理。 |
+| `Storage:RootPath` | 原始资料和分块暂存文件目录。 | 默认 `App_Data/uploads`。 |
+| `Storage:MaxFileSizeBytes` | 普通文件上限。 | 默认 50 MiB。 |
+| `Storage:MaxVideoFileSizeBytes` | 视频文件上限。 | 默认 5 GiB。 |
+| `Storage:UploadChunkSizeBytes` | 单个上传分块上限/默认分块大小。 | 默认 16 MiB。 |
+| `Media:FfmpegPath` | FFmpeg 可执行文件路径。 | 默认 `ExternalTools/ffmpeg/ffmpeg.exe`。 |
+| `Media:WhisperModel` / `Media:WhisperModelPath` | Whisper 模型类型和缓存路径。 | 默认 Base；模型缺失时首次转写会尝试下载。 |
+| `VITE_API_BASE_URL` | 前端 API 根地址。 | 未设置时使用同源（空字符串）；Vite 开发服务器通过 `/api` 代理转发到 `http://127.0.0.1:5056`。 |
+
+### 8.2 本地启动
+
+默认无需准备数据库：`ConnectionStrings:KnowledgeBase` 留空时，启动器会自动拉起 `ExternalTools/pgSQL/pg0-windows-x86_64.exe`，创建 `myfirstmafagent` 数据库并启用 pgvector。若要使用已有 PostgreSQL，把连接串配置到用户机密或环境变量即可（默认会跳过 pg0）：
+
+```powershell
+$env:ConnectionStrings__KnowledgeBase = "Host=localhost;Port=5432;Database=knowledge_base;Username=postgres;Password=<password>"
+dotnet run --project MyFirstMafAgent.Api/MyFirstMafAgent.Api.csproj
+```
+
+API 默认地址为 `http://127.0.0.1:5056`。API 启动后检查 `GET /api/health`。前端另开终端运行：
+
+```powershell
+cd FrontEnd/myfist-agent
+npm install
+npm run dev
+```
+
+前端默认地址为 `http://localhost:5173`，Vite 会把 `/api`、`/mcp` 代理到 `http://127.0.0.1:5056`，因此前端代码统一使用同源相对路径，不需要再配置 `VITE_API_BASE_URL`。
+
+便携数据库的运行文件：
+
+- 数据目录：`%LOCALAPPDATA%\MyFirstMafAgentData\pgsql\myfirstmafagent`
+- pg0 的 PostgreSQL 安装目录：`%USERPROFILE%\.pg0\installation`（pg0 自身约定）
+- 日志：`%LOCALAPPDATA%\MyFirstMafAgentData\logs`
+
+### 8.3 打包为安装包 / 桌面版 / 控制台便携版
+
+前端已改为同源请求 + 相对资源路径（`base: './'`），可直接由内嵌 Kestrel 托管。项目提供三种分发形态：
+
+| 形态 | 项目 | 说明 |
+| --- | --- | --- |
+| 安装包 | `MyFirstMafAgent.Desktop` + Velopack | `MyFirstMafAgent-win-Setup.exe`，免管理员权限安装，带桌面/开始菜单快捷方式 |
+| 桌面版文件夹 | `MyFirstMafAgent.Desktop` | Photino 原生窗口 + 内嵌 Kestrel + WebView2，绿色免安装 |
+| 控制台版 | `MyFirstMafAgent.Api` | 启动本地 Kestrel，自动用默认浏览器打开界面 |
+
+一键发布（构建前端 → `dotnet publish` → 复制 `wwwroot` → 校验 pg0/模型）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/Publish-Portable.ps1 -Target all
+```
+
+生成安装包（Velopack）：
+
+```powershell
+dotnet tool install -g vpk   # 只需一次
+powershell -ExecutionPolicy Bypass -File scripts/Publish-Portable.ps1 -Target desktop -SkipFrontend -Velopack -Version 1.0.0
+```
+
+产物：
+
+| 文件 | 用途 |
+| --- | --- |
+| `publish/releases/MyFirstMafAgent-win-Setup.exe` | 安装包（用户双击安装） |
+| `publish/releases/MyFirstMafAgent-win-Portable.zip` | 便携 zip |
+| `publish/releases/MyFirstMafAgent-1.0.0-full.nupkg` | 完整更新包（增量更新基线） |
+| `publish/releases/RELEASES`、`releases.win.json` | 更新“渠道”元数据（自动更新用） |
+
+安装行为（已验证）：
+
+- 安装目录：`%LOCALAPPDATA%\MyFirstMafAgent`（`current/` 放程序，`packages/` 放包），无需管理员权限。
+- 用户数据：`%LOCALAPPDATA%\MyFirstMafAgentData`（`data/` 上传与工作区、`logs/`、`pgsql/`）。
+- 卸载/升级会先执行 `OnBeforeUninstallFastCallback` / `OnBeforeUpdateFastCallback` 停止便携数据库，再替换或删除安装目录；**用户数据保留**，重装后可直接继续使用。
+- 快捷方式：桌面 + 开始菜单根目录。
+
+发布要点：
+
+- 静态文件采用外置 `wwwroot`（发布脚本写入），不使用嵌入资源；不启用 AOT，因此不受嵌入文件提供程序限制。
+- 应用图标统一放在仓库根 `assets/app.ico`（ICO 格式，含 16/32/48/64/128/256 六种尺寸）：两个 `csproj` 通过 `<ApplicationIcon>..\assets\app.ico</ApplicationIcon>` 写入 exe 资源；桌面版另把该文件复制到输出目录，由 `PhotinoWindow.SetIconFile` 设置标题栏/任务栏图标；`vpk pack --icon` 用它生成安装程序与快捷方式图标；前端 `public/favicon.ico` 是同一文件的副本。**替换图标：覆盖 `assets/app.ico` 并同步 `FrontEnd/myfist-agent/public/favicon.ico`，再重新发布即可。**
+- 桌面版窗口加载 `http://127.0.0.1:<系统分配端口>/`，API 与窗口在同一进程。窗口必须在 **STA** 线程创建：`Main` 全程同步（`[STAThread]` + `GetAwaiter().GetResult()`），一旦写成 `async`/`await`，续体会落到线程池（MTA），WebView2 初始化会静默失败，表现为窗口空白、服务端日志里没有任何来自浏览器的请求。
+- pg0 随应用启动，退出时通过 `pg0 stop` 优雅停止；异常退出后下次启动会复用已运行实例。
+- pg0 始终从 `%LOCALAPPDATA%\MyFirstMafAgentData\tools` 运行（首次启动复制一次），工作目录设在 `...\pgsql` 下：这样 `postgres.exe` 子进程不会锁住安装目录，升级/覆盖安装才不会报“拒绝访问”。
+- **文件夹版不要放在桌面、文档或下载目录**：Windows「受控文件夹访问」会限制从这些位置启动的未签名程序写入用户目录，导致便携数据库无法初始化（表现为 `Access is denied` / `os error 5`）。推荐 `D:\Apps\MyFirstMafAgent`；使用安装包则不受此限制。
+- 应用目录可以包含中文：启动器会把 pg0 复制到纯 ASCII 的 `%LOCALAPPDATA%\MyFirstMafAgentData\tools` 后运行。
+- 文件夹版应用目录需可写（会在其下创建 `App_Data`），不要放在 `Program Files`。
+- 桌面版需要 WebView2 Runtime（Windows 10/11 通常已自带）。
+- 安装包未签名，Windows SmartScreen 首次运行会提示“未知发布者”；分发前建议配置代码签名（Velopack 支持 `--signParams`）。
+
+## 9. 当前边界与运维注意事项
+
+- 当前无用户认证和授权，不能将默认配置视为多用户或公网部署方案；对外开放前需补充认证、授权、请求限流、HTTPS 和敏感配置管理。
+- 原始文件与数据库分开保存，数据库备份不包含上传文件。恢复时需要同时恢复数据库和 `App_Data`，并确保资料记录中的存储路径仍有效。
+- 选择在线聊天模型时，问题、检索片段、提示词及伴侣对话会发送给所配置的服务商；选择本地聊天端点时可避免此类云端调用。Embedding 始终在 API 进程本地运行。
+- 图片描述要求聊天模型支持视觉输入。视频转写依赖 FFmpeg；Whisper 模型首次使用需要网络下载，离线环境需提前准备模型。视频关键帧分析默认关闭，启用后还需视觉模型。
+- AI 伴侣仅支持可读 UTF-8 JSON/TXT，未实现微信/QQ 私有格式解密或官方格式适配。伴侣历史检索基于关键词，不是向量检索。
+- 学习笔记已持久化；当前知识库检索以 pgvector 相似度为主，未实现全文与向量混合检索或重排。
+- 问答历史导出为 Markdown；持久化消息目前不包含独立的引用元数据，导出内容以会话标题、时间、角色和消息文本为主。
+- 分身是模仿而非本人：记忆不足时问答接口直接返回 400 提示先投喂，不会硬编回答；记忆、向量、洞察与会话均与知识库表完全隔离，不参与知识库检索，也不会被当作事实引用。若使用云端聊天模型或云端向量模型，投喂文本、记忆与人格洞察会发送给服务商；这些数据不属于医疗、法律或投资建议。
+- 便携数据库首次启动会把 PostgreSQL 18 与 pgvector 释放到 `%USERPROFILE%\.pg0`，数据写入 `%LOCALAPPDATA%\MyFirstMafAgentData\pgsql`，首次解压通常需要 10~60 秒。
+- 便携数据库对路径有硬约束（pg0 自身限制）：**可执行文件路径与数据目录必须是纯 ASCII**。启动器统一把 pg0 复制到 `%LOCALAPPDATA%\MyFirstMafAgentData\tools`，数据目录固定在 `%LOCALAPPDATA%` 下，因此中文安装目录可用；若这些都不可写（例如文件夹版放在桌面），请改用安装包、移出受保护目录或在安全软件中放行。
+- 桌面版依赖 WebView2 Runtime；无运行时的精简版 Windows 需先安装。桌面版的启动诊断写入 `%LOCALAPPDATA%\MyFirstMafAgentData\logs\desktop-boot.log`（每次启动覆盖）与 `desktop-crash.log`，启动失败时同时弹出提示框。排查“窗口空白”时先看 `desktop-boot.log` 的 `apartment=` 是否为 `STA`，再看 Kestrel 请求日志里有没有来自 WebView 的 `GET /` 与 `/assets/*`。
+- 安装包未做代码签名，SmartScreen 会提示未知发布者；正式分发前建议配置签名证书。
+
+## 10. 测试与验证入口
+
+后端测试项目为 `MyFirstMafAgent.Api.Tests`，当前覆盖本地文件安全存储、续传、聊天记录解析、问答 Markdown 导出格式、Agent 文件沙箱与授权目录、分身领域规则（画像校验、经历/行为归一化、推演状态机与完备度）、分身记忆卡的构造/截断与自由类型归一化、整理器 JSON 解析与兜底、文本切段、中文二元组检索排序与洞察 JSON 解析等逻辑。运行命令：
+
+```powershell
+dotnet test MyFirstMafAgent.Api.Tests/MyFirstMafAgent.Api.Tests.csproj
+```
+
+前端类型检查和生产构建由同一命令执行：
+
+```powershell
+cd FrontEnd/myfist-agent
+npm run build
+```
+
+当前测试以单元测试为主；数据库表创建、PostgreSQL 迁移及 pgvector 查询仍需在具备 PostgreSQL/pgvector 的环境中进行集成验证。

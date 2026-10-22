@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>MyFirstMafAgent.Desktop</RootNamespace>
+    <AssemblyName>MyFirstMafAgent.Desktop</AssemblyName>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <!-- exe / 任务栏 / 快捷方式使用的图标（共享 assets 目录） -->
+    <ApplicationIcon>..\assets\app.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Photino.NET" Version="4.0.16" />
+    <PackageReference Include="Velopack" Version="1.2.161" />
+    <ProjectReference Include="..\MyFirstMafAgent.Api\MyFirstMafAgent.Api.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 桌面版的内容根是 exe 所在目录：把前端产物复制过去，dotnet run 与 publish 都能直接加载。 -->
+    <Content Include="..\MyFirstMafAgent.Api\wwwroot\**\*" Link="wwwroot\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <!-- PhotinoWindow.SetIconFile 只能接受文件路径，因此再放一份到输出目录。 -->
+    <Content Include="..\assets\app.ico" Link="app.ico" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

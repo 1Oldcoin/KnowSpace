@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="../../../../AppData/Local/Temp/sqlprobe/sqlprobe.csproj" />
+  <Project Path="MyFirstMafAgent.Api.Tests/MyFirstMafAgent.Api.Tests.csproj" />
+  <Project Path="MyFirstMafAgent.Api/MyFirstMafAgent.Api.csproj" />
+  <Project Path="MyFirstMafAgent.Desktop/MyFirstMafAgent.Desktop.csproj" />
+  <Project Path="MyFirstMafAgent/MyFirstMafAgent.csproj" />
+</Solution>

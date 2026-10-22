@@ -1,0 +1,134 @@
+# ============================================================================
+# MyFirstMafAgent .gitignore
+# 原则：只提交源码、脚本和配置模板；忽略构建产物、运行时数据、
+#       第三方依赖/二进制、本地敏感配置和临时文件。
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# 1. .NET / Visual Studio 构建产物
+# ---------------------------------------------------------------------------
+[Bb]in/
+[Oo]bj/
+.vs/
+artifacts/
+publish/
+project.lock.json
+*.pdb
+*.nupkg
+*.snupkg
+*.tsbuildinfo
+*.cache
+
+# IDE 用户文件
+*.user
+*.suo
+*.userosscache
+*.userprefs
+*.sln.docstates
+*.DotSettings.user
+*.VC.db
+*.VC.opendb
+_ReSharper*/
+*.ReSharper
+
+# VS Code（保留团队共享配置）
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/settings.json
+
+# 测试输出与覆盖率
+TestResults/
+.testrunner/
+.finaltest/
+*.trx
+*.coverage
+coverage*.xml
+coverage*.json
+coverage*.info
+
+# ---------------------------------------------------------------------------
+# 2. 前端（Vue 3 + Vite）
+# ---------------------------------------------------------------------------
+node_modules/
+dist/
+dist-ssr/
+.vite/
+.vitest/
+coverage/
+*.local
+.eslintcache
+*.timestamp-*-*.mjs
+
+# 前端构建结果（发布时复制到 Kestrel 静态目录，属于生成物）
+MyFirstMafAgent.Api/wwwroot/
+
+# ---------------------------------------------------------------------------
+# 3. 运行时数据 / 本地数据库
+#    根目录 App_Data 与 MyFirstMafAgent.Api/App_Data 都会被忽略：
+#    pg0home（PostgreSQL 数据目录）、uploads、agent-workspace 等
+# ---------------------------------------------------------------------------
+App_Data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.bak
+*.dump
+*.pgdump
+
+# ---------------------------------------------------------------------------
+# 4. 第三方二进制与模型（体积大，不入库）
+#    ExternalTools 内含 pg0 / ffmpeg / bge 嵌入模型；.finaltest 为发布快照
+# ---------------------------------------------------------------------------
+MyFirstMafAgent.Api/ExternalTools/
+*.onnx
+*.onnx.data
+*.gguf
+ggml-*.bin
+dotnet/
+
+# ---------------------------------------------------------------------------
+# 5. 本地配置与敏感信息
+#    建议把密钥放在 appsettings.Local.json 或 dotnet user-secrets 中
+# ---------------------------------------------------------------------------
+appsettings.Local.json
+appsettings.*.local.json
+secrets.json
+.env
+.env.*
+!.env.example
+*.pfx
+*.snk
+*.pem
+*.key
+*.crt
+*.cer
+
+# ---------------------------------------------------------------------------
+# 6. 日志、临时文件与调试输出
+# ---------------------------------------------------------------------------
+logs/
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+~$*
+*.orig
+*.rej
+/probe-out*.txt
+/rowdump.txt
+
+# ---------------------------------------------------------------------------
+# 7. 编辑器 / 操作系统杂项
+# ---------------------------------------------------------------------------
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+desktop.ini
+._*
