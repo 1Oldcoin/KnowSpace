@@ -69,12 +69,17 @@ internal static class PgVectorSql
     public static string BuildCosineSimilarity(string distanceExpression) =>
         $"(1 - ({distanceExpression}))::double precision";
 
-    /// <summary>构建向量检索 SQL。切片向量字面量由本地模型生成，不包含用户输入。</summary>
+    /// <summary>
+    /// 构建向量检索 SQL。切片向量字面量由本地模型生成，不包含用户输入。
+    /// 同时返回 chunk_id/chunk_index，供问答引用元数据回溯原始切片。
+    /// </summary>
     public static string BuildSearchSql(string vectorLiteral) => $"""
         SELECT d.id            AS "DocumentId",
                d.file_name     AS "FileName",
                c.content       AS "Content",
-               (1 - (c.embedding <=> '{vectorLiteral}'::vector))::double precision AS "Similarity"
+               (1 - (c.embedding <=> '{vectorLiteral}'::vector))::double precision AS "Similarity",
+               c.id            AS "ChunkId",
+               c.chunk_index   AS "ChunkIndex"
         FROM kb_chunks AS c
         JOIN kb_documents AS d ON d.id = c.document_id
         WHERE d.status = 'Ready'
@@ -88,12 +93,14 @@ internal static class PgVectorSql
     /// <summary>抽样读取索引向量的维度，用于一致性检查（模型切换后维度不一致会被发现）。</summary>
     public const string DimensionSampleSql = "SELECT vector_dims(embedding) AS \"Value\" FROM kb_index_vectors WHERE index_id = @indexId AND embedding IS NOT NULL LIMIT 200";
 
-    /// <summary>构建索引实例的向量检索 SQL；索引之间通过 index_id 完全隔离。</summary>
+    /// <summary>构建索引实例的向量检索 SQL；索引之间通过 index_id 完全隔离。切片标识同样随结果返回。</summary>
     public static string BuildIndexSearchSql(string vectorLiteral) => $"""
         SELECT d.id            AS "DocumentId",
                d.file_name     AS "FileName",
                c.content       AS "Content",
-               (1 - (v.embedding <=> '{vectorLiteral}'::vector))::double precision AS "Similarity"
+               (1 - (v.embedding <=> '{vectorLiteral}'::vector))::double precision AS "Similarity",
+               c.id            AS "ChunkId",
+               c.chunk_index   AS "ChunkIndex"
         FROM kb_index_vectors AS v
         JOIN kb_chunks AS c ON c.id = v.chunk_id
         JOIN kb_documents AS d ON d.id = v.document_id
@@ -113,6 +120,30 @@ internal static class PgVectorSql
         FROM avatar_memory_vectors AS v
         WHERE v.embedding IS NOT NULL
           AND v.embedding_fingerprint = @fingerprint
+        ORDER BY v.embedding <=> '{vectorLiteral}'::vector
+        LIMIT @limit
+        """;
+
+    /// <summary>
+    /// AI 伴侣聊天历史的向量检索 SQL。
+    /// <para>
+    /// 加 <c>profile_id</c> 过滤与 JOIN 是刻意的：向量表本身没有 profile 列（避免宽表），
+    /// 但"检索只能命中同一份导入记录"是硬约束——否则两个人的聊天会互相串。
+    /// 同时把 <c>sender</c> 与时间一起取回，省掉一次回表。
+    /// </para>
+    /// </summary>
+    public static string BuildCompanionMessageSearchSql(string vectorLiteral) => $"""
+        SELECT m.id          AS "MessageId",
+               m.sender      AS "Sender",
+               m.content     AS "Content",
+               m.sent_at     AS "SentAt",
+               (1 - (v.embedding <=> '{vectorLiteral}'::vector))::double precision AS "Similarity"
+        FROM companion_message_vectors AS v
+        JOIN companion_messages AS m ON m.id = v.message_id
+        WHERE v.embedding IS NOT NULL
+          AND v.embedding_fingerprint = @fingerprint
+          AND m.profile_id = @profileId
+          AND m.sender = @sender
         ORDER BY v.embedding <=> '{vectorLiteral}'::vector
         LIMIT @limit
         """;

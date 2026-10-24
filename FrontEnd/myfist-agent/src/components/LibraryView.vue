@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { ArrowDownUp, BookOpenText, Check, Clock3, Copy, Download, FileText, Filter, FolderInput, Globe, Grid2X2, List, LoaderCircle, MoreHorizontal, Play, Plus, RotateCw, Search, Trash2 } from 'lucide-vue-next'
+import { ArrowDownUp, BookOpenText, Check, Clock3, Copy, Download, FileText, Filter, FolderInput, Globe, Grid2X2, List, LoaderCircle, Mic, MoreHorizontal, Play, Plus, RotateCw, Search, Trash2 } from 'lucide-vue-next'
 import type { Topic } from '../services/api'
+import { documentAssetUrl } from '../services/api'
 import type { MaterialItem } from '../types'
 import { SUPPORTED_ACCEPT } from '../fileTypes'
 
@@ -18,13 +19,15 @@ const emit = defineEmits<{
 }>()
 const viewMode = ref<'grid' | 'list'>('grid')
 const activeFilter = ref('全部资料')
-const filters = ['全部资料', '文档', '网页', '视频', '笔记']
+const filters = ['全部资料', '文档', '图片', '音频', '网页', '视频', '笔记']
 const openMenuId = ref('')
 const menuPosition = ref({ top: 0, left: 0 })
 const filteredMaterials = computed(() => props.materials.filter((item) => {
   const matchesQuery = !props.query || `${item.title} ${item.category} ${item.fileName ?? ''}`.toLowerCase().includes(props.query.toLowerCase())
   const matchesFilter = activeFilter.value === '全部资料'
-    || (activeFilter.value === '文档' && ['pdf', 'document', 'image', 'html'].includes(item.kind))
+    || (activeFilter.value === '文档' && ['pdf', 'document'].includes(item.kind))
+    || (activeFilter.value === '图片' && item.kind === 'image')
+    || (activeFilter.value === '音频' && item.kind === 'audio')
     || (activeFilter.value === '网页' && item.kind === 'html')
     || (activeFilter.value === '视频' && item.kind === 'video')
     || (activeFilter.value === '笔记' && item.kind === 'note')
@@ -120,7 +123,7 @@ onBeforeUnmount(() => {
 
   <section v-if="viewMode === 'grid'" class="library-grid">
     <article v-for="item in filteredMaterials" :key="item.id" class="material-card library-material-card">
-      <div class="material-cover" :class="`cover-${item.color}`"><div class="cover-top"><span class="file-badge" :class="`file-${item.kind}`"><FileText v-if="item.kind !== 'video' && item.kind !== 'html'" :size="17" /><Globe v-else-if="item.kind === 'html'" :size="16" /><Play v-else :size="15" /></span><button class="tiny-icon-button" aria-label="更多操作" @click.stop="toggleMenu(item.id, $event)"><MoreHorizontal :size="17" /></button></div><div class="cover-art"><span class="cover-orbit"></span><span class="cover-glyph">{{ item.kind === 'video' ? '影' : item.kind === 'html' ? '网' : categoryOf(item).slice(0, 1) }}</span></div><div class="cover-footer"><span>{{ categoryOf(item) }}</span><span>{{ item.detail }}</span></div></div>
+      <div class="material-cover" :class="`cover-${item.color}`"><div class="cover-top"><span class="file-badge" :class="`file-${item.kind}`"><Mic v-if="item.kind === 'audio'" :size="16" /><Globe v-else-if="item.kind === 'html'" :size="16" /><Play v-else-if="item.kind === 'video'" :size="15" /><FileText v-else :size="17" /></span><button class="tiny-icon-button" aria-label="更多操作" @click.stop="toggleMenu(item.id, $event)"><MoreHorizontal :size="17" /></button></div><div class="cover-art"><img v-if="item.kind === 'image' && !isPendingUpload(item)" class="cover-thumb" :src="documentAssetUrl(item.id)" :alt="item.title" loading="lazy" /><template v-else><span class="cover-orbit"></span><span class="cover-glyph">{{ item.kind === 'video' ? '影' : item.kind === 'audio' ? '声' : item.kind === 'html' ? '网' : categoryOf(item).slice(0, 1) }}</span></template></div><div class="cover-footer"><span>{{ categoryOf(item) }}</span><span>{{ item.detail }}</span></div></div>
       <div v-if="openMenuId === item.id" class="material-menu" :style="{ top: `${menuPosition.top}px`, left: `${menuPosition.left}px` }" @click.stop>
         <button v-if="!isPendingUpload(item)" @click="closeMenu(); emit('read', item)"><BookOpenText :size="14" /> 阅读原文</button>
         <button v-if="!isPendingUpload(item) && (item.status === 'ready' || item.status === 'failed')" @click="requestAction('reprocess', item)"><RotateCw :size="14" /> 重新解析</button>
@@ -135,7 +138,7 @@ onBeforeUnmount(() => {
         <button v-if="!isPendingUpload(item)" @click="requestAction('download', item)"><Download :size="14" /> 下载原文件</button>
         <button v-if="!isPendingUpload(item)" class="material-menu-danger" @click="requestAction('delete', item)"><Trash2 :size="14" /> 删除资料</button>
       </div>
-      <div class="material-card-info"><h3>{{ item.title }}</h3><div class="material-meta"><span><Clock3 :size="13" /> {{ item.updated }}</span><span v-if="item.status === 'ready'" class="status-ready"><Check :size="12" /> 已保存</span><span v-else-if="item.status === 'processing'" class="status-processing"><LoaderCircle :size="12" /> {{ item.processingStage || '排队中' }}<template v-if="item.progress"> · {{ item.progress }}%</template></span><span v-else-if="item.status === 'failed'" class="status-failed">处理失败</span><span v-else class="status-demo">示例资料</span></div><p v-if="item.summary" class="material-summary">{{ item.summary }}</p><p v-if="item.error" class="material-error">{{ item.error }}</p><button v-if="item.status === 'failed' && !item.id.startsWith('upload-')" class="retry-button" @click.stop="emit('retry', item.id)">重试解析</button></div>
+      <div class="material-card-info"><h3>{{ item.title }}</h3><div class="material-meta"><span><Clock3 :size="13" /> {{ item.updated }}</span><span v-if="item.status === 'ready'" class="status-ready"><Check :size="12" /> 已保存</span><span v-else-if="item.status === 'processing'" class="status-processing"><LoaderCircle :size="12" /> {{ item.processingStage || '排队中' }}<template v-if="item.progress"> · {{ item.progress }}%</template></span><span v-else-if="item.status === 'failed'" class="status-failed">处理失败</span><span v-else class="status-demo">示例资料</span></div><p v-if="item.summary" class="material-summary">{{ item.summary }}</p><audio v-if="item.kind === 'audio' && !isPendingUpload(item)" class="material-audio" :src="documentAssetUrl(item.id)" controls preload="none"></audio><p v-if="item.error" class="material-error">{{ item.error }}</p><button v-if="item.status === 'failed' && !item.id.startsWith('upload-')" class="retry-button" @click.stop="emit('retry', item.id)">重试解析</button></div>
     </article>
   </section>
 
@@ -145,7 +148,7 @@ onBeforeUnmount(() => {
     <div v-if="filteredMaterials.length === 0" class="empty-state"><Search :size="22" /><strong>没有找到相关资料</strong><span>换个关键词试试吧</span></div>
   </section>
   <div v-if="viewMode === 'grid' && filteredMaterials.length === 0" class="empty-state"><Search :size="22" /><strong>没有找到相关资料</strong><span>换个关键词试试吧</span></div>
-  <div class="library-disclaimer"><span class="demo-tag">说明</span>HTML/HTM 会先抽取正文（标题、列表、表格）再切片向量化；视频支持分片续传（最大 5 GiB），默认转写音轨并生成摘要；画面分析需启用关键帧并配置视觉模型。</div>
+  <div class="library-disclaimer"><span class="demo-tag">说明</span>HTML/HTM 会先抽取正文（标题、列表、表格）再切片向量化；视频支持分片续传（最大 5 GiB），默认转写音轨并生成摘要；画面分析需启用关键帧并配置视觉模型。图片（表情包、截图）会原样保存并直接显示缩略图，配置了视觉模型时还会生成可检索描述；音频（MP3/WAV/M4A 等，最大 300 MiB）会原样保存并内联播放，语音内容转写后可检索，纯音乐不会因此失败。</div>
 </template>
 
 <style scoped>

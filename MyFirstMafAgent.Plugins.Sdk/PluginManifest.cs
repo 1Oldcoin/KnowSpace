@@ -36,6 +36,20 @@ public sealed record PluginManifest
     [JsonPropertyName("runtime")]
     public string? Runtime { get; init; }
 
+    /// <summary>
+    /// 对话方言，见 <see cref="PluginDialects"/>。缺省为本项目自有协议；
+    /// 写 <c>mcp</c> 时核心改用标准 MCP 方法名驱动它，能力从 <c>tools/list</c> 现取。
+    /// </summary>
+    [JsonPropertyName("dialect")]
+    public string? Dialect { get; init; }
+
+    /// <summary>
+    /// 插件整体申请的权限。MCP 方言下没有能力声明可挂权限，因此权限写在顶层；
+    /// 有能力的插件也可以写，两者取并集。
+    /// </summary>
+    [JsonPropertyName("permissions")]
+    public IReadOnlyList<string> Permissions { get; init; } = [];
+
     /// <summary>插件支持的协议版本区间。核心只在交集非空时握手。</summary>
     [JsonPropertyName("protocol")]
     public ProtocolRange? Protocol { get; init; }
@@ -73,6 +87,13 @@ public sealed record PluginEntry
     /// <summary>工作目录，相对插件目录；默认插件目录本身。</summary>
     [JsonPropertyName("workingDirectory")]
     public string? WorkingDirectory { get; init; }
+
+    /// <summary>
+    /// 额外的环境变量。MCP server 通常靠环境变量拿 API Key / token，
+    /// 这是它们唯一通用的"配置通道"，因此清单直接支持写死或引用用户配置。
+    /// </summary>
+    [JsonPropertyName("env")]
+    public IReadOnlyDictionary<string, string> Env { get; init; } = new Dictionary<string, string>();
 }
 
 /// <summary>一项能力声明。</summary>

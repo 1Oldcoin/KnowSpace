@@ -1,3 +1,4 @@
+using MyFirstMafAgent.Api.Application.Chats;
 using MyFirstMafAgent.Api.Application.Notes;
 using MyFirstMafAgent.Api.Application.Settings;
 using MyFirstMafAgent.Api.Application.Study;
@@ -22,6 +23,12 @@ public static class DocumentsChatsModule
         services.AddSingleton<ResumableUploadService>();
         services.AddSingleton<WhisperModelManager>();
         services.AddSingleton<WhisperTranscriptionService>();
+
+        // 伴侣历史的向量索引：只写 companion_message_vectors，不进知识库。
+        services.AddSingleton<CompanionMemoryIndexer>();
+
+        // 聊天历史回读：MCP 的 list_chat_sessions / chat_search_history 走这条链路。
+        services.AddScoped<ChatHistoryService>();
 
         services.AddScoped<KnowledgeChatService>();
         services.AddScoped<CompanionService>();

@@ -1,6 +1,8 @@
 // 默认同源：发布后前端由内嵌 Kestrel 直接托管；Vite 开发服务器通过 vite.config.ts 的 /api 代理转发。
 // 如需连接其他主机，可设置 VITE_API_BASE_URL（例如 http://192.168.1.10:5056）。
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '')
+/** 给需要自己拼 URL 的组件（视频播放等）用，避免各自重复读一次环境变量。 */
+export { apiBaseUrl }
 
 export interface UploadResult {
   id: string
@@ -30,6 +32,8 @@ export interface KnowledgeChatMessage {
   role: 'user' | 'assistant'
   content: string
   createdAt: string
+  citations?: Citation[] | null
+  answerMeta?: KnowledgeChatAnswerMeta | null
 }
 
 export interface CompanionProfile {
@@ -191,6 +195,14 @@ export interface SemanticSearchResult {
   similarity: number
 }
 
+export interface NoteSourceRecord {
+  documentId: string
+  fileName: string
+  chunkIndex: number
+  similarity: number
+  snippet?: string | null
+}
+
 export interface NoteRecord {
   id: string
   knowledgeBaseId: string
@@ -204,6 +216,9 @@ export interface NoteRecord {
   sourceDocumentId?: string | null
   createdAt: string
   updatedAt: string
+  topicId?: string | null
+  sources?: NoteSourceRecord[] | null
+  sourceSessionId?: string | null
 }
 
 export interface NoteInput {
@@ -213,6 +228,9 @@ export interface NoteInput {
   color?: string
   tags?: string[]
   sourceDocumentId?: string | null
+  topicId?: string | null
+  sources?: NoteSourceRecord[] | null
+  sourceSessionId?: string | null
 }
 
 export interface DocumentContentPage {
@@ -318,7 +336,7 @@ export async function sendKnowledgeChatMessage(knowledgeBaseId: string, sessionI
     body: JSON.stringify({ message, ...toolOptions }),
   })
   if (!response.ok) throw new Error(await getErrorMessage(response))
-  const result = await response.json() as { answer?: string; citations?: Citation[]; toolCalls?: ToolCallTrace[]; toolCallingEnabled?: boolean; webSearchEnabled?: boolean; fileAccessEnabled?: boolean }
+  const result = await response.json() as { answer?: string; citations?: Citation[]; toolCalls?: ToolCallTrace[]; toolCallingEnabled?: boolean; webSearchEnabled?: boolean; fileAccessEnabled?: boolean; retrieval?: KnowledgeChatRetrieval }
   return {
     answer: result.answer || '模型暂时没有返回文本内容。',
     citations: result.citations || [],
@@ -326,6 +344,7 @@ export async function sendKnowledgeChatMessage(knowledgeBaseId: string, sessionI
     toolCallingEnabled: result.toolCallingEnabled,
     webSearchEnabled: result.webSearchEnabled,
     fileAccessEnabled: result.fileAccessEnabled,
+    retrieval: result.retrieval,
   }
 }
 
@@ -389,10 +408,56 @@ export async function sendCompanionMessage(profileId: string, sessionId: string,
   return await response.json() as { answer: string; recalledMessageCount: number }
 }
 
+/** 伴侣历史的向量索引状态：indexed 是当前向量模型下已建索引的消息数。 */
+export interface CompanionIndexStatus {
+  profileId: string
+  indexed: number
+}
+
+export async function getCompanionIndex(profileId: string): Promise<CompanionIndexStatus> {
+  const response = await fetch(`${apiBaseUrl}/api/companions/${profileId}/index`)
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  return await response.json() as CompanionIndexStatus
+}
+
+/** 手动补齐/重建向量索引（导入时已自动后台建一次，这里用于换模型或失败后重试）。 */
+export async function reindexCompanion(profileId: string, limit?: number): Promise<{ profileId: string; indexed: number; failed: number; total: number; warning: string | null }> {
+  const query = typeof limit === 'number' ? `?limit=${limit}` : ''
+  const response = await fetch(`${apiBaseUrl}/api/companions/${profileId}/reindex${query}`, { method: 'POST' })
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  return await response.json() as { profileId: string; indexed: number; failed: number; total: number; warning: string | null }
+}
+
+/**
+ * 一条问答引用：rank/chunkIndex/chunkId 可回溯到“哪份资料的哪一段”，
+ * snippet 用于悬浮预览，similarity 是余弦相似度（0~1）。
+ * 旧数据可能只有前三个字段。
+ */
 export interface Citation {
   documentId: string
   fileName: string
   similarity: number
+  rank?: number
+  chunkId?: number
+  chunkIndex?: number
+  snippet?: string | null
+  // 音视频切片在媒体中的起始秒数；普通文档为 null。前端据此提供“跳到这里播放”。
+  mediaStartSeconds?: number | null
+}
+
+/** 本轮检索的索引上下文，用于解释“为什么是这几条资料”。 */
+export interface KnowledgeChatRetrieval {
+  indexId?: string | null
+  embeddingSpecName?: string | null
+  warning?: string | null
+  legacyIndex: boolean
+}
+
+/** 助手消息落库的答案元数据：检索上下文 + 工具调用审计 + 网页来源。 */
+export interface KnowledgeChatAnswerMeta {
+  retrieval?: KnowledgeChatRetrieval | null
+  toolCalls?: ToolCallTrace[] | null
+  sources?: string[] | null
 }
 
 export interface ToolCallTrace {
@@ -410,6 +475,7 @@ export interface ChatReply {
   toolCallingEnabled?: boolean
   webSearchEnabled?: boolean
   fileAccessEnabled?: boolean
+  retrieval?: KnowledgeChatRetrieval
 }
 
 /**
@@ -642,6 +708,19 @@ export async function downloadDocument(documentId: string): Promise<Blob> {
   return await response.blob()
 }
 
+/**
+ * 原始文件的可直链地址，用于把图片当缩略图、把音频塞进 `<audio>`。
+ *
+ * <p>
+ * 之所以不复用 `downloadDocument`（它返回 Blob）：`<img src>` / `<audio src>` 不能走 fetch + await，
+ * 而在桌面壳里主进程会通过 `webRequest` 注入 `X-Api-Token`，直链同样能拿到令牌。
+ * 后端该路由开了 `enableRangeProcessing`，所以音频可以拖动进度条。
+ * </p>
+ */
+export function documentAssetUrl(documentId: string): string {
+  return `${apiBaseUrl}/api/documents/${encodeURIComponent(documentId)}/download`
+}
+
 export async function listDocuments(knowledgeBaseId?: string): Promise<DocumentResult[]> {
   const query = knowledgeBaseId ? `?knowledgeBaseId=${encodeURIComponent(knowledgeBaseId)}` : ''
   const response = await fetch(`${apiBaseUrl}/api/documents${query}`)
@@ -850,14 +929,89 @@ export async function checkInStudy(minutes: number, note?: string): Promise<Stud
   return await response.json() as StudySummary
 }
 
-export async function listNotes(knowledgeBaseId: string, query?: string, category?: string): Promise<NoteRecord[]> {
+export interface NoteListFilter {
+  query?: string
+  category?: string
+  documentId?: string | null
+  topicId?: string | null
+}
+
+export async function listNotes(knowledgeBaseId: string, filter: NoteListFilter = {}): Promise<NoteRecord[]> {
   const params = new URLSearchParams()
-  if (query?.trim()) params.set('query', query.trim())
-  if (category?.trim()) params.set('category', category.trim())
+  if (filter.query?.trim()) params.set('query', filter.query.trim())
+  if (filter.category?.trim()) params.set('category', filter.category.trim())
+  if (filter.documentId) params.set('documentId', filter.documentId)
+  if (filter.topicId) params.set('topicId', filter.topicId)
   const suffix = params.size ? `?${params.toString()}` : ''
   const response = await fetch(`${apiBaseUrl}/api/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/notes${suffix}`)
   if (!response.ok) throw new Error(await getErrorMessage(response))
   return await response.json() as NoteRecord[]
+}
+
+/** 批量导出笔记：接口直接回 Markdown 文件，前端只负责把 Blob 落成下载。 */
+export async function exportNotes(knowledgeBaseId: string, noteIds?: string[]): Promise<{ blob: Blob; fileName: string }> {
+  const response = await fetch(`${apiBaseUrl}/api/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/notes/export`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ noteIds: noteIds ?? null }),
+  })
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+
+  const disposition = response.headers.get('Content-Disposition') ?? ''
+  const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition)
+  const rawName = match?.[1]?.trim()
+  const fileName = rawName ? decodeURIComponent(rawName) : 'notes.md'
+  return { blob: await response.blob(), fileName }
+}
+
+export interface KnowledgePackageExportSummary {
+  blob: Blob
+  fileName: string
+  documents: number
+  notes: number
+  topics: number
+  warnings: number
+}
+
+export interface KnowledgePackageImportResult {
+  knowledgeBaseId: string
+  knowledgeBaseName: string
+  documents: number
+  notes: number
+  topics: number
+  warnings: string[]
+}
+
+/** 导出整个知识库为可移植包（zip：manifest.json + 原始文件）。 */
+export async function exportKnowledgeBasePackage(knowledgeBaseId: string): Promise<KnowledgePackageExportSummary> {
+  const response = await fetch(`${apiBaseUrl}/api/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/package`)
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+
+  const disposition = response.headers.get('Content-Disposition') ?? ''
+  const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition)
+  const rawName = match?.[1]?.trim()
+  const numberHeader = (name: string) => {
+    const raw = response.headers.get(name)
+    return raw ? Number.parseInt(raw, 10) || 0 : 0
+  }
+
+  return {
+    blob: await response.blob(),
+    fileName: rawName ? decodeURIComponent(rawName) : `${knowledgeBaseId}.zjpack.zip`,
+    documents: numberHeader('X-Package-Documents'),
+    notes: numberHeader('X-Package-Notes'),
+    topics: numberHeader('X-Package-Topics'),
+    warnings: numberHeader('X-Package-Warnings'),
+  }
+}
+
+/** 导入知识库包，服务端会新建一个知识库并把资料重新排队解析。 */
+export async function importKnowledgeBasePackage(file: File): Promise<KnowledgePackageImportResult> {
+  const form = new FormData()
+  form.append('file', file, file.name)
+  const response = await fetch(`${apiBaseUrl}/api/knowledge-bases/import`, { method: 'POST', body: form })
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  return await response.json() as KnowledgePackageImportResult
 }
 
 export async function createNote(knowledgeBaseId: string, input: NoteInput): Promise<NoteRecord> {
@@ -1645,8 +1799,12 @@ export interface PluginListResult {
 
 export interface PluginDetail {
   status: PluginStatus
+  // 方言：plugin（自有协议）或 mcp（标准 MCP，能力来自 tools/list）。
+  dialect: string
   capabilities: string[]
   declaredCapabilities: PluginCapabilityDeclaration[]
+  // MCP 插件清单里通常不写能力，真正生效的是运行期发现的那批。
+  discoveredCapabilities: PluginCapabilityDeclaration[]
   health: string | null
   lastError: string | null
   inFlightInvocations: number
@@ -1659,6 +1817,41 @@ export interface PluginDetail {
   allowedKnowledgeBaseIds: string[]
   maxDocuments: number
   limits: Record<string, number> | null
+  // P1-4：并发 + 排队占用。未启动插件时为 null。
+  concurrency: PluginConcurrency | null
+  // D-1：沙箱实况。applied=false 表示插件没跑进沙箱（被拒或平台不支持）。
+  isolation: PluginIsolation | null
+}
+
+/** 一个插件的沙箱实况（Windows AppContainer）。 */
+export interface PluginIsolation {
+  mode: string
+  applied: boolean
+  kind: string
+  network: boolean
+  capabilitySids: string[]
+  writablePaths: string[]
+  readablePaths: string[]
+  detail: string | null
+  short: string
+}
+
+/** 一个能力的并发占用（只有配了能力级上限才会出现在列表里）。 */
+export interface PluginCapabilityConcurrency {
+  capabilityId: string
+  concurrencyLimit: number
+  running: number
+  queued: number
+}
+
+/** 一个插件的并发占用：运行数 / 上限、排队数与排队上限。 */
+export interface PluginConcurrency {
+  pluginId: string
+  concurrencyLimit: number
+  running: number
+  queued: number
+  queueLimit: number
+  capabilities: PluginCapabilityConcurrency[]
 }
 
 export interface PluginAuditEntry {
@@ -1696,6 +1889,24 @@ export async function getPlugin(pluginId: string): Promise<PluginDetail> {
   const response = await fetch(`${apiBaseUrl}/api/plugins/${encodeURIComponent(pluginId)}`)
   if (!response.ok) throw new Error(await getErrorMessage(response))
   return await response.json() as PluginDetail
+}
+
+/** 所有已登记插件的并发/排队占用（含未启动的，便于排查“谁占满了”）。 */
+export async function getPluginConcurrency(): Promise<PluginConcurrency[]> {
+  const response = await fetch(`${apiBaseUrl}/api/plugins/concurrency`)
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  const body = await response.json() as { plugins: PluginConcurrency[] }
+  return body.plugins
+}
+
+/**
+ * 重新扫描插件目录：新拷进来的文件夹会被发现并启动，已删除的会被清理。
+ * 插件数量没有上限，这个接口就是「把文件夹拷进去 → 它就能用」的那一步。
+ */
+export async function rescanPlugins(): Promise<{ discovered: string[]; started: string[]; failed: string[]; removed: string[]; plugins: PluginStatus[] }> {
+  const response = await fetch(`${apiBaseUrl}/api/plugins/rescan`, { method: 'POST' })
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  return await response.json() as { discovered: string[]; started: string[]; failed: string[]; removed: string[]; plugins: PluginStatus[] }
 }
 
 /** 安装/升级插件包（ZIP）。后端按 manifest 版本号判断是首装还是升级。 */

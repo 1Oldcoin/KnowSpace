@@ -29,6 +29,10 @@ public static class PluginModule
         services.AddSingleton<PluginIntegrityVerifier>();
         services.AddSingleton<PluginInstaller>();
         services.AddSingleton<PluginAuditWriter>();
+
+        // 调用准入：并发上限 + 有界队列。计数据进程内，与 JobTypeQuota 同一口径。
+        services.AddSingleton<PluginInvocationLimiter>();
+
         services.AddSingleton<PluginManager>();
         services.AddSingleton<IPluginRuntime>(provider => provider.GetRequiredService<PluginManager>());
         // 摄取链路是 scoped 的：它最终要用到 KnowledgeIngestionService（内部走 Outbox + 索引写入，

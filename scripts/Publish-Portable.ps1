@@ -32,6 +32,11 @@
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File scripts\Publish-Portable.ps1 -Target console -Runtime osx-arm64 -KeepForeignRids
+
+.EXAMPLE
+    # Republish over an existing folder. App_Data (uploads / plugins / media) is kept
+    # unless you explicitly pass -FreshData.
+    powershell -ExecutionPolicy Bypass -File scripts\Publish-Portable.ps1 -Target console -SkipFrontend
 #>
 param(
     [ValidateSet('console', 'desktop', 'all')]
@@ -43,6 +48,9 @@ param(
     [switch]$SkipFrontend,
     # Keep native binaries of other platforms (default: prune them, they are 100-300 MB).
     [switch]$KeepForeignRids,
+    # By default the existing App_Data (uploads, plugins, media assets) is preserved.
+    # Pass this switch to wipe it and start from an empty data folder.
+    [switch]$FreshData,
     [string]$OutputRoot = ''
 )
 
@@ -68,7 +76,20 @@ function Remove-Directory([string]$path) {
     if (Test-Path $path) { Remove-Item $path -Recurse -Force }
 }
 
+# Republishing into an existing folder used to wipe App_Data, which is where uploads,
+# installed plugins and media assets live. The database rows survive (they live in
+# %LOCALAPPDATA%) so the result was silent data loss: documents listed but unopenable.
+# We therefore move App_Data aside before publishing and merge it back afterwards.
 function Publish-Project([string]$project, [string]$output) {
+    $dataBackup = $null
+    $dataPath = Join-Path $output 'App_Data'
+    if (-not $FreshData -and (Test-Path $dataPath)) {
+        $dataBackup = "$output.App_Data.bak"
+        Remove-Directory $dataBackup
+        Move-Item $dataPath $dataBackup -Force
+        Write-Host "  preserving existing App_Data ($dataBackup)" -ForegroundColor DarkGray
+    }
+
     Remove-Directory $output
     New-Item -ItemType Directory -Force $output | Out-Null
 
@@ -84,6 +105,14 @@ function Publish-Project([string]$project, [string]$output) {
     )
     dotnet @arguments
     Assert-ExitCode "dotnet publish $project"
+
+    if ($dataBackup -and (Test-Path $dataBackup)) {
+        # Merge: the freshly published App_Data only carries placeholder folders,
+        # so moving the backup on top of it restores every user file.
+        if (Test-Path $dataPath) { Remove-Directory $dataPath }
+        Move-Item $dataBackup $dataPath -Force
+        Write-Host "  restored App_Data" -ForegroundColor DarkGray
+    }
 }
 
 function Copy-Frontend([string]$output) {

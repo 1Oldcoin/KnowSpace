@@ -70,10 +70,25 @@ curl.exe -s http://127.0.0.1:5056/api/mcp/status
 | `files:write` | `local_write_file` |
 | `avatar:read` | `avatar_get_persona`、`avatar_search_memories`、`avatar_list_fragments`、`avatar_ask_as_me` |
 | `avatar:write` | `avatar_feed`、`avatar_digest` |
+| `chat:read` | `list_chat_sessions`、`chat_search_history` |
 
 通配：`knowledge:*`（该作用域的读写全开）、`*`（全部）。
 
-**默认只给 `knowledge:read`**。给外部 Agent 开 `files:read` 等于让它读你授权目录里的任意文件，开 `avatar:*` 等于让它读写分身记忆——按需再加。
+**默认只给 `knowledge:read`**。给外部 Agent 开 `files:read` 等于让它读你授权目录里的任意文件，开 `avatar:*` 等于让它读写分身记忆，开 `chat:read` 等于让它读你和助手、伴侣的私人对话——按需再加。
+
+### `chat:read` 为什么单独一项
+
+聊天历史比资料更敏感，因此**不复用** `knowledge:read` 或 `avatar:read`：只拿到知识库权限的客户端不应该顺带看见你聊过什么。两个工具的分工也说清楚——
+
+| 工具 | 读的是什么 | 典型用法 |
+| --- | --- | --- |
+| `avatar_search_memories` | 已被 AI 整理成记忆卡的结论 | 「上次说他要考驾照」 |
+| `list_chat_sessions` | 对话列表（知识库问答 / 分身对话 / 伴侣对话） | 「上次那个对话在哪」 |
+| `chat_search_history` | 对话里的原话（另含导入的 QQ/微信/CSV 记录） | 「他原话是怎么说的」 |
+
+来源过滤用 `source`：`knowledge` / `avatar` / `companion` / `companion-import` / `all`（默认）。名字写错会直接报错并列出可用值，不会静默返回空列表——空列表会被误读成「用户没聊过」。
+
+`knowledgeBaseId` 与 `companionProfileId` 是**分支过滤器**，不是全局过滤：前者只作用于 `knowledge` 来源，后者只作用于 `companion` / `companion-import`。要「只看某个知识库的问答」请同时传 `source=knowledge`。
 
 完整清单随时可查：
 
@@ -98,6 +113,7 @@ curl.exe -s http://127.0.0.1:5056/api/agent-clients/catalog
 规则：
 
 - 知识库白名单**也管默认知识库**：不传 `knowledgeBaseId` 时按默认库判定，所以"省略参数"绕不过范围。
+- **可选参数也一样受校验**：`chat_search_history` / `list_chat_sessions` 不强制要知识库，但只要显式传了 `knowledgeBaseId`，网关就会拿它对照白名单——否则「可选」就成了绕过范围的后门（真实修过：`AgentCallGate` 曾经对 `UsesKnowledgeBase: false` 的工具直接放行）。
 - `get_document_content` 只带资料 ID，网关会回查资料属于哪个知识库再判定。
 - `list_knowledge_bases` 只返回范围内的库（连名字也不外泄）。
 
@@ -115,6 +131,11 @@ curl.exe -s http://127.0.0.1:5056/api/agent-clients/catalog
 | 请求体超过上限 | 413 | `-32600` |
 
 工具级拒绝故意用 HTTP 200 + JSON-RPC 错误：模型能读到原因并改道（比如改用 `list_documents`），而不是拿到一个无法理解的传输错误。
+
+> **`tools/list` 的现实行为**：它返回的是**全部**已登记工具，不按客户端能力裁剪。
+> 也就是说受限客户端会「看得见但调不通」。当前的取舍是把权限判定集中在 `tools/call` 的
+> 闸门上，而不是在响应体重写上做过滤——后者要改 MCP 传输层，风险远高于收益。
+> 因此接第三方 Agent 时，`-32003` 必须当作「换个工具再做」的正常分支来处理。
 
 ---
 

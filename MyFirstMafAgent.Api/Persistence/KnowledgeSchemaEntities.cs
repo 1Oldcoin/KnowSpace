@@ -103,6 +103,13 @@ public sealed class KnowledgeChunkSchemaEntity
     [SugarColumn(ColumnName = "content_hash", ColumnDataType = "text", IsNullable = true)]
     public string? ContentHash { get; set; }
 
+    /// <summary>
+    /// 预分词后的检索 token（空格分隔），供 PostgreSQL 的 <c>to_tsvector('simple', …)</c> 建 GIN 表达式索引。
+    /// 分词规则见 <see cref="Domain.Knowledge.LexicalTokens"/>；历史行为 NULL，由后台补分词任务补齐。
+    /// </summary>
+    [SugarColumn(ColumnName = "lexical_tokens", ColumnDataType = "text", IsNullable = true)]
+    public string? LexicalTokens { get; set; }
+
     // 分块与向量化解耦：切片写入时不再携带向量，向量由索引生命周期单独生成（kb_index_vectors）。
     // 仅历史兼容列保留；该列是 pgvector 的 vector 类型，Npgsql 无法直接映射为 string，
     // 因此任何查询都必须显式投影（禁止 Queryable<KnowledgeChunkSchemaEntity>().ToListAsync() 整行读取）。

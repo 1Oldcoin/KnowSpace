@@ -301,6 +301,51 @@
 .tool-trace-chip { display: inline-flex; align-items: center; gap: 3px; }
 .tool-trace-web-chip { color: #4b7c9b; border-color: #d9e8f0; background: #f3f9fc; }
 .tool-trace-web { display: inline-flex; align-items: center; gap: 3px; padding: 2px 6px; border-radius: 5px; color: #4b7c9b; background: #eaf4fa; font-size: 8px; font-weight: 600; }
+/* 引用元数据：每条引用带序号与相关度，悬浮可看切片片段 */
+.citation-list { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 7px; color: #9aa49e; font-size: 8px; }
+.citation-title { display: inline-flex; align-items: center; gap: 4px; color: #9aa49e; font-weight: 600; }
+.citation-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 260px;
+  padding: 2px 7px 2px 3px;
+  border: 1px solid #e3ece6;
+  border-radius: 999px;
+  color: #5f7c6b;
+  background: #f6faf7;
+  font-size: 8px;
+}
+.citation-rank {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  color: #fff;
+  background: #8fb8a3;
+  font-size: 7px;
+  font-weight: 700;
+}
+.citation-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.citation-score { flex: 0 0 auto; color: #a5b2aa; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 7px; }
+/* 音视频引用：点击即从该时间点播放，所以给一个明确的"可点"外观 */
+.citation-chip-playable { cursor: pointer; border-color: #cfe3d6; }
+.citation-chip-playable:hover { color: #2f6b56; background: #eef7f1; border-color: #a8cdb8; }
+.citation-time {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+  padding: 0 4px;
+  border-radius: 999px;
+  color: #2f6b56;
+  background: #e6f2ea;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 7px;
+}
+.citation-warning { display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; padding: 2px 7px; border-radius: 5px; color: #a8792f; background: #fdf6e7; font-size: 8px; }
 .settings-card-head h2 { margin: 0; color: #3f4d45; font-size: 13px; font-weight: 600; }
 .settings-card-head p { margin: 4px 0 0; color: #9aa49e; font-size: 9px; line-height: 1.5; }
 .settings-segmented {
@@ -459,6 +504,127 @@
 .note-card-actions { display: flex; gap: 2px; }
 .note-card { cursor: pointer; }
 .note-tags span { cursor: pointer; }
+
+/* —— 笔记与资料/专题关联（P2-2） —— */
+.notes-heading-actions { display: flex; align-items: center; gap: 8px; }
+.note-topic-row { display: flex; gap: 5px; margin: 6px 0 0; }
+.note-topic-chip {
+  padding: 2px 7px;
+  border: 1px solid #dbe7dc;
+  border-radius: 999px;
+  color: #4c7a5f;
+  background: #f2f8f3;
+  font-size: 8px;
+}
+.note-source-row { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin: 8px 0 0; }
+.note-source-chip {
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  border: 1px solid #e6ece5;
+  border-radius: 6px;
+  color: #6d7d73;
+  background: #fbfcfa;
+  font-size: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.note-source-chip:hover { border-color: #cddcd0; color: #3f7a5e; background: #f1f8f2; }
+.note-source-more { color: #9aa59e; font-size: 8px; }
+
+/* —— 正文引用锚点（T-5）—— */
+.note-anchor-badge {
+  padding: 2px 6px;
+  border: 1px solid #dbe7dc;
+  border-radius: 999px;
+  color: #4c7a5f;
+  background: #f2f8f3;
+  font-size: 8px;
+  white-space: nowrap;
+}
+.note-anchor-panel {
+  margin-top: 12px;
+  padding: 10px 11px;
+  border: 1px solid #e6ece5;
+  border-radius: 10px;
+  background: #fbfcfa;
+}
+.note-anchor-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; color: #6d7d73; font-size: 9px; font-weight: 600; }
+.note-anchor-head small { color: #9aa59e; font-size: 8px; font-weight: 400; }
+.note-anchor-sources { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 0; }
+.note-anchor-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 8px 4px 4px;
+  border: 1px solid #e6ece5;
+  border-radius: 999px;
+  color: #6d7d73;
+  background: #fff;
+  font-size: 8px;
+  cursor: pointer;
+}
+.note-anchor-source:hover { border-color: #cddcd0; color: #3f7a5e; background: #f1f8f2; }
+.note-anchor-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  color: #fff;
+  background: #6c9d80;
+  font-size: 8px;
+  font-weight: 600;
+}
+.note-anchor-file { max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.note-anchor-insert { color: #8fb79c; font-size: 8px; }
+.note-anchor-preview {
+  margin-top: 9px;
+  max-height: 148px;
+  overflow: auto;
+  padding: 8px 9px;
+  border-radius: 8px;
+  color: #56635b;
+  background: #fff;
+  font-size: 9px;
+  line-height: 1.85;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.note-anchor-preview em { color: #a4aca6; font-style: normal; }
+.note-anchor-chips { display: inline-flex; align-items: center; gap: 2px; margin: 0 1px; vertical-align: baseline; }
+.note-anchor-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border: 1px solid #cfe3d6;
+  border-radius: 4px;
+  color: #3f7a5e;
+  background: #f1f8f2;
+  font-size: 8px;
+  line-height: 1;
+  cursor: pointer;
+}
+.note-anchor-chip:hover { border-color: #6c9d80; background: #e6f3ea; }
+.note-anchor-chip-missing { border-color: #efd8cf; color: #b3705a; background: #fdf4f0; cursor: help; }
+.note-anchor-warning { margin: 8px 0 0; color: #b3705a; font-size: 8px; }
+.note-editor select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #e6ece5;
+  border-radius: 8px;
+  color: #4d5b53;
+  background: #fff;
+  font-size: 9px;
+}
 .note-editor {
   width: min(100%, 620px);
   max-height: 88vh;

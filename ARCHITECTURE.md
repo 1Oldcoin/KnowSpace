@@ -59,18 +59,34 @@
 
 ### 当前已实现范围与限制
 
-- 知识库支持 TXT、MD、DOCX、PDF、HTML/HTM；图片通过所选聊天模型生成描述，视频通过 FFmpeg 抽取音轨并由 Whisper.net 在 API 进程内转写，之后走现有文本切片和向量化流程。
+- 知识库支持 TXT、MD、DOCX、PDF、HTML/HTM；图片通过所选聊天模型生成描述，视频通过 FFmpeg 抽取音轨并由 Whisper.net 在 API 进程内转写，**并抽关键画面生成描述**，两者统一按时间轴切片后入库检索（详见下一节）。
     
   HTML/HTM 在 API 进程内抽取正文（标题层级、列表、表格单元格），不执行脚本、不加载外部资源；非 UTF-8 页面按文件 BOM 与 `<meta charset>` 声明解码（含 GBK/GB18030）。
 - 图片能力要求所选模型支持视觉输入；视频处理需要随 API 部署的 FFmpeg 可执行文件。Whisper.net 使用 .NET NuGet 包和 CPU 原生运行时，不需要 Python/Whisper CLI；模型文件首次转写时自动下载并缓存，也可从设置页导入本地 ggml 模型（离线部署）。
-- Companion 首版支持 UTF-8 通用 JSON/TXT 导出，不直接读取微信/QQ 私有或加密数据库。JSON 接受顶层数组或 `messages` / `records` 数组；TXT 接受 `[时间] 发言者: 消息` 行，未匹配的续行合并到上一条消息。
-- Companion 数据写入 PostgreSQL：人物档案、原始消息、画像、会话与消息；聊天会从目标人物的历史消息中做关键词检索。当前不是向量检索，平台官方格式需按脱敏样例开发适配器。
+- Companion 解析通用 JSON/TXT/CSV，以及 QQ 消息管理器导出的文本（块头 + 块内多行）与行内时间戳的通用格式；不读取微信/QQ 私有或加密数据库。JSON 接受顶层数组或 `messages` / `records` 数组。
+- Companion 数据写入 PostgreSQL：人物档案、原始消息、画像、会话与消息；历史消息建立**独立向量索引**（`companion_message_vectors`），检索为「向量 + 词面」RRF 融合。向量模型不可用时自动退回纯词面。
 - 知识库支持多库创建与切换；专题按知识库隔离，资料可归入单一专题。笔记仍是前端示例数据。
 - 学习打卡与用户设置保存在 PostgreSQL；聊天模型设置可由前端修改并在进程内即时生效。
 
-### 视频处理（当前 MVP）
+### 视频处理（时间轴对齐 + 视觉检索）
 
-抽取音轨 → Whisper.net 转写 → 文本切片 → 向量化入库。当前未提取字幕轨道、关键帧或时间戳；这些属于后续增强。
+抽取音轨 → Whisper.net 转写 → **抽关键画面 + 视觉模型描述** → 两路结果按时间戳合并成时间轴切片 → 向量化入库。
+
+- **抽帧策略**：先按场景切换抽（`select='gt(scene,0.25)'`，`Media:FrameSceneThreshold` 可调）；场景帧少于 2 张（幻灯片、固定机位、纯色背景）时退化为 `fps=1/30` 均匀采样（`Media:FrameSampleIntervalSeconds`）。单次上限 `Media:MaxVideoFrames`（默认 60），因为每帧都是一次真实的视觉模型调用。
+- **时间戳来自工具本身**：从 `showinfo` 的 `pts_time` 反解每帧起始秒数。用「第几张 × 固定间隔」推算在场景检测下必然错位（大量帧被丢弃，序号与时间不成比例）。
+- **切片规则（`MediaTimeline`）**：转写段与画面描述合并后按时间排序，每行形如 `[hh:mm:ss] 文本`，只在段边界切分；单行超长时仍自成一片，**时间戳永不与文本分离**。音频转写同样走这套规则（此前按字符数硬切，会把时间戳切成孤行）。
+- **引用可定位**：`KnowledgeChatCitation.MediaStartSeconds` 从切片首行时间戳推导，`0` 是合法值；前端引用芯片据此显示播放图标与 `mm:ss`，点击后播放器 `currentTime` 跳到该秒数（下载端点启用 range，支持定位）。
+- **降级边界**：视觉模型不可用时只记一条 warning，视频保持「仅转写」入库；抽帧失败同样只降级不失败——独立阶段不能把整篇资料变 `Failed`。当前未提取内嵌字幕轨道，也未做 OCR 与镜头级分割。
+
+### 伴侣历史检索（独立向量空间）
+
+`CompanionMemoryIndexer` 给导入记录中**目标人物本人**的消息建向量，写在 `companion_message_vectors`（`message_id` 主键 + `embedding` + 模型指纹 + 维度），**不进任何 `kb_*` 表**：私聊一旦混进资料索引，「问我的资料」就会把私聊当证据引用出来。
+
+- 检索时词面与向量两路各取候选，按 RRF（k=60）融合；`sender` 与 `profile_id` 都是硬过滤条件，否则两个人的聊天会互相串。
+- 少于 4 个字符的消息不建向量；单条超过 1000 字符只取前 1000 字再向量化。
+- 向量模型跟随设置页选定的默认规格；切换模型后旧向量按指纹隔离，不会被新查询误用，需要点一次「重建索引」。
+- 模型不可用时 `TrySearchAsync` 返回 `null`，调用方自动退回纯词面检索。
+- 提示词里的召回片段**按相关度排序**（最相关在前），不做时间反转。
 
 ## 4. 模型配置与切换
 
@@ -109,6 +125,7 @@ Embedding 模型目录包含 `model.onnx` 和 `tokenizer.json`；项目会将其
 - 原始文档/视频：本地受控目录；禁止直接使用客户端提供的路径或文件名作为磁盘路径。
 - PostgreSQL：资料、哈希、媒体类型、大小、导入时间、处理状态、错误信息、笔记等结构化数据。
 - pgvector：带资料 ID、页码/时间戳、分块序号、模型版本的切片向量。
+- 向量表按用途分开：知识库切片进 `kb_*` 索引表，伴侣历史进 `companion_message_vectors`。两边共用同一套默认向量模型，但**互不写入**，避免「问资料」时把私聊当证据、或「问往事」时把资料当聊天。
 - 知识库问答历史与 AI 伴侣的档案、导入消息、会话及消息均保存在 PostgreSQL 中；删除知识库/档案会级联删除对应会话和消息。
 - 备份：同时备份 PostgreSQL 数据和原始文件目录，并定期验证恢复流程。
 
@@ -206,6 +223,22 @@ MVP 不应一开始就承担关键帧 VLM、复杂消息队列或多用户权限
 
 API 启动时通过 SqlSugar CodeFirst 实体幂等创建知识库、资料、分块、上传、问答历史和 AI 伴侣表及普通索引；PostgreSQL 的 `vector` 扩展、外键/CHECK 约束、`lower(name)` 表达式唯一索引和旧表数据回填仍使用必要的 PostgreSQL SQL。
 
+> **SqlSugar 的一个类型推断陷阱（已踩过，务必绕开）**：`Updateable<T>().SetColumns(it => new T { TimeCol = entity.TimeCol })` 在右值是**求值为 `null` 的可空列**时，会把参数声明成 `DbType.AnsiString`（`Guid?` 同样退化成字符串）。参数值本身确实是空，但 PostgreSQL 类型检查看的是**参数的声明类型**，于是报
+> `42804: column "completed_at" is of type timestamp with time zone but expression is of type text`。
+> 症状极具迷惑性：`avatar_feed` 返回 200、任务被领成 `running`，然后**第一次状态回写就炸**，投喂的内容永远进不了记忆库。
+>
+> 实测规律（`Updateable().ToSql()` 拿到的参数类型）：
+>
+> | 写法 | 空值时的参数类型 | 可用 |
+> | --- | --- | --- |
+> | `SetColumns(it => new T { Col = null })` | `DateTimeOffset` / `Guid`（按列类型） | ✅ |
+> | `SetColumns(it => new T { Col = someVar })`（`someVar` 为 null） | `AnsiString` | ❌ 42804 |
+> | `Updateable(entity).UpdateColumns(it => new { it.Col })` | 按实体属性类型 | ✅ |
+> | `Insertable(entity)` | 按实体属性类型 | ✅ |
+>
+> 因此规则是：**可空列的值来自变量时，不用 `SetColumns`**——要么写实体驱动的 `UpdateColumns`，要么写显式 SQL 加 `CAST(... AS timestamptz)`。已按此修正 `avatar_ingestions` 的三条状态语句（显式 SQL）与 `UpdateMemoriesAsync` / `UpdateSimulationAsync` / `UpdateEvalRunAsync`（`UpdateColumns`）。回归测试：`AvatarIngestionUpdateCommandTests`、`NullableColumnBindingTests`。
+
+
 默认情况下不需要外部数据库：`ConnectionStrings:KnowledgeBase` 留空时，`PortablePostgresHost` 会启动随应用发布的 `ExternalTools/pgSQL/pg0-windows-x86_64.exe`（内置 PostgreSQL 18 + pgvector），创建目标数据库并执行 `CREATE EXTENSION IF NOT EXISTS vector`。数据目录默认在 `%LOCALAPPDATA%\MyFirstMafAgent\pgsql`，应用退出时自动 `pg0 stop`。
 
 如需使用已有 PostgreSQL，通过环境变量或用户机密提供连接串（默认会跳过 pg0）；运行 API 的用户需有创建扩展/表/约束的权限，不要把真实密码写入配置文件：
@@ -288,6 +321,9 @@ AI 伴侣导入端点为 `POST /api/companions/import`（multipart 字段：`nam
 | 协议与 SDK | `MyFirstMafAgent.Plugins.Sdk` | manifest 模型与校验、SemVer、JSON-RPC 分帧、`PluginServer` 插件侧宿主。**不引用 ASP.NET/SqlSugar** |
 | manifest 加载 | `Plugins/PluginManifestLoader.cs` | 扫描插件目录、schema 校验、入口可执行文件解析 |
 | 进程宿主 | `Plugins/PluginProcessHost.cs` | 启动子进程、握手校验、健康检查、带超时/取消的调用、崩溃标记 |
+| 隔离计划 | `Plugins/Isolation/PluginIsolationPlanner.cs` | 权限声明 → 能力 SID + 授权路径 + 环境重定向（纯计算，可单测） |
+| 隔离执行 | `Plugins/Isolation/WindowsAppContainer.cs`、`AppContainerPluginProcess.cs` | 建配置、写 ACL、`CreateProcess` + `SECURITY_CAPABILITIES` + Job 对象 |
+| 启动选择 | `Plugins/Isolation/PluginProcessFactory.cs` | 按 `Isolation.Mode` 决定「隔离启动 / 降级启动 / 拒绝启动」，并收窄环境变量 |
 | 生命周期 | `Plugins/PluginManager.cs` | 发现→启动→退避重启→停止；单个插件失败不影响核心启动 |
 | 工具桥接 | `Plugins/PluginToolSource.cs` | `agent-tool` → `IAgentToolSource`，命名 `plugin__{plugin}__{capability}` |
 | 摄取下沉 | `Plugins/PluginIngestionSink.cs` | `platform-connector` 结果包装成一次普通上传，复用版本/Outbox/索引生命周期 |
@@ -295,11 +331,71 @@ AI 伴侣导入端点为 `POST /api/companions/import`（multipart 字段：`nam
 
 **协议**：`plugin/initialize`、`plugin/configure`、`plugin/health`、`plugin/capabilities/list`、`plugin/capabilities/invoke`、`plugin/shutdown`，通知 `plugin/cancel`、`plugin/log`。一行一个 JSON（NDJSON），单行 ≤ 8 MiB；握手时校验 `pluginId`/`pluginVersion` 与 manifest 一致，且不允许插件报告未声明的能力。
 
-**两类能力**：`agent-tool` 暴露给模型；`platform-connector` 只能经同步端点使用，返回统一摄取结构（`source`/`externalId`/`title`/`type`/`content`/`updatedAt`/`contentHash`/`retracted`/`metadata`），由核心调用既有摄取用例，插件无法直接写表。
+**两种方言（D-2）**：同一个进程宿主、同一套并发/审计/排空逻辑，只换方法名与结果形状。
 
-**安全边界**：同一 OS 用户下的子进程**不是**恶意代码沙箱，只提供故障隔离（崩溃、死循环、协议错误不波及核心）。插件写目录被限制在 `plugins/.data/{pluginId}`；跨进程不继承连接串等机密。签名与摘要校验见 §9.4（`IntegrityPolicy=enforce` 可强制），受限令牌与容器化仍未实现。
+| 维度 | `dialect: plugin`（自有） | `dialect: mcp`（标准 MCP） |
+| --- | --- | --- |
+| 握手 | `plugin/initialize` → 校验 id/version 与清单一致 | `initialize`（`protocolVersion: 2024-11-05`）→ `notifications/initialized`；`serverInfo` 只记录不对账 |
+| 能力来源 | 清单 `capabilities`（插件不允许发明） | `tools/list`（跟 `nextCursor` 分页，≤20 页），每个 tool → 一个 `agent-tool` |
+| 调用 | `plugin/capabilities/invoke` | `tools/call`，`content` 数组压平成文本；`isError: true` → 调用失败 |
+| 健康 | `plugin/health` | `ping`（对端回 `-32601` 视为健康） |
+| 退出 | `plugin/shutdown` | 关闭 stdin（MCP 约定的退出信号） |
+| 取消 | `plugin/cancel` + `targetId` | `notifications/cancelled` + `requestId` |
+| 配置 | `plugin/configure` 下发 JSON | 启动时环境变量：`entry.env` + 用户配置的标量字段注入为 `MYFIRSTMAFAGENT_CONFIG_<KEY>` |
 
-**验证**：`scripts/Test-PluginContract.ps1` 以真实子进程跑完握手、能力发现、健康、两类调用、结构化错误与关闭（18 项检查）。插件作者文档：`docs/PLUGIN-AUTHOR-GUIDE.md`。
+为什么值得做成两种方言而不是"只吃自己的清单"：MCP 与本项目的传输层完全同构（JSON-RPC 2.0 over stdio、一行一条、stdout 只放协议消息），差异全在方法名和结果形状这一层。代价是一个分支，收益是**任何现成的 stdio MCP server 写 5 行清单就能用**——插件生态的规模效应比自定义协议的整洁更重要。
+
+**清单宽容度（同一件事的两面）**：认三种清单文件名（`manifest.json` / `plugin.json` / `skill.json`）、认生态词汇别名（`inputSchema`→`parameters`、`net.outbound`→`network`、`fs`→`file-read`+`file-write`、`proc`→`process`、`args`→`arguments`、`command` 写成数组、顶层 `requires`）。所有改名都由 `PluginManifestNormalizer` 在读入时完成，并作为 **warning 透出**——不静默生效；认不出来的权限词原样保留并报错，作者必须能看见自己写错了什么。
+
+**目录即安装**：`App_Data/plugins/{任意目录}/` 下放清单即可被发现；解压多套了一层（`plugins/demo/demo/manifest.json`）时会下探，但只在"恰好一个子目录"时下探——多于一个候选说明这更像一个杂项目录，硬猜会选错。入口是宿主命令且没有文件参数时（`npx -y @scope/server`）不判"文件不存在"：路径由包管理器在运行期决定，安装期检查不出来。
+
+**两类能力**：`agent-tool` 暴露给模型；`platform-connector` 只能经同步端点使用，返回统一摄取结构（`source`/`externalId`/`title`/`type`/`content`/`updatedAt`/`contentHash`/`retracted`/`metadata`），由核心调用既有摄取用例，插件无法直接写表。MCP 方言下所有 tool 都是 `agent-tool`，副作用等级取自 MCP 的 `annotations`（`destructiveHint`→`destructive`、`readOnlyHint:false`→`write-local`、否则 `read`），清单里同名能力可覆盖。
+
+**安全边界（D-1：真隔离，不是「同一个用户下的子进程」）**：
+
+Windows 上用 **AppContainer** 启动插件子进程——不是受限令牌，因为受限令牌只能削特权，**削不掉网络**；AppContainer 是低完整性 + 能力模型，令牌里没有 `internetClient`（`S-1-15-3-1`）时，进程连出站 socket 都建不出来（实测 `EACCES`，不是"口头禁止"）。
+
+| 关注点 | 实现 | 实测证据 |
+| --- | --- | --- |
+| 建容器 | `CreateAppContainerProfile`（已存在则 `DeriveAppContainerSidFromAppContainerName`） | SID 形如 `S-1-15-2-…` |
+| 能力 | 有 `network` 才附加 `S-1-15-3-1` | 无 → `CONNECT_ERR EACCES`；有 → `CONNECT_OK` |
+| 文件 | 插件目录 `(OI)(CI)(RX)`、数据目录 `(OI)(CI)(M)`、`plugins/.runtimes` 只读 | `icacls` 可见容器 SID 的 ACE |
+| 进程树 | `CREATE_SUSPENDED` → `AssignProcessToJobObject(KILL_ON_JOB_CLOSE)` → `ResumeThread` | 核心退出后孙进程不会滞留 |
+| 环境 | 变量白名单（不复制连接串/API Key）+ `USERPROFILE`/`TEMP`/`APPDATA` 重定向到插件数据目录 | 容器写不了用户目录，不重定向运行时会在启动阶段就失败 |
+| 拒绝 | 入口程序对容器不可读时**拒绝启动**并给出可照做的建议 | `C:\Program Files\nodejs\node.exe` 只授了 `Users`，读不到 |
+
+三条踩出来的硬约束，改代码前务必先读：
+
+1. **只授叶子目录，绝不碰祖先**。容器凭插件目录上的继承 ACE 就能穿越整条路径（已在 `C:\Temp` 与「用户目录 + 中文路径」上实测）。给 `C:\` 加一条 ACE 会让 Windows 在整个驱动器上递归重整继承——实测卡死数分钟；何况普通用户本来也无权改 `C:\` 的 ACL（`拒绝访问`）。
+2. **已经授过的目录不要重复写 ACL**。`SetAccessControl` 每次都会触发继承重整，插件重启时等于把成本乘上启动次数。`ApplyGrants` 因此先查是否已有等价 Allow 规则。
+3. **判断"容器能不能读"只看对象自己的有效 DACL**（显式 + 已继承）。沿祖先找可继承 ACE 会被 `C:\Program Files`（有 `ALL APPLICATION PACKAGES:(OI)(CI)(RX)`，但 `nodejs` 这一层断了继承）骗过。
+
+`Plugins:Isolation:Mode`：`require`（默认，Windows）、`warn`、`off`；非 Windows 平台默认 `warn` 且报告 `kind: unsupported`——没有沙箱时**不假装有**，接口里 `applied=false` 会如实回显。运行时统一放 `App_Data/plugins/.runtimes/{命令名}/`，清单里继续写 `"command": "node"` 即可（解析顺序：`.runtimes` 优先于 `PATH`）。Node 插件额外需要跳过主模块 realpath，核心自动注入 `NODE_OPTIONS=--preserve-symlinks-main`（否则 node 会 `EPERM: lstat 'C:\'`）。
+
+**仍然不做的**：AppContainer 不是恶意代码保险箱——它能限制网络与文件可见范围，但同机内核提权、侧信道、DoS 仍然无解。签名与摘要校验见 §9.4（`IntegrityPolicy=enforce` 可强制）。插件写目录被限制在 `plugins/.data/{pluginId}`；跨进程不继承连接串等机密。
+
+**调用准入（阶段 11）**：`Application/Plugins/PluginInvocationLimiter.cs` 是唯一的准入点，取代了 `PluginProcessHost` 里那个**排队无上限**的 `SemaphoreSlim`。四层限制（插件队列 → 能力队列 → 能力并发 → 插件并发）中任何一层不满足都立刻返回 `-32006` / HTTP 429，而不是让调用方挂到自己的超时。三个必须保持的约束：**在途上限 = 并发 + 队列**（因此 `queue=0` 是「没有空位就拒绝」而不是「一律拒绝」）；**先拿能力闸门再拿插件闸门**（反了会让调用一边占插件容量一边空等，且插件级 `running` 虚高）；**任何失败路径都要把计数与信号量还回去**。计数在进程内，多进程部署时是「每进程上限」。
+
+**验证**：`scripts/Test-PluginContract.ps1` 以真实子进程跑完握手、能力发现、健康、两类调用、结构化错误与关闭（18 项检查）。插件作者文档：`docs/PLUGIN-AUTHOR-GUIDE.md`；准入控制细节与实测数据见 `docs/PLUGIN-LIFECYCLE.md` §14。
+
+**插件数量**：扫描不截断、列表不分页、注册表不设配额——**没有数量上限**。唯一收敛的是 `Plugins:StartupConcurrency`（默认 4）控制的“同时 spawn 多少进程”，因为每个插件就是一个子进程。`POST /api/plugins/rescan` 支持热发现（把文件夹拷进去即可，不必重启 API），且**扫描不覆盖用户的停用意图**。
+
+### 9.3.1 媒体资产：图片与音频（阶段 11）
+
+存储层把“资料”和“资产”统一了：同一份原文件既参与检索，也可以直接展示/播放。
+
+| 类型 | 解析 | 原文件用途 |
+| --- | --- | --- |
+| 图片（png/jpg/jpeg/webp/gif） | 视觉模型描述 → 可检索文本 | 缩略图、表情包、截图 |
+| 音频（mp3/wav/m4a/aac/ogg/opus/flac/weba/amr） | FFmpeg 归一化 16 kHz 单声道 → Whisper 转写 → 可选摘要 | 语音消息、录音、音效 |
+| 视频（mp4/mov/mkv/webm/avi） | 抽音轨转写 + 可选关键帧描述 | 原片下载 |
+
+两个设计判断，都来自“存不下来”的真实失败：
+
+- **解析失败不能连原文件一起丢掉。** 图片没有视觉模型、音频没有语音内容，都是常态；此时发布一句兜底文本（`图片资料：…（未生成图片描述：视觉模型不可用）`）而不是整篇 `Failed`——用户要的是「能存、能看」，检索是加分项。
+- **Content-Type 按扩展名归一化，不信客户端。** 浏览器与脚本经常上报 `application/octet-stream`；直接采信会让 `/download` 把图片当二进制下载、让 `<audio>` 播不出来。`GET /api/documents/{id}/download` 开了 `enableRangeProcessing`，所以音频可以拖动进度条（实测 `206 Partial Content`）。
+
+体积上限分三档而非一刀切：`Storage:MaxFileSizeBytes`（50 MiB 文档）、`MaxAudioFileSizeBytes`（300 MiB）、`MaxVideoFileSizeBytes`（5 GiB），三者都会参与 Kestrel 请求体上限的取最大值计算。
 
 ### 9.4 插件生命周期与安全（阶段 4）
 
@@ -478,7 +574,115 @@ Embedding 使用 `Microsoft.ML.OnnxRuntime` 和 `Microsoft.ML.Tokenizers` NuGet 
 2. **安装顺序固定为 `stopApi → markQuitting → quitAndInstall`**。安装器要覆盖 `resources/api`，而便携 `postgres.exe` 会锁住目录（§9.8 的卸载钩子解决的是同一个问题的另一面）。顺序在测试里被显式断言，且 `beforeInstall` 抛错时**绝不会**调到安装器。
 3. **更新源三级覆盖**：`MAF_UPDATE_URL` → 用户数据目录 `update-feed.json` → 包内 `app-update.yml`。同一份安装包因此能服务 GitHub Releases、自建静态目录和离线内网发布点。
 
+### 9.11 问答引用元数据（阶段 12）
+
+引用要能**回答"这句话是从哪一段来的"**，而不只是"用了哪个文件"。整条链路有四个点必须对齐，缺一个引用就退化成装饰：
+
+| 环节 | 位置 | 要点 |
+| --- | --- | --- |
+| 检索带出切片标识 | `PgVectorSql.BuildSearchSql` / `BuildIndexSearchSql` → `RetrievedChunk(ChunkId, ChunkIndex)` | 两条 SQL（新版索引 `kb_index_vectors`、旧版直查 `kb_chunks`）都投影 `c.id` / `c.chunk_index`；只给文件名等于放弃段落级定位 |
+| 组装引用 | `KnowledgeChatJson.FromChunks` | `rank` 用检索顺序（1 起），相似度保留 4 位，`snippet` 压平换行并截断 240 字；片段是给前端悬浮预览用的，不落全文 |
+| 落库 | `knowledge_chat_messages.citations` / `answer_meta`（text/JSON） | 引用与「检索上下文（indexId / 向量模型 / 降级提示）+ 工具调用审计 + 网页来源」一起写；旧库靠 `EnsureMessageColumns()` 显式补列，因为 `CodeFirst` 只在建表时生效 |
+| 读回与导出 | `KnowledgeChatStore.ToMessage` → `GET /messages`、`KnowledgeChatExportFormatter` | 反序列化失败一律降级为空引用：一条脏 JSON 不能让整个会话打不开；导出件脱离应用后仍然能核对答案依据 |
+
+**为什么用 JSON 文本列而不是独立表**：引用只被"随消息整体读取"这一种方式访问，没有按引用反查消息的需求；独立表会引入 join 与级联成本，而 JSON 列让一次消息查询就能渲染完整气泡。等到需要"某段资料被引用过多少次"这类统计时再拆表。
+
+**当前边界**：`legacyIndex=true`（索引不可用回退旧版直查）只是一条提示，不会阻止回答——检索降级时仍然给用户答案和引用，同时把降级事实写进 `answer_meta` 并在界面上以提示条暴露。
+
+### 9.12 混合检索与评估集（阶段 12）
+
+向量检索擅长"意思相近"，但对**字面必须出现**的东西（编号、URL、报错码、罕见术语）并不可靠；全文检索正好相反。两条路都要，剩下的问题是**怎么融合**和**怎么证明融合有效**。
+
+| 决策 | 选择 | 为什么 |
+| --- | --- | --- |
+| 中文怎么分词 | 应用侧二元组（`Domain/Knowledge/LexicalTokens.cs`），写进 `kb_chunks.lexical_tokens` | PostgreSQL 的 `simple` 解析器会把整段中文当一个词；pg0 的 PG 不带 `zhparser`/`pg_jieba`，装扩展就得要求用户装数据库插件 |
+| 索引怎么建 | `CREATE INDEX … USING GIN (to_tsvector('simple', coalesce(lexical_tokens, '')))` 表达式索引 | 表达式索引让写入保持"普通的 SqlSugar 批量插入"，不需要为 `tsvector` 手拼 SQL；查询必须用完全相同的表达式才吃得到索引（有单测盯着） |
+| 老数据怎么办 | `LexicalIndexWorker` 分批补 `lexical_tokens` | 分词只能在应用侧做，塞进启动流程会让大库启动卡几分钟；空转时只发一条 `LIMIT 1` |
+| 怎么融合 | RRF，`Σ 1/(k+rank)`，k=60 | 余弦在 0–1、`ts_rank` 常见 0.0x，线性加权必须按语料重新调参；RRF 只看排名，免疫量纲 |
+| 两路怎么跑 | **串行** | 一个请求上下文里 `SqlSugarScope` 共用一条连接，并发查询直接抛 `NpgsqlOperationInProgressException`（同 §9.6 的 Worker 隔离问题） |
+| 怎么证明有效 | `scripts/Evaluate-Retrieval.ps1` + JSON fixture，输出 recall@K / MRR | 没有可复跑的基线，"优化"就只是感觉 |
+
+**降级策略**：词法检索抛错（索引缺失、语法异常）时返回空结果 + `Warning`，回答继续走纯向量——检索的一路坏掉不该让问答整体失败。`Retrieval:HybridEnabled=false` 则是彻底回到 P2-1 之前的行为。
+
+**基线怎么来的（T-3）**：`scripts/retrieval-eval/corpus/` 有 27 份刻意互相混淆的中文资料（插件运行时 / 索引 / 任务中心三簇，各 8 份 + 1 份只给模糊答案的总览），`corpus.json` 有 42 个用例分四类。用真实 bge-small-zh-v1.5、top-5 跑出来：vector `0.8571 / 0.7270`、lexical `0.9524 / 0.8460`、hybrid `0.9762 / 0.8492`。分类别看，vector 在「字面」类掉到 0.60、lexical 在「语义」类掉到 0.80——**两路各有各的塌陷面，这才是必须融合的实测依据**。同一份语料连跑两次数字一致。
+
+同时暴露了 RRF 的一个真实短板：单路弱命中会被融合稀释。「领取任务的执行者多久必须汇报一次」lexical 排第 5 能召回、vector 零召回，融合后掉出 top-5。这类"只被一路低排名召回"的样本正是 reranker 该修的形状——D-4 就是冲它去的。
+
+**重排（D-4）怎么落地**：`mode=rerank` 在融合之后加一层 `RerankScoring`（`Domain/Knowledge/RerankScoring.cs`，纯函数，无模型）。
+
+| 决策 | 选择 | 为什么 |
+| --- | --- | --- |
+| 用什么信号重排 | `Score = (1-w)·Base + w·Coverage`，`w=0.65` | 实测**纯覆盖率排序比 hybrid 还差**（0.9524 / 0.7972）：覆盖率只看"问题的词出现过没有"，沾满虚词就能拿高分，会把 RRF 本来排对的结果挤下去。加回先验后反超 |
+| 先验怎么算 | `Base = 0.5×融合名次 + 0.5×归一余弦` | 名次和余弦各有各的盲区；余弦的绝对值跨查询不可比（bge-small-zh 上相关/不相关往往只差 0.05），所以只在**候选窗口内**做 min-max 归一 |
+| idf 从哪来 | 候选集自身的文档频率，`ln(1+N/(1+df))` | 不需要外部语料统计；「任务」「索引」这类到处都是的词自动降权，「汇报」「保留期」自动升权 |
+| 通用词怎么办 | 文档频率 > 70% 候选的词元直接剔出分子分母 | 留着只会把分数压扁。但**候选少于 5 条时不剔**——那时任何词元的文档频率都高于 70%，会剔光全部词元、覆盖率恒为 0 |
+| 候选池多深 | `RerankCandidateLimit`（默认 60）= **每一路**的召回条数 | 只在融合后放大没有用，融合只能从已召回的那几条里挑。20 条时 rerank 与 hybrid 打平，60 条才有 1.0000 / 0.9075；代价 p50 +5ms、p90 +35ms |
+| 要不要 cross-encoder | **不接** | 仓库里只有 `bge-small-zh-v1.5`（embedding），没有任何 rerank 模型；没验证过的 ONNX 推理路径会在用户机器上以未知方式失败。算法抽在 `IChunkReranker` 后面，日后换注册即可 |
+| 拒答怎么判 | 机制提供，**默认关闭** | 实测这份语料上"有答案但换了说法"与"真没答案"的得分完全重叠（有答案最低 0.361，无答案最高 0.474）；要拒掉 8/8 无答案必须误拒 15/42 有答案 |
+
+**四档实测（同一 fixture，42 有答案 + 8 无答案，连跑两次一致）**：vector `0.8571 / 0.7270` → lexical `0.9524 / 0.8460` → hybrid `0.9762 / 0.8492` → rerank `1.0000 / 0.9075`。完整曲线与失败复盘见 `docs/ROADMAP.md` D-4。
+
+**拒答为什么不靠分数阈值**：`Retrieval:AbstainEnabled` 默认 `false`。真正的"资料里没有"由提示词约束模型回答——`KnowledgeChatService.BuildReferenceNote` 在拒答时生成一句"不要用常识或推测补全，也不要编造引用"的提示，`ToolCallingAgent.BuildSystemPrompt` 把它拼在参考资料**之后**（放在前面会被资料淹没）。拒答判定本身仍然落库（`retrieval.abstained/topScore`），前端 `.citation-warning` 直接展示。
+
 状态机（`idle/checking/available/downloading/downloaded/up-to-date/error/disabled`）通过 `desktop:update-status` 广播到渲染进程；`autoDownload=false` + 手动 `downloadUpdate()`，让"下载"和"安装"分成两个用户可见的动作。
+
+### 9.13 笔记引用与知识库包（阶段 13）
+
+笔记与资料的关系有两种，必须分开建模：
+
+| 关系 | 存什么 | 为什么 |
+| --- | --- | --- |
+| 归属 | `kb_notes.topic_id` | 一篇笔记归一个专题，够用且好筛 |
+| 依据 | `kb_notes.sources`（JSON 数组，`NoteSource`） | 一条结论可能同时依据多份资料的不同段落；只留一个 `source_document_id` 会把"从问答里长出来的笔记"压成"关于某个文件" |
+
+**为什么引用要连切片序号一起存**：笔记是半年后读的东西。那时需要的不是"这篇笔记关于某个文件"，而是"这句话出自第 3 段"。因此 `sources` 里带 `chunkIndex`、当时的 `similarity` 与 `snippet`——即便资料被重新解析、切片序号变了，笔记里仍保留当时的依据，作者能自己判断要不要更新。
+
+**为什么正文还要能写锚点（T-5）**：只有卡片上的引用 chip，说明的是"这篇笔记用过哪几段资料"，说明不了"这句话出自哪一段"。长笔记里要核对某一句的出处，只能自己从头找。所以正文支持 `[1]` / `[2,3]` 形式的锚点，序号就是 `sources` 的下标 +1：
+
+| 决策 | 选择 | 为什么 |
+| --- | --- | --- |
+| 语法 | 只认方括号里的 1-2 位数字（可逗号分组） | `[2024](url)` 是链接、`[TODO]` 是标签，宽一点的语法一定会误判 |
+| 悬空序号 | 渲染成红底提示，导出原样保留文字 | 静默丢掉等于让用户以为自己写对了；变成链接又点了没去处 |
+| 导出 | 正文有锚点时输出 Markdown 脚注（`[^1]` + `[^1]: 文件（第 N 段）· 相关度 · 摘录`） | 阅读器里能点回定义；没有锚点的老笔记仍用编号列表，避免同一份稿子里两套编号 |
+| 谁写锚点 | 用户手动写，或点面板上的"插入"在光标处补 `[n]` | 自动判断"这句话出自第几段"需要句子级对齐，是另一个量级的工作；先把手动的路铺好 |
+
+**为什么 `Update` 的专题/引用参数用 `null` 表示"保持不变"**：清空与"更新时没传"是两件事。只有 `null` 表示后者，显式清空要传空集合 / `Guid.Empty`，否则界面上的"取消归类"无法表达（这条被单测钉住）。
+
+**笔记筛选为什么必须下推到 SQL**：最初 `NoteService.ListAsync` 是"取出整个知识库的笔记 → 内存里 `Where`"。资料几百份、笔记几千篇时，每次打开专题面板都要把整库实体读进来再丢掉绝大部分，内存与耗时都随库大小线性增长。现在过滤条件被收进值对象 `Domain/Notes/NoteQuery`，`SqlSugarNoteRepository.ListAsync(NoteQuery, ct)` 直接翻成 `WHERE`：分类与关键词用 `ILIKE`（`%` / `_` / `\` 由 `EscapeLikePattern` 转义，避免用户输入的 `100%` 变成通配），资料过滤走冗余列 `source_document_ids`（`LIKE '%guid:N%'`），专题走强类型条件。
+
+| 决策 | 选择 | 为什么 |
+| --- | --- | --- |
+| 资料过滤存冗余列 | `kb_notes.source_document_ids`（空格分隔的 `guid:N`），启动时按 `sources` 回填 | `sources` 是 JSON，`LIKE` 匹配 JSON 文本既慢又容易误中；冗余一列索引友好，回填只做一次（只更新空串行） |
+| 关键词大小写 | `ILIKE`，不做 `lower()` 包装 | PG 上 `ILIKE` 能吃到 `pg_trgm` 索引（一旦加上），且不用改列排序规则 |
+| 值对象而散参数 | `NoteQuery` 记录 + `Normalized*` / `Effective*` 属性 | 空白字符串、`Guid.Empty` 这类"等于没传"的边界在一处收口，仓库层不必重复判断；单测能直接钉住规范化行为 |
+
+**知识库包：为什么不导出向量与切片**
+
+| 决策 | 选择 | 为什么 |
+| --- | --- | --- |
+| 包里放什么 | `manifest.json` + 原始文件（`files/NNNN.ext`） | 向量绑定具体模型与版本（还有芯片差异），换机器几乎必然对不上；原始文件、笔记、专题才是用户真正拥有的东西 |
+| 导入怎么做 | 新建知识库 + 资料重新入队解析 | 导入慢一点，但索引是按本机模型重新算的，检索结果才对得上；顺带复用既有的解析/索引链路，不写第二套 |
+| ID 怎么办 | 全部重新生成，按包内映射重写笔记引用 | 避免与已有数据撞 ID；映射表只在一次导入的内存里存在 |
+| 重名怎么办 | 自动让路：`名称（导入）`、`名称（导入 2）`… | 不让用户为了导入先改名或删库 |
+| 完整性怎么保证 | 每个文件记 SHA-256，导入时逐条比对 | 包会被网盘、聊天软件转发，"文件坏了"必须能被发现并跳过，而不是塞进库里变成解析失败 |
+| 为什么不合并进已有库 | 一期不做 | 合并要处理同名资料 / 专题 / 笔记的冲突策略，每一种都需要用户决策；先把备份迁移与分享打通 |
+
+**分层落地**：包功能是应用服务（`Application/KnowledgePackages/`），但它需要"列资料、建资料、写摘要"这些数据动作。为此新增领域端口 `IKnowledgePackageStore`，由 `Persistence/KnowledgePackageStore` 收窄 `KnowledgeBaseStore` 实现——应用层不认识持久化类型，分层检查保持 0 违规。
+
+**导入失败怎么办：补偿回滚而不是事务**
+
+文件系统写入无法进数据库事务，所以导入走"记日志 + 逆序补偿"：`KnowledgePackageImporter` 在 `try` 里维护三本账（新建专题 ID、新建笔记 ID、新建资料 ID + 落盘路径），任何异常都进同一个 `catch`，按 **笔记 → 专题 → 资料（含落盘文件）→ 知识库** 逆序删除，然后把"已回滚写入的 N 份资料 / N 篇笔记 / N 个专题（原因：…）"塞进 `KnowledgePackageException` 返回给前端。补偿本身用 `CancellationToken.None`——请求已经取消了，但清理必须做完；单条补偿失败只记 `LogError`，不影响其余补偿。
+
+两个从这条链路上长出来的真实修复：
+
+| 问题 | 现象 | 修复 |
+| --- | --- | --- |
+| 包条目名分隔符不一致 | Windows 自带压缩 / `ZipFile.CreateFromDirectory` 写的条目名是 `files\0001.md`，清单里写的是 `files/0001.md`，`TryGetValue` 永远落空 → 导入 0 份资料却返回成功 | `KnowledgePackageReader.NormalizeEntryPath`（反斜杠→斜杠、去 `./` 与前导 `/`）+ `BuildEntryIndex` 归一化建索引，查找一律走索引 |
+| 零内容导入成功 | 上一条的后果：库里多出一个空知识库，用户以为导入成功 | 导入结束时 `createdDocumentCount == 0 && createdNotes == 0` 直接抛 `KnowledgePackageException`，让补偿逻辑把壳子删掉；错误信息带上第一条 warning（通常是"包内缺少文件 …"） |
+
+**为什么不做成真正的两阶段提交**：导入的产物分散在 PG（元数据）、向量表（后续异步写入）和 `App_Data/uploads`（文件）三处，任何一处都可能因为磁盘满、进程被杀而停在中途——那已经不是代码能补偿的范畴（下次启动的清理任务才管得了）。补偿回滚的目标是"用户看到明确的失败，且库里不留半成品"，不是"任何时刻断电都一致"。
+
+**诚实的边界**：不导出对话历史（`sourceSessionId` 导入后清空）；"分享到市场"目前只是"把 zip 发出去"，托管与一键安装属于 `docs/ROADMAP.md` 的 D-3。另外 `DELETE /api/knowledge-bases/{id}` 目前不存在（只能删资料与笔记），清理验证用的一次性库只能重建数据库。
 
 ## 10. Function Calling 与 MCP
 
@@ -533,7 +737,7 @@ Embedding 使用 `Microsoft.ML.OnnxRuntime` 和 `Microsoft.ML.Tokenizers` NuGet 
 
 **闸门顺序固定**：认证（401）→ 启停（403）→ 限流（429 + `Retry-After`）→ 工具准入（200 + JSON-RPC 错误）→ 审计（旁路写入）。
 
-- **能力词表**：`knowledge:read`、`knowledge:write`、`workspace:read|write`、`files:read|write`、`avatar:read|write`，外加通配 `*` 与按作用域通配（`knowledge:*`）。用「能力:读/写」而不是单一"是否只读"布尔：外部 Agent 常常只需要知识库，没有任何理由读本机任意授权目录。
+- **能力词表**：`knowledge:read`、`knowledge:write`、`workspace:read|write`、`files:read|write`、`avatar:read|write`、`chat:read`，外加通配 `*` 与按作用域通配（`knowledge:*`）。用「能力:读/写」而不是单一"是否只读"布尔：外部 Agent 常常只需要知识库，没有任何理由读本机任意授权目录。其中 `chat:read` 刻意不复用 `knowledge:read`——私人对话比资料更敏感，只拿到知识库权限的客户端不应顺带看见。
 - **工具清单即权限边界**：`McpToolCatalog` 把每个工具映射到「所需能力 + 是否写操作 + 是否作用于知识库」，**清单之外的工具默认拒绝**。新增工具忘记登记时是"不可用"，而不是"对所有人开放"。
 - **作用域三级收窄**：能力（能做什么）→ 工具白名单（能做哪些具体工具）→ 知识库白名单（能动哪些数据）。省略 `knowledgeBaseId` 时按默认知识库判定，因此"不传参数"不会绕过范围；`get_document_content` 只带资料 ID，必须回查资料所属知识库再判定。
 - **拒绝用 200 + JSON-RPC 错误**（`-32003`）：工具级拒绝要让模型看到可读原因并自行改道，而不是变成传输层错误。
@@ -543,6 +747,24 @@ Embedding 使用 `Microsoft.ML.OnnxRuntime` 和 `Microsoft.ML.Tokenizers` NuGet 
 - **写能力只有一条落地路径**：`upload_document` 把文本包成一次普通上传，复用解析/分块/内容版本/Outbox/索引生命周期，与插件摄取完全同源。
 
 **仍未实现**：OAuth 授权码流（当前是长期密钥）、按客户端的内容级 ACL（只有知识库级）、MCP 删除工具、调用配额与计费。
+
+**明确没做的一件事**：`tools/list` 不按客户端能力裁剪，受限客户端会「看得见但调不通」。裁剪必须在响应体重写上做（MCP SDK 的 `ToolCollection` 是单例，不支持按请求过滤），而这会动到 MCP 传输层，风险高于收益。因此权限判定的唯一入口仍然是 `tools/call` 的闸门，接第三方 Agent 时 `-32003` 应当作「换个工具再做」的正常分支处理。
+
+### 聊天历史回读（`chat:read`）
+
+外部 Agent 要接上「上次聊到哪」，光有检索是不够的——检索读的是资料与记忆，读不到**原话**。因此单独开一条只读路径：
+
+| 层 | 类型 | 职责 |
+| --- | --- | --- |
+| Domain | `Domain/Chats/ChatHistory.cs`（`ChatSessionSummary` / `ChatMessageHit` / `IChatHistoryStore`） | 定义读端口与来源名（`knowledge` / `avatar` / `companion` / `companion-import`） |
+| Application | `Application/Chats/ChatHistoryService.cs` | 来源名规范化、条数夹紧、把「参数写错」变成可读错误 |
+| Infrastructure | `Infrastructure/Persistence/SqlSugarChatHistoryStore.cs` | 一条 `UNION ALL` 合并三张会话表与一张导入记录表 |
+| MCP | `Mcp/ChatHistoryMcpTools.cs` | `list_chat_sessions`、`chat_search_history` |
+
+两个刻意的取舍：
+
+1. **来源名写错直接报错**，不静默返回空列表——空列表会被调用方理解成「用户没聊过」，而真实原因只是参数拼错。
+2. **LIKE 元字符先转义**：不转义时搜 `%` 会把全部历史捞出来、搜 `_` 会变成单字符通配，两种都是「看起来能用、结果莫名其妙」的坑。
 
 ### 配置与端点
 
@@ -628,6 +850,14 @@ Embedding 使用 `Microsoft.ML.OnnxRuntime` 和 `Microsoft.ML.Tokenizers` NuGet 
 1. 前端“投喂”页支持粘贴长文本（自动识别类型、可选日期/标签），或直接上传 `.txt/.md/.json/.log`（≤10 MB）。上传文件由 `AvatarEndpoints` 解码（UTF-8/BOM/UTF-16/GB18030）后按空行切段、单段超过 3000 字符再硬切，最多 200 段。
 2. `AvatarFragment.Create` 负责类型归一化（未知类型落到 `other`）、空标题回退、长度上限校验。
 3. 知识库问答与学习打卡会通过 `AvatarActivityRecorder` 自动写入碎片（学习/工作/创作 → `habit`，情绪 → `personality`，社交 → `relationship`，其它 → `journal`），同一来源+分类 30 分钟内只记一次，失败不影响主流程。
+
+**异步整理（`avatar_ingestions` 队列）**
+
+1. 投喂只做「落碎片 + 建任务（`queued`）」就返回，长文本不会阻塞问答。`AvatarIngestionWorker` 用 `ClaimNextIngestionAsync` 原子领取（`UPDATE ... WHERE id=@id AND status='queued'`，抢不到就说明别人领走了）。
+2. 单条任务有 **5 分钟上限**：超时由独立取消令牌打断，然后用 `CancellationToken.None` 把状态写成 `failed`。这一点很关键——用已取消的令牌写状态，行会重新变回 `running` 坟头，队列就此堵死。
+3. 空闲时每 60 秒扫一次「僵尸 `running`」（超过 10 分钟）重新排队，覆盖进程崩溃、状态回写前被打断等场景。启动时也扫一次。
+4. 模型返回的内容解析不出记忆时**降级为原文记忆**（`partial` + 提示可重试），而不是丢掉用户投喂的原文——原文已经在 `avatar_fragments` 里，重试不会重复。
+
 
 **分析**
 

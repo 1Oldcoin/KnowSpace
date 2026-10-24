@@ -95,13 +95,14 @@ public sealed class ToolCallingAgent(
         IReadOnlyList<RetrievedChunk> references,
         IReadOnlyList<KnowledgeChatMessage> history,
         CancellationToken cancellationToken,
-        AgentPreferences? preferencesOverride = null)
+        AgentPreferences? preferencesOverride = null,
+        string? referenceNote = null)
     {
         var settings = llmSettings.Selected;
         // 单轮请求的临时开关优先（问答页的工具开关），未传时读取设置页保存的偏好。
         var userPreferences = preferencesOverride ?? await preferences.GetAsync(cancellationToken);
         var instructions = BuildInstructions(userPreferences);
-        var systemPrompt = BuildSystemPrompt(references, instructions);
+        var systemPrompt = BuildSystemPrompt(references, instructions, referenceNote);
         var turns = BuildTurns(systemPrompt, history, message);
 
         // 用户偏好 + 全局总闸都在 registry 内部合并；这里只看最终工具集是否为空。
@@ -206,7 +207,14 @@ public sealed class ToolCallingAgent(
         return new AgentAnswer(Normalize(final.Content), traces).WithSources(sources);
     }
 
-    private static string BuildSystemPrompt(IReadOnlyList<RetrievedChunk> references, string instructions)
+    /// <param name="referenceNote">
+    /// 预检索结果的补充说明（例如“本轮检索最高相关度只有 0.31，已拒答”）。
+    /// 不传时行为与以前一致；拒答时必须传，否则模型会把“没有资料”当成“资料不重要”而硬编。
+    /// </param>
+    internal static string BuildSystemPrompt(
+        IReadOnlyList<RetrievedChunk> references,
+        string instructions,
+        string? referenceNote = null)
     {
         var builder = new StringBuilder(instructions);
         builder.AppendLine();
@@ -215,7 +223,9 @@ public sealed class ToolCallingAgent(
 
         if (references.Count == 0)
         {
-            builder.AppendLine("（本轮没有检索到相关知识库片段；如果问题需要资料支撑，请如实说明或先调用检索工具。）");
+            builder.AppendLine(string.IsNullOrWhiteSpace(referenceNote)
+                ? "（本轮没有检索到相关知识库片段；如果问题需要资料支撑，请如实说明或先调用检索工具。）"
+                : $"（{referenceNote}）");
             return builder.ToString();
         }
 
@@ -226,6 +236,8 @@ public sealed class ToolCallingAgent(
             builder.AppendLine(item.Content);
             builder.AppendLine();
         }
+
+        if (!string.IsNullOrWhiteSpace(referenceNote)) builder.AppendLine($"（{referenceNote}）");
         return builder.ToString();
     }
 

@@ -32,6 +32,7 @@ public sealed class PluginManager : IAsyncDisposable, IPluginRuntime
     private readonly IPluginItemMap _itemMap;
     private readonly IPluginSyncStateStore _syncStates;
     private readonly IKnowledgeBaseDirectory _knowledgeBaseDirectory;
+    private readonly PluginInvocationLimiter _limiter;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<PluginManager> _logger;
 
@@ -58,6 +59,7 @@ public sealed class PluginManager : IAsyncDisposable, IPluginRuntime
         IPluginItemMap itemMap,
         IPluginSyncStateStore syncStates,
         IKnowledgeBaseDirectory knowledgeBaseDirectory,
+        PluginInvocationLimiter limiter,
         ILoggerFactory loggerFactory,
         ILogger<PluginManager> logger)
     {
@@ -71,6 +73,7 @@ public sealed class PluginManager : IAsyncDisposable, IPluginRuntime
         _itemMap = itemMap;
         _syncStates = syncStates;
         _knowledgeBaseDirectory = knowledgeBaseDirectory;
+        _limiter = limiter;
         _loggerFactory = loggerFactory;
         _logger = logger;
     }
@@ -97,20 +100,103 @@ public sealed class PluginManager : IAsyncDisposable, IPluginRuntime
         foreach (var load in loads)
             _loads[load.Id] = load;
 
-        _logger.LogInformation("Discovered {Count} plugin(s) under {RootPath}", loads.Count, _paths.Root);
+        // 插件数量刻意不设上限：扫描不截断、列表不分页、注册表不设配额。
+        // 唯一收敛的是“同时 spawn 多少进程”，否则上百个插件会同时创建上百个子进程 + 上百次握手。
+        var concurrency = Math.Clamp(_options.StartupConcurrency, 1, 64);
+        _logger.LogInformation(
+            "Discovered {Count} plugin(s) under {RootPath}; starting them with concurrency {Concurrency} (no plugin count limit)",
+            loads.Count, _paths.Root, concurrency);
 
-        foreach (var load in loads)
-        {
-            if (!load.IsUsable)
+        await Parallel.ForEachAsync(
+            loads,
+            new ParallelOptions { MaxDegreeOfParallelism = concurrency, CancellationToken = cancellationToken },
+            async (load, token) =>
             {
-                GetOrCreateHost(load).MarkNotStarted(
-                    PluginState.Failed,
-                    string.Join("; ", load.Validation.Errors));
-                continue;
+                if (!load.IsUsable)
+                {
+                    GetOrCreateHost(load).MarkNotStarted(
+                        PluginState.Failed,
+                        string.Join("; ", load.Validation.Errors));
+                    return;
+                }
+
+                await StartSafelyAsync(load, PluginActors.System, silent: true, token).ConfigureAwait(false);
+            }).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 重新扫描插件目录：新放进来的目录会被发现并启动，已删除的目录会被清理。
+    ///
+    /// <para>
+    /// 为什么需要它：插件数量没有上限、也不需要签名，最自然的用法就是“把文件夹拷进去 → 它就该出现”。
+    /// 进程重扫而不是“重启 API”对使用者是两回事：重启会中断正在跑的解析任务与对话。
+    /// </para>
+    /// </summary>
+    public async Task<PluginRescanResult> RescanAsync(string actor, CancellationToken cancellationToken)
+    {
+        await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await LoadRegistrationsAsync(cancellationToken).ConfigureAwait(false);
+
+            var loads = _loader.Scan(_paths.Root);
+            var discovered = new List<string>(loads.Count);
+            var started = new List<string>();
+            var failed = new List<string>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+
+            foreach (var load in loads)
+            {
+                seen.Add(load.Id);
+                discovered.Add(load.Id);
+
+                var isNew = !_loads.TryGetValue(load.Id, out var previous)
+                    || !string.Equals(previous.Directory, load.Directory, StringComparison.OrdinalIgnoreCase);
+
+                _loads[load.Id] = load;
+
+                if (!isNew && GetOrCreateHost(load).State is PluginState.Running or PluginState.Degraded or PluginState.Starting)
+                {
+                    // 已经在跑且目录没变：不动它，避免把在途调用打断。
+                    continue;
+                }
+
+                if (!load.IsUsable)
+                {
+                    GetOrCreateHost(load).MarkNotStarted(PluginState.Failed, string.Join("; ", load.Validation.Errors));
+                    failed.Add(load.Id);
+                    continue;
+                }
+
+                var state = await StartSafelyAsync(load, actor, silent: true, cancellationToken).ConfigureAwait(false);
+                if (state is PluginState.Running or PluginState.Degraded) started.Add(load.Id);
+                else failed.Add(load.Id);
             }
 
-            await StartSafelyAsync(load, PluginActors.System, silent: true, cancellationToken)
-                .ConfigureAwait(false);
+            // 目录已经被删掉的插件：停进程并从内存里移除，否则列表会一直挂着一个幽灵条目。
+            var removed = new List<string>();
+            foreach (var pluginId in _loads.Keys.ToArray())
+            {
+                if (seen.Contains(pluginId)) continue;
+
+                if (_hosts.TryRemove(pluginId, out var host))
+                    await host.DisposeAsync().ConfigureAwait(false);
+
+                _loads.TryRemove(pluginId, out _);
+                _integrity.TryRemove(pluginId, out _);
+                _limiter.Forget(pluginId);
+                removed.Add(pluginId);
+            }
+
+            _logger.LogInformation(
+                "Plugin rescan by {Actor}: discovered {Discovered}, started {Started}, failed {Failed}, removed {Removed}",
+                actor, discovered.Count, started.Count, failed.Count, removed.Count);
+
+            return new PluginRescanResult(discovered, started, failed, removed);
+        }
+        finally
+        {
+            _lifecycleGate.Release();
         }
     }
 
@@ -296,6 +382,7 @@ public sealed class PluginManager : IAsyncDisposable, IPluginRuntime
     private static IReadOnlyList<string> DeclaredPermissions(PluginManifest manifest) =>
         manifest.Capabilities
             .SelectMany(capability => capability.Permissions)
+            .Concat(manifest.Permissions)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
@@ -345,7 +432,8 @@ public sealed class PluginManager : IAsyncDisposable, IPluginRuntime
                 integrity?.Status,
                 IsConfigured(manifest, registration),
                 host?.InFlightInvocations ?? 0,
-                host?.IsDraining ?? false));
+                host?.IsDraining ?? false,
+                host?.Isolation.Short));
         }
 
         return snapshots.OrderBy(snapshot => snapshot.Id, StringComparer.Ordinal).ToList();
@@ -381,6 +469,9 @@ public sealed class PluginManager : IAsyncDisposable, IPluginRuntime
         _registry.QueryAuditAsync(pluginId, limit, cancellationToken);
 
     // ───────────────────────────── 健康与调用 ─────────────────────────────
+
+    /// <summary>当前各插件的并发/排队占用（运维与界面用）。</summary>
+    public IReadOnlyList<PluginConcurrencySnapshot> GetConcurrencySnapshot() => _limiter.Snapshot();
 
     public async Task<PluginHealth> CheckHealthAsync(string pluginId, string actor, CancellationToken cancellationToken)
     {
@@ -574,7 +665,9 @@ public sealed class PluginManager : IAsyncDisposable, IPluginRuntime
             load,
             _options,
             dataDirectory,
-            _loggerFactory.CreateLogger($"Plugin.{load.Id}"));
+            _limiter,
+            _loggerFactory.CreateLogger($"Plugin.{load.Id}"),
+            _paths.Root);
 
         _hosts[load.Id] = host;
         return host;
@@ -958,6 +1051,9 @@ public sealed class PluginManager : IAsyncDisposable, IPluginRuntime
 
             if (_hosts.TryRemove(pluginId, out var removed))
                 await removed.DisposeAsync().ConfigureAwait(false);
+
+            // 计数也要清掉：否则重装同一插件会沿用旧的“在途”状态。
+            _limiter.Forget(pluginId);
 
             await _installer.UninstallAsync(pluginId, cancellationToken).ConfigureAwait(false);
             _loads.TryRemove(pluginId, out _);

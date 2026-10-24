@@ -10,6 +10,7 @@ public static class ApiEndpointMappings
         endpoints.MapCompanionEndpoints();
         endpoints.MapTopicEndpoints();
         endpoints.MapNoteEndpoints();
+        endpoints.MapKnowledgePackageEndpoints();
         endpoints.MapSettingsEndpoints();
         endpoints.MapStudyEndpoints();
         endpoints.MapDocumentContentEndpoints();

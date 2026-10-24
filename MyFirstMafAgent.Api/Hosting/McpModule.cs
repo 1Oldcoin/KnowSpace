@@ -38,7 +38,8 @@ public static class McpModule
                 .WithHttpTransport(options => options.Stateless = true)
                 .WithTools<KnowledgeMcpTools>()
                 .WithTools<LocalFileMcpTools>()
-                .WithTools<AvatarMcpTools>();
+                .WithTools<AvatarMcpTools>()
+                .WithTools<ChatHistoryMcpTools>();
         }
 
         return new McpServerRegistration(enabled, path);

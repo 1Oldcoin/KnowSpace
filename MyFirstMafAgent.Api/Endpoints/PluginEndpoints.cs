@@ -45,6 +45,28 @@ public static class PluginEndpoints
             return Results.Ok(new { entries });
         });
 
+        // 并发/排队占用：运维排查「插件太忙」的第一站。字面量路由必须写在 /{id} 之前才直观。
+        group.MapGet("/concurrency", (PluginManager manager) => Results.Ok(new
+        {
+            plugins = manager.GetConcurrencySnapshot()
+        }));
+
+        // 热扫描：把插件文件夹拷进目录后点一下「重新扫描」就能用，不必重启 API。
+        group.MapPost("/rescan", async (
+            PluginManager manager,
+            CancellationToken cancellationToken) =>
+        {
+            var result = await manager.RescanAsync(PluginActors.Api, cancellationToken);
+            return Results.Ok(new
+            {
+                discovered = result.Discovered,
+                started = result.Started,
+                failed = result.Failed,
+                removed = result.Removed,
+                plugins = manager.GetStatuses()
+            });
+        });
+
         group.MapGet("/{id}", async (
             string id,
             PluginManager manager,
@@ -61,8 +83,14 @@ public static class PluginEndpoints
             return Results.Ok(new
             {
                 status,
+                // 方言决定"这个插件的清单和能力从哪来"：自有协议看清单，MCP 看 tools/list。
+                dialect = host?.Dialect ?? PluginDialects.Native,
+                // 隔离实况：用户要能回答"这个插件现在到底能碰什么"。
+                isolation = host?.Isolation,
                 capabilities = status.Capabilities.Select(capabilityId => capabilityId),
                 declaredCapabilities = host?.Manifest.Capabilities ?? [],
+                // MCP 方言下清单里通常不写能力，真正生效的是运行期发现的那批。
+                discoveredCapabilities = host?.Capabilities ?? [],
                 health = host?.LastHealth?.Status,
                 lastError = host?.LastError,
                 inFlightInvocations = host?.InFlightInvocations ?? 0,
@@ -76,13 +104,16 @@ public static class PluginEndpoints
                 configRequired = host?.Manifest.Config?.Required ?? [],
                 declaredPermissions = (host?.Manifest.Capabilities ?? [])
                     .SelectMany(capability => capability.Permissions)
+                    .Concat(host?.Manifest.Permissions ?? [])
                     .Distinct(StringComparer.Ordinal)
                     .OrderBy(permission => permission, StringComparer.Ordinal)
                     .ToList(),
                 // 作用域：空列表表示不限制知识库。
                 allowedKnowledgeBaseIds = registration?.AllowedKnowledgeBaseIds ?? [],
                 maxDocuments = registration?.MaxDocuments ?? 0,
-                limits = host?.Manifest.Limits
+                limits = host?.Manifest.Limits,
+                concurrency = manager.GetConcurrencySnapshot()
+                    .FirstOrDefault(item => string.Equals(item.PluginId, id, StringComparison.Ordinal))
             });
         });
 
@@ -454,6 +485,8 @@ public static class PluginEndpoints
             PluginProtocol.ErrorCancelled => StatusCodes.Status408RequestTimeout,
             PluginProtocol.ErrorIncompatibleProtocol => StatusCodes.Status409Conflict,
             PluginProtocol.ErrorUnhealthy => StatusCodes.Status503ServiceUnavailable,
+            // 429 而不是 503：这是「太忙，退避后重试」，不是「坏了」。
+            PluginProtocol.ErrorOverloaded => StatusCodes.Status429TooManyRequests,
             _ => StatusCodes.Status502BadGateway
         };
 

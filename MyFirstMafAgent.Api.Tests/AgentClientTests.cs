@@ -237,6 +237,41 @@ public sealed class AgentCallGateTests
         Assert.True(AgentCallGate.DecideDocumentAccess(client, KnowledgeBaseA).Allowed);
         Assert.False(AgentCallGate.DecideDocumentAccess(client, KnowledgeBaseB).Allowed);
     }
+
+    /// <summary>
+    /// 「知识库可选」的工具（如 chat_search_history）曾经因为是 <c>UsesKnowledgeBase: false</c>
+    /// 而完全跳过知识库校验：受限客户端只要显式传一个别的 knowledgeBaseId，
+    /// 就能把未授权知识库的问答历史读出来。可选参数也必须受范围约束。
+    /// </summary>
+    [Fact]
+    public void Optional_knowledge_base_parameter_is_still_scope_checked()
+    {
+        var client = Client(
+            capabilities: [AgentClientCapabilities.ChatRead],
+            knowledgeBases: [KnowledgeBaseA]);
+
+        Assert.True(AgentCallGate.Decide(client, "chat_search_history", KnowledgeBaseA, DefaultKnowledgeBase).Allowed);
+
+        var denied = AgentCallGate.Decide(client, "chat_search_history", KnowledgeBaseB, DefaultKnowledgeBase);
+        Assert.False(denied.Allowed);
+        Assert.Equal(AgentCallGate.PermissionDenied, denied.JsonRpcErrorCode);
+        Assert.Contains("未被授权访问知识库", denied.Message);
+    }
+
+    [Fact]
+    public void Optional_knowledge_base_omitted_is_allowed_for_unscoped_tools()
+    {
+        // 不在知识库范围内的客户端仍然可以用 chat:read 查分身/伴侣对话——
+        // 这正是把 knowledgeBaseId 做成可选的目的，不能因为"没传"就要求默认库权限。
+        var client = Client(
+            capabilities: [AgentClientCapabilities.ChatRead],
+            knowledgeBases: [KnowledgeBaseA]);
+
+        var decision = AgentCallGate.Decide(client, "chat_search_history", null, DefaultKnowledgeBase);
+
+        Assert.True(decision.Allowed);
+        Assert.Null(decision.EffectiveKnowledgeBaseId);
+    }
 }
 
 /// <summary>令牌桶限流。</summary>

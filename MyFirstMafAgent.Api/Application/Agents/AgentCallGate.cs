@@ -60,12 +60,25 @@ public static class AgentCallGate
                 $"客户端 '{client.Name}' 的白名单未包含工具 {toolName}。");
         }
 
-        if (!descriptor.UsesKnowledgeBase)
-            return AgentCallDecision.Allow(null);
+        var requested = requestedKnowledgeBaseId is { } id && id != Guid.Empty ? id : (Guid?)null;
 
-        var effective = requestedKnowledgeBaseId is { } requested && requested != Guid.Empty
-            ? requested
-            : defaultKnowledgeBaseId;
+        if (!descriptor.UsesKnowledgeBase)
+        {
+            // 「知识库可选」的工具（chat_search_history 等）也必须校验显式传入的知识库 ID：
+            // 否则受限客户端可以靠传一个不相关的 knowledgeBaseId 绕过 allowedKnowledgeBaseIds，
+            // 把别人的问答历史读出来。可选 ≠ 免检。
+            if (requested is { } explicitId && !client.CanAccessKnowledgeBase(explicitId))
+            {
+                return AgentCallDecision.Deny(
+                    PermissionDenied,
+                    $"客户端 '{client.Name}' 未被授权访问知识库 '{explicitId:D}'。允许的知识库："
+                    + string.Join(", ", client.AllowedKnowledgeBaseIds.Select(item => item.ToString("D"))));
+            }
+
+            return AgentCallDecision.Allow(null);
+        }
+
+        var effective = requested ?? defaultKnowledgeBaseId;
 
         if (!client.CanAccessKnowledgeBase(effective))
         {

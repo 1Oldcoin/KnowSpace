@@ -175,6 +175,37 @@ public sealed class NoteServiceTests
         public Task<IReadOnlyList<Note>> ListAsync(Guid knowledgeBaseId, CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<Note>>(_notes.Values.Where(note => note.KnowledgeBaseId == knowledgeBaseId).ToList());
 
+        /// <summary>
+        /// 内存实现同样把过滤放在"存储层"做，行为与 SQL 版对齐（大小写不敏感、按资料/专题过滤）。
+        /// 用它来钉住 NoteService 不再自己做过滤这件事。
+        /// </summary>
+        public Task<IReadOnlyList<Note>> ListAsync(NoteQuery query, CancellationToken cancellationToken)
+        {
+            IEnumerable<Note> filtered = _notes.Values.Where(note => note.KnowledgeBaseId == query.KnowledgeBaseId);
+
+            if (query.NormalizedCategory is { } category)
+                filtered = filtered.Where(note => string.Equals(note.Category, category, StringComparison.OrdinalIgnoreCase));
+
+            if (query.EffectiveDocumentId is { } documentId)
+                filtered = filtered.Where(note =>
+                    note.SourceDocumentId == documentId || note.Sources.Any(source => source.DocumentId == documentId));
+
+            if (query.EffectiveTopicId is { } topicId)
+                filtered = filtered.Where(note => note.TopicId == topicId);
+
+            if (query.NormalizedSearch is { } search)
+                filtered = filtered.Where(note =>
+                    note.Title.Contains(search, StringComparison.OrdinalIgnoreCase)
+                    || note.Content.Contains(search, StringComparison.OrdinalIgnoreCase)
+                    || note.Tags.Any(tag => tag.Contains(search, StringComparison.OrdinalIgnoreCase)));
+
+            var result = filtered
+                .OrderByDescending(note => note.IsPinned)
+                .ThenByDescending(note => note.UpdatedAt)
+                .ToList();
+            return Task.FromResult<IReadOnlyList<Note>>(result);
+        }
+
         public Task<Note?> GetAsync(Guid noteId, CancellationToken cancellationToken) =>
             Task.FromResult(_notes.TryGetValue(noteId, out var note) ? note : null);
 

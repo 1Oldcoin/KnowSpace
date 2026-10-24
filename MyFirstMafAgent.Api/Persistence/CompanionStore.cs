@@ -1,5 +1,6 @@
 using System.Linq.Expressions;
 using MyFirstMafAgent.Api.Companions;
+using MyFirstMafAgent.Api.Infrastructure.Persistence;
 using SqlSugar;
 
 namespace MyFirstMafAgent.Api.Persistence;
@@ -15,6 +16,8 @@ public sealed class CompanionStore(SqlSugarScope database)
         database.CodeFirst.InitTables<CompanionMessageSchemaEntity>();
         database.CodeFirst.InitTables<CompanionSessionSchemaEntity>();
         database.CodeFirst.InitTables<CompanionSessionMessageSchemaEntity>();
+        // 独立向量表：伴侣历史不进知识库索引，否则两个人的私聊会被当成"资料"搜出来。
+        database.CodeFirst.InitTables<CompanionMessageVectorSchemaEntity>();
         return Task.CompletedTask;
     }
 
@@ -213,6 +216,18 @@ public sealed class CompanionStore(SqlSugarScope database)
 
     public async Task<IReadOnlyList<ImportedChatMessage>> FindRelevantMessagesAsync(Guid profileId, string targetSender, string query, int limit, CancellationToken cancellationToken)
     {
+        var rows = await FindLexicalMessagesAsync(profileId, targetSender, query, limit, cancellationToken);
+        return rows.Select(row => new ImportedChatMessage(row.Sender, row.Content, row.SentAt)).ToList();
+    }
+
+    /// <summary>词面（子串）检索，带上消息 ID —— 与向量结果做 RRF 融合时需要一个稳定的标识。</summary>
+    public async Task<IReadOnlyList<CompanionRecall>> FindLexicalMessagesAsync(
+        Guid profileId,
+        string targetSender,
+        string query,
+        int limit,
+        CancellationToken cancellationToken)
+    {
         var terms = CreateSearchTerms(query);
         var messages = database.Queryable<CompanionMessageSchemaEntity>()
             .Where(message => message.ProfileId == profileId && message.Sender == targetSender);
@@ -224,14 +239,140 @@ public sealed class CompanionStore(SqlSugarScope database)
             .OrderBy(message => SqlFunc.IsNull(message.SentAt, DateTimeOffset.MaxValue), OrderByType.Desc)
             .OrderBy(message => message.Id, OrderByType.Desc)
             .Take(limit)
-            .Select(message => new ImportedChatMessageRow
+            .Select(message => new CompanionRecallRow
             {
+                MessageId = message.Id,
                 Sender = message.Sender,
                 Content = message.Content,
                 SentAt = message.SentAt
             })
             .ToListAsync(cancellationToken);
-        return rows.Select(row => new ImportedChatMessage(row.Sender, row.Content, row.SentAt)).ToList();
+        return rows.Select(row => new CompanionRecall(row.MessageId, row.Sender, row.Content, row.SentAt)).ToList();
+    }
+
+    // ─────────────── 向量检索（伴侣历史的独立索引） ─��─────────────
+
+    /// <summary>当前向量模型下已索引的消息数，用于界面显示“要不要重建”。</summary>
+    public async Task<int> CountVectorsAsync(Guid profileId, string fingerprint, CancellationToken cancellationToken)
+    {
+        var sql = """
+            SELECT COUNT(*)::int4 AS "Value"
+            FROM companion_message_vectors AS v
+            JOIN companion_messages AS m ON m.id = v.message_id
+            WHERE m.profile_id = @profileId AND v.embedding_fingerprint = @fingerprint
+            """;
+        var rows = await database.Ado.SqlQueryAsync<ScalarRow>(sql,
+            new { profileId, fingerprint }, cancellationToken);
+        return rows.Count == 0 ? 0 : rows[0].Value;
+    }
+
+    /// <summary>
+    /// 取尚未向量化的消息（按时间倒序，优先给最近的）。
+    /// <para>
+    /// 只看 <paramref name="sender"/>：模拟对话只用对方的话作为记忆，把用户自己的话也建索引会污染“TA 说过什么”。
+    /// </para>
+    /// </summary>
+    public async Task<IReadOnlyList<CompanionMessageVectorSource>> ListMessagesForVectorAsync(
+        Guid profileId,
+        string sender,
+        string fingerprint,
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        var sql = """
+            SELECT m.id      AS "MessageId",
+                   m.content AS "Content"
+            FROM companion_messages AS m
+            WHERE m.profile_id = @profileId
+              AND m.sender = @sender
+              AND char_length(m.content) >= @minLength
+              AND NOT EXISTS (
+                  SELECT 1 FROM companion_message_vectors AS v
+                  WHERE v.message_id = m.id AND v.embedding_fingerprint = @fingerprint)
+            ORDER BY m.sent_at DESC NULLS LAST, m.id DESC
+            LIMIT @limit
+            """;
+        var rows = await database.Ado.SqlQueryAsync<CompanionMessageVectorSourceRow>(sql, new
+        {
+            profileId,
+            sender,
+            fingerprint,
+            minLength = 4,
+            limit = Math.Clamp(limit, 1, 5000)
+        }, cancellationToken);
+        return rows.Select(row => new CompanionMessageVectorSource(row.MessageId, row.Content)).ToList();
+    }
+
+    public async Task UpsertMessageVectorsAsync(
+        IReadOnlyList<CompanionMessageVector> vectors,
+        CancellationToken cancellationToken)
+    {
+        if (vectors.Count == 0) return;
+
+        await database.Ado.BeginTranAsync();
+        try
+        {
+            var ids = vectors.Select(vector => vector.MessageId).ToList();
+            for (var offset = 0; offset < ids.Count; offset += 500)
+            {
+                var batch = ids.Skip(offset).Take(500).ToList();
+                await database.Deleteable<CompanionMessageVectorSchemaEntity>()
+                    .Where(entity => batch.Contains(entity.MessageId))
+                    .ExecuteCommandAsync(cancellationToken);
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            foreach (var vector in vectors)
+            {
+                await database.Insertable(new CompanionMessageVectorSchemaEntity
+                {
+                    MessageId = vector.MessageId,
+                    EmbeddingSpecId = vector.EmbeddingSpecId,
+                    EmbeddingFingerprint = vector.SpecFingerprint,
+                    Dimensions = vector.Dimensions,
+                    Embedding = PgVectorSql.ToVectorLiteral(vector.Embedding),
+                    UpdatedAt = now
+                }).ExecuteCommandAsync(cancellationToken);
+            }
+
+            await database.Ado.CommitTranAsync();
+        }
+        catch
+        {
+            await database.Ado.RollbackTranAsync();
+            throw;
+        }
+    }
+
+    /// <summary>删除某个画像的全部向量（重新导入 / 换模型时用）。</summary>
+    public async Task<int> ClearVectorsAsync(Guid profileId, CancellationToken cancellationToken)
+    {
+        var sql = """
+            DELETE FROM companion_message_vectors AS v
+            USING companion_messages AS m
+            WHERE m.id = v.message_id AND m.profile_id = @profileId
+            """;
+        return await database.Ado.ExecuteCommandAsync(sql, new { profileId }, cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<CompanionMessageVectorMatch>> SearchMessageVectorsAsync(
+        Guid profileId,
+        string sender,
+        float[] embedding,
+        string fingerprint,
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        var sql = PgVectorSql.BuildCompanionMessageSearchSql(PgVectorSql.ToVectorLiteral(embedding));
+        var rows = await database.Ado.SqlQueryAsync<CompanionMessageVectorMatchRow>(sql, new
+        {
+            fingerprint,
+            profileId,
+            sender,
+            limit = Math.Clamp(limit, 1, 100)
+        }, cancellationToken);
+        return rows.Select(row => new CompanionMessageVectorMatch(
+            row.MessageId, row.Sender, row.Content, row.SentAt, row.Similarity)).ToList();
     }
 
     private static CompanionProfile ToProfile(CompanionProfileRow profile) =>
@@ -302,4 +443,63 @@ internal sealed class ImportedChatMessageRow
     public string Sender { get; set; } = string.Empty;
     public string Content { get; set; } = string.Empty;
     public DateTimeOffset? SentAt { get; set; }
+}
+
+/// <summary>一条待向量化的消息（只带 id 与正文，不读整行）。</summary>
+public sealed record CompanionMessageVectorSource(long MessageId, string Content);
+
+/// <summary>召回的一条历史消息（词面或向量）。</summary>
+public sealed record CompanionRecall(long MessageId, string Sender, string Content, DateTimeOffset? SentAt);
+
+internal sealed class CompanionRecallRow
+{
+    public CompanionRecallRow() { }
+
+    public long MessageId { get; set; }
+    public string Sender { get; set; } = string.Empty;
+    public string Content { get; set; } = string.Empty;
+    public DateTimeOffset? SentAt { get; set; }
+}
+
+/// <summary>一条待写入的消息向量。</summary>
+public sealed record CompanionMessageVector(
+    long MessageId,
+    Guid EmbeddingSpecId,
+    string SpecFingerprint,
+    int Dimensions,
+    float[] Embedding);
+
+/// <summary>向量检索命中的一条历史消息。</summary>
+public sealed record CompanionMessageVectorMatch(
+    long MessageId,
+    string Sender,
+    string Content,
+    DateTimeOffset? SentAt,
+    double Similarity);
+
+internal sealed class CompanionMessageVectorSourceRow
+{
+    public CompanionMessageVectorSourceRow() { }
+
+    public long MessageId { get; set; }
+    public string Content { get; set; } = string.Empty;
+}
+
+internal sealed class CompanionMessageVectorMatchRow
+{
+    public CompanionMessageVectorMatchRow() { }
+
+    public long MessageId { get; set; }
+    public string Sender { get; set; } = string.Empty;
+    public string Content { get; set; } = string.Empty;
+    public DateTimeOffset? SentAt { get; set; }
+    public double Similarity { get; set; }
+}
+
+/// <summary>Ado 单值查询的承载行。</summary>
+internal sealed class ScalarRow
+{
+    public ScalarRow() { }
+
+    public int Value { get; set; }
 }

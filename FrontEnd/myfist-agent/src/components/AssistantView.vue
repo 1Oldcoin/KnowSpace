@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
-import { ArrowDown, BookOpen, Check, CornerDownLeft, Download, FileText, FolderOpen, Globe, MessageCircle, MoreHorizontal, Pencil, Plus, Send, Sparkles, Trash2, UserRound, Wrench } from 'lucide-vue-next'
+import { ArrowDown, BookOpen, Check, CornerDownLeft, Download, FileText, FolderOpen, Globe, MessageCircle, MoreHorizontal, NotebookPen, Pencil, Play, Plus, Send, Sparkles, Trash2, UserRound, Wrench } from 'lucide-vue-next'
 import type { ChatToolOptions, KnowledgeChatSession } from '../services/api'
 import type { AssistantMessage } from '../types'
 
@@ -24,6 +24,8 @@ const emit = defineEmits<{
   deleteSession: [sessionId: string]
   deleteSessions: [sessionIds: string[]]
   exportSession: [sessionId: string]
+  saveAsNote: [message: AssistantMessage]
+  playMedia: [payload: { documentId: string; fileName: string; seconds: number }]
   'update:toolOptions': [options: Required<ChatToolOptions>]
 }>()
 const draft = ref('')
@@ -107,6 +109,61 @@ function hasWebSearchCall(calls: AssistantMessage['toolCalls']) {
   return (calls ?? []).some(call => isWebSearchTool(call.name))
 }
 
+// ---- 引用元数据 ----
+
+type ChatCitation = NonNullable<AssistantMessage['citations']>[number]
+
+/** 相似度按百分比展示；旧数据或异常值直接不显示，避免出现 NaN%。 */
+function citationScore(similarity?: number) {
+  if (typeof similarity !== 'number' || !Number.isFinite(similarity)) return ''
+  return `${Math.round(Math.max(0, Math.min(1, similarity)) * 100)}%`
+}
+
+/** 排名优先用后端写入的 rank，旧数据缺失时退化为列表顺序。 */
+function citationRank(citation: ChatCitation, index: number) {
+  return citation.rank && citation.rank > 0 ? citation.rank : index + 1
+}
+
+/** 悬浮提示：文件名 + 切片序号 + 相关度 + 文本片段，用于快速核对答案依据。 */
+function citationTooltip(citation: ChatCitation) {
+  const parts = [citation.fileName]
+  if (typeof citation.chunkIndex === 'number' && citation.chunkIndex >= 0) parts.push(`第 ${citation.chunkIndex + 1} 段`)
+  if (hasMediaStart(citation)) parts.push(`从 ${mediaTimeLabel(citation.mediaStartSeconds)} 开始`)
+  const score = citationScore(citation.similarity)
+  if (score) parts.push(`相似度 ${score}`)
+  return citation.snippet ? `${parts.join(' · ')}\n${citation.snippet}` : parts.join(' · ')
+}
+
+/**
+ * 有没有可跳转的时间点。
+ *
+ * 必须判 null/undefined 而不是真假值：第一片切片从 `[00:00:00]` 开始，0 是合法时间点，
+ * 用 `if (x)` 会把“从片头开始”当成“没有时间点”，整片引用就失去了跳转能力。
+ */
+function hasMediaStart(citation: ChatCitation): citation is ChatCitation & { mediaStartSeconds: number } {
+  return typeof citation.mediaStartSeconds === 'number' && Number.isFinite(citation.mediaStartSeconds)
+}
+
+/** 秒数 → mm:ss / h:mm:ss。引用里的时间点是给人看的，不给小数。 */
+function mediaTimeLabel(seconds?: number | null) {
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) return ''
+  const total = Math.floor(seconds)
+  const pad = (value: number) => value.toString().padStart(2, '0')
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(total % 60)}` : `${minutes}:${pad(total % 60)}`
+}
+
+/** 只有音视频切片才带时间点；普通文档的引用保持纯展示。 */
+function openCitation(citation: ChatCitation) {
+  if (!hasMediaStart(citation)) return
+  emit('playMedia', {
+    documentId: citation.documentId,
+    fileName: citation.fileName,
+    seconds: citation.mediaStartSeconds,
+  })
+}
+
 // ---- 单轮工具开关 ----
 
 const canUseTools = computed(() => props.toolsAvailable && props.apiOnline)
@@ -142,6 +199,13 @@ const toolHint = computed(() => {
   ].filter(Boolean)
   return enabled.length ? `可调用：知识库 + ${enabled.join(' + ')}` : '可调用：知识库检索'
 })
+
+// ---- 存为笔记 ----
+
+/** 只有已给出回答的消息才能存为笔记；空回答或还在流式输出时按钮不可用。 */
+function canSaveAsNote(message: AssistantMessage) {
+  return message.role === 'assistant' && !!message.text.trim() && !props.busy
+}
 </script>
 
 <template>
@@ -164,7 +228,7 @@ const toolHint = computed(() => {
             <div class="prompt-grid"><button @click="usePrompt('帮我用简单的例子解释一个复杂概念')"><span class="prompt-icon prompt-lilac"><Sparkles :size="16" /></span><span><strong>拆解复杂概念</strong><small>用例子讲清一个难点</small></span><CornerDownLeft :size="14" /></button><button @click="usePrompt('帮我设计一个本周的学习计划')"><span class="prompt-icon prompt-mint"><Check :size="16" /></span><span><strong>制定学习计划</strong><small>让目标变成可执行步骤</small></span><CornerDownLeft :size="14" /></button><button @click="usePrompt('帮我总结这段时间学习的重点')"><span class="prompt-icon prompt-peach"><FileText :size="16" /></span><span><strong>回顾学习重点</strong><small>把零散收获串联起来</small></span><CornerDownLeft :size="14" /></button></div>
           </div>
           <div v-else class="chat-messages">
-            <div v-for="message in messages" :key="message.id" class="chat-message" :class="`message-${message.role}`"><div class="message-avatar"><Sparkles v-if="message.role === 'assistant'" :size="16" /><UserRound v-else :size="16" /></div><div class="message-content"><div class="message-meta"><strong>{{ message.role === 'assistant' ? '知间 AI' : '我' }}</strong><span>{{ message.time }}</span></div><p>{{ message.text }}</p><div v-if="message.toolCalls?.length" class="tool-trace-list"><span class="tool-trace-title"><Wrench :size="12" /> 工具调用</span><span v-if="hasWebSearchCall(message.toolCalls) && message.toolCalls?.some(call => isWebSearchTool(call.name) && call.succeeded)" class="tool-trace-web"><Globe :size="11" /> 已联网搜索</span><span v-for="(call, index) in message.toolCalls" :key="index" class="tool-trace-chip" :class="{ 'tool-trace-failed': !call.succeeded, 'tool-trace-web-chip': isWebSearchTool(call.name) }" :title="call.resultPreview"><Globe v-if="isWebSearchTool(call.name)" :size="10" />{{ call.name }} · {{ call.elapsedMilliseconds }}ms</span></div><div v-if="message.citations?.length" class="citation-list"><BookOpen :size="13" />引用资料：<span v-for="citation in message.citations" :key="citation.documentId">{{ citation.fileName }}</span></div></div></div>
+            <div v-for="message in messages" :key="message.id" class="chat-message" :class="`message-${message.role}`"><div class="message-avatar"><Sparkles v-if="message.role === 'assistant'" :size="16" /><UserRound v-else :size="16" /></div><div class="message-content"><div class="message-meta"><strong>{{ message.role === 'assistant' ? '知间 AI' : '我' }}</strong><span>{{ message.time }}</span></div><p>{{ message.text }}</p><div v-if="message.toolCalls?.length" class="tool-trace-list"><span class="tool-trace-title"><Wrench :size="12" /> 工具调用</span><span v-if="hasWebSearchCall(message.toolCalls) && message.toolCalls?.some(call => isWebSearchTool(call.name) && call.succeeded)" class="tool-trace-web"><Globe :size="11" /> 已联网搜索</span><span v-for="(call, index) in message.toolCalls" :key="index" class="tool-trace-chip" :class="{ 'tool-trace-failed': !call.succeeded, 'tool-trace-web-chip': isWebSearchTool(call.name) }" :title="call.resultPreview"><Globe v-if="isWebSearchTool(call.name)" :size="10" />{{ call.name }} · {{ call.elapsedMilliseconds }}ms</span></div><div v-if="message.citations?.length" class="citation-list"><BookOpen :size="13" /><span class="citation-title">引用资料</span><span v-for="(citation, index) in message.citations" :key="`${citation.documentId}-${citation.chunkId ?? index}`" class="citation-chip" :class="{ 'citation-chip-playable': hasMediaStart(citation) }" :title="citationTooltip(citation)" @click="openCitation(citation)"><span class="citation-rank">{{ citationRank(citation, index) }}</span><span class="citation-name">{{ citation.fileName }}</span><span v-if="hasMediaStart(citation)" class="citation-time"><Play :size="8" />{{ mediaTimeLabel(citation.mediaStartSeconds) }}</span><span v-if="citationScore(citation.similarity)" class="citation-score">{{ citationScore(citation.similarity) }}</span></span></div><div v-if="message.retrieval?.warning || message.retrieval?.legacyIndex" class="citation-warning"><BookOpen :size="12" />{{ message.retrieval.warning || '本次检索使用旧版索引，结果可能不稳定。' }}</div><div v-if="message.role === 'assistant'" class="message-actions"><button type="button" class="message-action" :disabled="!canSaveAsNote(message)" title="把这一轮问答（含引用资料）存成学习笔记" @click="emit('saveAsNote', message)"><NotebookPen :size="12" /> 存为笔记</button></div></div></div>
             <div v-if="busy" class="chat-message message-assistant"><div class="message-avatar"><Sparkles :size="16" /></div><div class="typing-indicator"><i></i><i></i><i></i></div></div>
             <div ref="scrollAnchor"></div>
           </div>
@@ -212,6 +276,23 @@ const toolHint = computed(() => {
 .composer-tool.muted { opacity: .5; }
 .composer-tool:disabled { cursor: not-allowed; }
 .composer-tool-hint { margin-left: auto; color: #9aa59e; font-size: 8px; }
+.message-actions { display: flex; align-items: center; gap: 6px; margin-top: 7px; }
+.message-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid #e3eae4;
+  border-radius: 999px;
+  color: #85938b;
+  background: #fbfcfb;
+  font-size: 9px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.message-action:hover:not(:disabled) { color: #397c65; border-color: #bcd6c4; background: #f2f8f3; }
+.message-action:disabled { opacity: .45; cursor: not-allowed; }
 
 @media (max-width: 700px) {
   .assistant-workspace { grid-template-columns: minmax(0, 1fr); gap: 10px; }

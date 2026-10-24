@@ -1,4 +1,5 @@
 using MyFirstMafAgent.Api.Application.Common;
+using MyFirstMafAgent.Api.Application.KnowledgePackages;
 using MyFirstMafAgent.Api.Application.Settings;
 using MyFirstMafAgent.Api.Domain.Avatar;
 using MyFirstMafAgent.Api.Domain.Notes;
@@ -36,6 +37,7 @@ internal static class ApiResults
                                                   or TopicValidationException
                                                   or SettingsValidationException
                                                   or AvatarValidationException
+                                                  or KnowledgePackageException
                                                   or ArgumentException)
         {
             return Results.BadRequest(new { error = exception.Message });

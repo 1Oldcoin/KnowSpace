@@ -17,6 +17,8 @@ public static class WorkerModule
         // 并发度、重试、取消、进度与观测统一由调度器负责（见 JobsModule）。
         services.AddHostedService<IndexLifecycleWorker>();
         services.AddHostedService<AvatarIngestionWorker>();
+        // 词法检索的预分词回填：只为历史切片补 kb_chunks.lexical_tokens，正常空转。
+        services.AddHostedService<LexicalIndexWorker>();
         return services;
     }
 }

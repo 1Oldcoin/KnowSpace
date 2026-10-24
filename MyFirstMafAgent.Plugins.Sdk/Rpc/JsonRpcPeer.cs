@@ -64,6 +64,17 @@ public sealed class JsonRpcPeer : IAsyncDisposable
     /// </summary>
     public Action<string>? ResponseSent { get; set; }
 
+    /// <summary>
+    /// 请求超时/取消时发给对端的通知方法名。默认是本项目的 <c>plugin/cancel</c>；
+    /// MCP 方言改成 <c>notifications/cancelled</c>——两种协议的取消语义一致，只是名字和字段不同。
+    /// </summary>
+    public string CancelNotificationMethod { get; set; } = PluginProtocol.MethodCancel;
+
+    /// <summary>
+    /// 取消通知的参数构造。参数是原请求的 id 节点；默认生成 <c>{ "targetId": ... }</c>。
+    /// </summary>
+    public Func<JsonNode, JsonNode?>? CancelNotificationParameters { get; set; }
+
     /// <summary>启动读取循环。未启动前不会处理任何入站消息。</summary>
     public void Start()
     {
@@ -102,7 +113,7 @@ public sealed class JsonRpcPeer : IAsyncDisposable
                 }
                 catch (TimeoutException)
                 {
-                    await TryCancelAsync(key, cancellationToken).ConfigureAwait(false);
+                    await TryCancelAsync(id!, cancellationToken).ConfigureAwait(false);
                     throw new PluginRpcException(
                         PluginProtocol.ErrorCancelled,
                         $"'{method}' timed out after {effective.TotalMilliseconds:0} ms",
@@ -120,7 +131,7 @@ public sealed class JsonRpcPeer : IAsyncDisposable
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             // 调用方取消：通知对端停止工作，再把取消传递给上层。
-            await TryCancelAsync(key, CancellationToken.None).ConfigureAwait(false);
+            await TryCancelAsync(id!, CancellationToken.None).ConfigureAwait(false);
             throw;
         }
         finally
@@ -153,12 +164,15 @@ public sealed class JsonRpcPeer : IAsyncDisposable
             PluginJson.ToNode(new { level, message }),
             cancellationToken);
 
-    private async Task TryCancelAsync(string targetIdKey, CancellationToken cancellationToken)
+    private async Task TryCancelAsync(JsonNode requestId, CancellationToken cancellationToken)
     {
         try
         {
-            var payload = new JsonObject { ["targetId"] = JsonNode.Parse(targetIdKey) };
-            await SendNotificationAsync(PluginProtocol.MethodCancel, payload, cancellationToken).ConfigureAwait(false);
+            var payload = CancelNotificationParameters is { } factory
+                ? factory(requestId)
+                : new JsonObject { ["targetId"] = JsonNode.Parse(requestId.ToJsonString()) };
+
+            await SendNotificationAsync(CancelNotificationMethod, payload, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is ObjectDisposedException or IOException)
         {
@@ -231,10 +245,10 @@ public sealed class JsonRpcPeer : IAsyncDisposable
             return;
         }
 
-        // 取消通知：中止对应的在途请求。
-        if (request.Method == PluginProtocol.MethodCancel)
+        // 取消通知：中止对应的在途请求。两种方言的字段名不同（targetId / requestId）。
+        if (request.Method is PluginProtocol.MethodCancel or McpProtocol.MethodCancelled)
         {
-            var target = request.Params?["targetId"];
+            var target = request.Params?["targetId"] ?? request.Params?["requestId"];
             if (target is not null && _inFlight.TryGetValue(target.ToJsonString(), out var cts))
             {
                 try { cts.Cancel(); }

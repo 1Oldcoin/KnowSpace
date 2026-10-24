@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Bell, CircleHelp, Search, Sparkles, X } from 'lucide-vue-next'
-import { assignDocumentTopic, checkApiHealth, checkInStudy, createKnowledgeBase as createKnowledgeBaseApi, createKnowledgeChatSession, createNote as createNoteApi, createTopic as createTopicApi, deleteDocument as deleteDocumentApi, deleteKnowledgeChatSession as deleteKnowledgeChatSessionApi, deleteKnowledgeChatSessions, deleteNote as deleteNoteApi, deleteTopic as deleteTopicApi, downloadDocument, exportKnowledgeChatSession, getAgentInfo, getAppSettings, getJobCounts, getStudySummary, listDocuments, listKnowledgeBases, listKnowledgeChatMessages, listKnowledgeChatSessions, listNotes, listTopics, renameKnowledgeChatSession as renameKnowledgeChatSessionApi, retryDocument as retryDocumentApi, saveAppSettings, searchKnowledgeBase, sendKnowledgeChatMessage, setNotePinned as setNotePinnedApi, updateNote as updateNoteApi, updateTopic as updateTopicApi, uploadDocument } from './services/api'
-import type { AgentSettings, AppSettings, ChatToolOptions, KnowledgeBase, KnowledgeChatSession, NoteInput, NoteRecord, SaveSettingsPayload, SemanticSearchResult, StudySummary, Topic } from './services/api'
+import { assignDocumentTopic, checkApiHealth, checkInStudy, createKnowledgeBase as createKnowledgeBaseApi, createKnowledgeChatSession, createNote as createNoteApi, createTopic as createTopicApi, deleteDocument as deleteDocumentApi, deleteKnowledgeChatSession as deleteKnowledgeChatSessionApi, deleteKnowledgeChatSessions, deleteNote as deleteNoteApi, deleteTopic as deleteTopicApi, downloadDocument, exportKnowledgeChatSession, exportNotes as exportNotesApi, getAgentInfo, getAppSettings, getJobCounts, getStudySummary, listDocuments, listKnowledgeBases, listKnowledgeChatMessages, listKnowledgeChatSessions, listNotes, listTopics, renameKnowledgeChatSession as renameKnowledgeChatSessionApi, retryDocument as retryDocumentApi, saveAppSettings, searchKnowledgeBase, sendKnowledgeChatMessage, setNotePinned as setNotePinnedApi, updateNote as updateNoteApi, updateTopic as updateTopicApi, uploadDocument } from './services/api'
+import type { AgentSettings, AppSettings, ChatToolOptions, KnowledgeBase, KnowledgeChatSession, NoteInput, NoteRecord, NoteSourceRecord, SaveSettingsPayload, SemanticSearchResult, StudySummary, Topic } from './services/api'
 import { defaultChatToolOptions } from './services/api'
 import AssistantView from './components/AssistantView.vue'
 import AvatarView from './components/AvatarView.vue'
@@ -17,8 +17,9 @@ import SettingsView from './components/SettingsView.vue'
 import SidebarNav from './components/SidebarNav.vue'
 import TopicsView from './components/TopicsView.vue'
 import DocumentReaderModal from './components/DocumentReaderModal.vue'
+import MediaPlayerModal from './components/MediaPlayerModal.vue'
 import type { AssistantMessage, MaterialItem, NoteDraft, NoteItem, ViewName } from './types'
-import { fileExtension, isHtmlExtension, isImageExtension, isVideoExtension, maxSizeForExtension, SUPPORTED_EXTENSIONS } from './fileTypes'
+import { fileExtension, isAudioExtension, isHtmlExtension, isImageExtension, isVideoExtension, maxSizeForExtension, SUPPORTED_EXTENSIONS } from './fileTypes'
 
 const currentView = ref<ViewName>('overview')
 const searchQuery = ref('')
@@ -108,6 +109,17 @@ const notes = ref<NoteItem[]>([])
 const notesLoading = ref(false)
 const notesSaving = ref(false)
 const readerDocument = ref<{ id: string; title: string; fileName?: string; extension?: string } | null>(null)
+// 引用点了“第几分几秒”时打开的播放器（只对音视频资料有值）。
+const playingMedia = ref<{ documentId: string; title: string; fileName?: string; seconds: number } | null>(null)
+
+function openCitationMedia(payload: { documentId: string; fileName: string; seconds: number }) {
+  playingMedia.value = {
+    documentId: payload.documentId,
+    title: payload.fileName || '视频',
+    fileName: payload.fileName,
+    seconds: payload.seconds,
+  }
+}
 
 const chatMessages = ref<AssistantMessage[]>([])
 const pendingJobCount = ref(0)
@@ -185,8 +197,9 @@ async function loadMaterials() {
       const extension = document.extension.toLowerCase()
       const kind: MaterialItem['kind'] = extension === '.pdf' ? 'pdf'
         : isVideoExtension(extension) ? 'video'
-          : isImageExtension(extension) ? 'image'
-            : isHtmlExtension(extension) ? 'html' : 'document'
+          : isAudioExtension(extension) ? 'audio'
+            : isImageExtension(extension) ? 'image'
+              : isHtmlExtension(extension) ? 'html' : 'document'
       const status = document.status.toLowerCase()
       return {
         id: document.id,
@@ -253,6 +266,21 @@ async function changeKnowledgeBase(id: string) {
   notes.value = []
   await loadTopics(id)
   await Promise.all([loadMaterials(), loadKnowledgeChatSessions(id), loadNotes(id)])
+}
+
+/**
+ * 导入知识库包之后：新知识库并不在内存列表里，必须先重新拉一次列表，再切过去。
+ * 资料还在后台解析，所以这里直接切到「我的资料」让用户看到进度，而不是停在设置页。
+ */
+async function onKnowledgeBaseImported(knowledgeBaseId: string) {
+  try {
+    knowledgeBases.value = await listKnowledgeBases()
+  } catch {
+    // 列表刷新失败不影响切换：下面如果找不到这个库，changeKnowledgeBase 会安静返回。
+  }
+  await changeKnowledgeBase(knowledgeBaseId)
+  navigate('materials')
+  showToast('知识库已导入，资料正在后台解析。')
 }
 
 async function loadTopics(knowledgeBaseId = activeKnowledgeBaseId.value) {
@@ -401,6 +429,9 @@ function toNoteItem(note: NoteRecord): NoteItem {
     createdAt: note.createdAt,
     updatedAt: note.updatedAt,
     date: noteDate(note.updatedAt),
+    topicId: note.topicId ?? null,
+    sources: note.sources ?? [],
+    sourceSessionId: note.sourceSessionId ?? null,
   }
 }
 
@@ -423,7 +454,7 @@ async function loadNotes(knowledgeBaseId = activeKnowledgeBaseId.value) {
   }
 }
 
-function toNoteInput(draft: NoteDraft, sourceDocumentId?: string | null): NoteInput {
+function toNoteInput(draft: NoteDraft, sourceDocumentId?: string | null, extra?: Partial<NoteInput>): NoteInput {
   return {
     title: draft.title,
     content: draft.content,
@@ -431,6 +462,8 @@ function toNoteInput(draft: NoteDraft, sourceDocumentId?: string | null): NoteIn
     color: draft.color,
     tags: draft.tags,
     sourceDocumentId,
+    topicId: draft.topicId ?? null,
+    ...extra,
   }
 }
 
@@ -503,6 +536,83 @@ async function pinNoteHandler(note: NoteItem) {
   }
 }
 
+async function exportNotesHandler(noteIds: string[]) {
+  const knowledgeBaseId = activeKnowledgeBaseId.value
+  if (!knowledgeBaseId) return
+  try {
+    const { blob, fileName } = await exportNotesApi(knowledgeBaseId, noteIds)
+    downloadBlob(blob, fileName)
+    showToast(`已导出 ${noteIds.length} 篇笔记。`)
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : '导出笔记失败。')
+  }
+}
+
+/**
+ * 把一轮问答存成笔记：正文写问题与回答，引用资料写进 sources 字段。
+ * 这样笔记本身就能定位到“哪句话出自哪份资料的哪一段”，不是一份孤立摘要。
+ */
+async function saveAssistantNoteHandler(message: AssistantMessage) {
+  const knowledgeBaseId = activeKnowledgeBaseId.value
+  if (!knowledgeBaseId) {
+    showToast('请先选择一个知识库。')
+    return
+  }
+
+  const index = chatMessages.value.findIndex(item => item.id === message.id)
+  let question = ''
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+    const candidate = chatMessages.value[cursor]
+    if (candidate && candidate.role === 'user') {
+      question = candidate.text
+      break
+    }
+  }
+
+  const citations = message.citations ?? []
+  const sources: NoteSourceRecord[] = citations.map(citation => ({
+    documentId: citation.documentId,
+    fileName: citation.fileName,
+    chunkIndex: citation.chunkIndex ?? -1,
+    similarity: citation.similarity ?? 0,
+    snippet: citation.snippet ?? null,
+  }))
+
+  const lines: string[] = []
+  if (question) lines.push('## 问题', '', question, '')
+  lines.push('## 回答', '', message.text.trim(), '')
+  if (sources.length) {
+    lines.push('## 引用资料', '')
+    sources.forEach((source, sourceIndex) => {
+      const location = source.chunkIndex >= 0 ? `（第 ${source.chunkIndex + 1} 段）` : ''
+      const score = source.similarity > 0 ? ` · 相关度 ${Math.round(source.similarity * 100)}%` : ''
+      lines.push(`${sourceIndex + 1}. ${source.fileName}${location}${score}`)
+    })
+    lines.push('')
+  }
+
+  const title = (question || message.text).replace(/\s+/g, ' ').trim().slice(0, 60) || '问答笔记'
+  notesSaving.value = true
+  try {
+    const note = await createNoteApi(knowledgeBaseId, {
+      title,
+      content: lines.join('\n'),
+      category: '问答笔记',
+      color: 'lilac',
+      tags: ['问答', ...(citations.length ? ['有引用'] : [])],
+      sourceDocumentId: sources[0]?.documentId ?? null,
+      sources,
+      sourceSessionId: activeKnowledgeChatSessionId.value || null,
+    })
+    if (knowledgeBaseId === activeKnowledgeBaseId.value) notes.value = [toNoteItem(note), ...notes.value]
+    showToast(citations.length ? `已存为笔记，附带 ${citations.length} 条引用。` : '已存为笔记。')
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : '保存笔记失败。')
+  } finally {
+    notesSaving.value = false
+  }
+}
+
 function openReaderById(documentId: string, fileName?: string) {
   readerDocument.value = {
     id: documentId,
@@ -522,6 +632,8 @@ function openReaderFromMaterial(item: MaterialItem) {
 async function saveReaderNote(payload: { title: string; content: string }) {
   const knowledgeBaseId = activeKnowledgeBaseId.value
   if (!knowledgeBaseId || !payload.content.trim()) return
+  const documentId = readerDocument.value?.id
+  const fileName = readerDocument.value?.fileName ?? readerDocument.value?.title ?? '原文'
   try {
     const note = await createNoteApi(knowledgeBaseId, {
       title: payload.title,
@@ -529,7 +641,11 @@ async function saveReaderNote(payload: { title: string; content: string }) {
       category: '资料摘录',
       color: 'mint',
       tags: ['原文摘录'],
-      sourceDocumentId: readerDocument.value?.id ?? null,
+      sourceDocumentId: documentId ?? null,
+      // 阅读器摘录没有切片序号，ChunkIndex 留 -1；片段直接存摘录内容，方便日后回看依据。
+      sources: documentId
+        ? [{ documentId, fileName, chunkIndex: -1, similarity: 0, snippet: payload.content.trim().slice(0, 240) }]
+        : null,
     })
     if (knowledgeBaseId === activeKnowledgeBaseId.value) notes.value = [toNoteItem(note), ...notes.value]
     showToast('已保存为笔记。')
@@ -646,6 +762,10 @@ async function openKnowledgeChatSession(sessionId: string) {
       role: message.role,
       text: message.content,
       time: chatTime(message.createdAt),
+      // 历史会话也要能还原引用与工具痕迹，否则重开对话就丢了“答案依据”。
+      citations: message.citations ?? [],
+      toolCalls: message.answerMeta?.toolCalls ?? [],
+      retrieval: message.answerMeta?.retrieval ?? undefined,
     }))
   } catch (error) {
     if (knowledgeBaseId === activeKnowledgeBaseId.value && sessionId === activeKnowledgeChatSessionId.value)
@@ -687,15 +807,16 @@ function receiveFiles(files: FileList | null) {
     return SUPPORTED_EXTENSIONS.includes(extension) && file.size > 0 && file.size <= maxSizeForExtension(extension)
   })
   const rejected = files.length - accepted.length
-  if (rejected) showToast(`${rejected} 个文件格式不支持、为空或超过上限（视频 5 GiB，其他文件 50 MiB）。`)
+  if (rejected) showToast(`${rejected} 个文件格式不支持、为空或超过上限（视频 5 GiB，音频 300 MiB，其他文件 50 MiB）。`)
   if (!accepted.length) return
 
   const uploadQueue = accepted.map((file) => {
     const extension = fileExtension(file.name)
     const kind: MaterialItem['kind'] = extension === '.pdf' ? 'pdf'
       : isVideoExtension(extension) ? 'video'
-        : isImageExtension(extension) ? 'image'
-          : isHtmlExtension(extension) ? 'html' : 'document'
+        : isAudioExtension(extension) ? 'audio'
+          : isImageExtension(extension) ? 'image'
+            : isHtmlExtension(extension) ? 'html' : 'document'
     const item: MaterialItem = {
       id: `upload-${crypto.randomUUID()}`,
       title: file.name.replace(/\.[^.]+$/, ''),
@@ -705,7 +826,7 @@ function receiveFiles(files: FileList | null) {
       detail: `${extension.replace('.', '').toUpperCase()} · ${formatSize(file.size)}`,
       updated: '刚刚',
       status: 'processing',
-      color: kind === 'video' ? 'peach' : kind === 'image' ? 'blue' : kind === 'pdf' ? 'lilac' : kind === 'html' ? 'sage' : 'mint',
+      color: kind === 'video' ? 'peach' : kind === 'audio' ? 'rose' : kind === 'image' ? 'blue' : kind === 'pdf' ? 'lilac' : kind === 'html' ? 'sage' : 'mint',
       iconColor: kind === 'video' ? 'orange' : kind === 'html' ? 'green' : 'purple',
       progress: 0,
       processingStage: '准备上传',
@@ -775,17 +896,22 @@ async function deleteMaterial(item: MaterialItem) {
 async function downloadMaterial(item: MaterialItem) {
   try {
     const blob = await downloadDocument(item.id)
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = item.fileName || item.title
-    document.body.appendChild(link)
-    link.click()
-    link.remove()
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+    downloadBlob(blob, item.fileName || item.title)
   } catch (error) {
     showToast(error instanceof Error ? error.message : '下载资料失败。')
   }
+}
+
+/** 统一把 Blob 落成浏览器下载，避免每处重复一遍 a[download] 样板。 */
+function downloadBlob(blob: Blob, fileName: string) {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = fileName
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
 function formatSize(size: number) {
@@ -820,7 +946,7 @@ async function sendMessage(message: string) {
     messageAdded = true
     const result = await sendKnowledgeChatMessage(knowledgeBaseId, sessionId, message, chatToolOptions.value)
     if (requestVersion !== chatRequestVersion || knowledgeBaseId !== activeKnowledgeBaseId.value || sessionId !== activeKnowledgeChatSessionId.value) return
-    chatMessages.value.push({ id: crypto.randomUUID(), role: 'assistant', text: result.answer, citations: result.citations, toolCalls: result.toolCalls, time: chatTime() })
+    chatMessages.value.push({ id: crypto.randomUUID(), role: 'assistant', text: result.answer, citations: result.citations, toolCalls: result.toolCalls, retrieval: result.retrieval, time: chatTime() })
     const currentSession = knowledgeChatSessions.value.find(session => session.id === sessionId)
     if (currentSession) {
       const updatedSession = {
@@ -1021,10 +1147,10 @@ async function exportHistorySession(sessionId: string) {
       <div class="page-content" :class="{ 'page-content-assistant': currentView === 'assistant' || currentView === 'companions' }">
         <OverviewView v-if="currentView === 'overview'" :materials="materials" :notes="notes" :is-api-online="apiOnline" :study="studySummary" :display-name="displayName" :daily-goal-minutes="dailyGoalMinutes" @upload="receiveFiles" @navigate="navigate" @search="openSearch" @checkin="recordCheckin" @read="openReaderFromMaterial" />
         <LibraryView v-else-if="currentView === 'materials'" :materials="materials" :query="searchQuery" :topics="topics" :active-topic-id="activeTopicId" @upload="receiveFiles" @retry="retryProcessing" @delete="deleteMaterial" @download="downloadMaterial" @notice="showToast" @select-topic="selectTopic" @assign-topic="changeDocumentTopic" @read="openReaderFromMaterial" />
-        <NotesView v-else-if="currentView === 'notes'" :notes="notes" :query="searchQuery" :api-online="apiOnline" :busy="notesSaving" :loading="notesLoading" :active-knowledge-base-id="activeKnowledgeBaseId" @create="createNoteHandler" @update="updateNoteHandler" @delete="deleteNoteHandler" @pin="pinNoteHandler" @notice="showToast" />
+        <NotesView v-else-if="currentView === 'notes'" :notes="notes" :query="searchQuery" :api-online="apiOnline" :busy="notesSaving" :loading="notesLoading" :active-knowledge-base-id="activeKnowledgeBaseId" :topics="topics" @create="createNoteHandler" @update="updateNoteHandler" @delete="deleteNoteHandler" @pin="pinNoteHandler" @export-notes="exportNotesHandler" @read-source="openReaderById" @notice="showToast" />
         <TopicsView v-else-if="currentView === 'topics'" :topics="topics" :materials="materials" :api-online="apiOnline" :active-topic-id="activeTopicId" @create="requestCreateTopic" @rename="renameTopic" @delete="removeTopic" @open="selectTopic" />
-        <SettingsView v-else-if="currentView === 'settings'" :settings="appSettings" :api-online="apiOnline" :busy="isSettingsSaving" :loading="isSettingsLoading" :knowledge-base-names="knowledgeBaseNameMap" @save="saveSettings" @reload="loadAppSettings" />
-        <AssistantView v-else-if="currentView === 'assistant'" :messages="chatMessages" :busy="isChatBusy || isChatHistoryMutating" :api-online="apiOnline" :sessions="knowledgeChatSessions" :active-session-id="activeKnowledgeChatSessionId" :sessions-loading="isChatHistoryLoading" :tool-options="chatToolOptions" :tools-available="chatToolsAvailable" @send="sendMessage" @new-chat="startNewChat" @select-session="selectKnowledgeChatSession" @rename-session="renameHistorySession" @delete-session="deleteHistorySession" @delete-sessions="deleteSelectedHistorySessions" @export-session="exportHistorySession" @update:tool-options="updateChatToolOptions" />
+        <SettingsView v-else-if="currentView === 'settings'" :settings="appSettings" :api-online="apiOnline" :busy="isSettingsSaving" :loading="isSettingsLoading" :knowledge-base-names="knowledgeBaseNameMap" :knowledge-bases="knowledgeBases" :active-knowledge-base-id="activeKnowledgeBaseId" @save="saveSettings" @reload="loadAppSettings" @imported="onKnowledgeBaseImported" />
+        <AssistantView v-else-if="currentView === 'assistant'" :messages="chatMessages" :busy="isChatBusy || isChatHistoryMutating" :api-online="apiOnline" :sessions="knowledgeChatSessions" :active-session-id="activeKnowledgeChatSessionId" :sessions-loading="isChatHistoryLoading" :tool-options="chatToolOptions" :tools-available="chatToolsAvailable" @send="sendMessage" @new-chat="startNewChat" @select-session="selectKnowledgeChatSession" @rename-session="renameHistorySession" @delete-session="deleteHistorySession" @delete-sessions="deleteSelectedHistorySessions" @export-session="exportHistorySession" @save-as-note="saveAssistantNoteHandler" @play-media="openCitationMedia" @update:tool-options="updateChatToolOptions" />
         <AvatarView v-else-if="currentView === 'avatar'" :api-online="apiOnline" @notice="showToast" />
         <JobsView v-else-if="currentView === 'jobs'" :api-online="apiOnline" @notice="showToast" @counts="pendingJobCount = $event" />
         <PluginsView v-else-if="currentView === 'plugins'" :api-online="apiOnline" :knowledge-bases="knowledgeBases" :active-knowledge-base-id="activeKnowledgeBaseId" @notice="showToast" />
@@ -1056,6 +1182,15 @@ async function exportHistorySession(sessionId: string) {
       :api-online="apiOnline"
       @close="readerDocument = null"
       @save-note="saveReaderNote"
+    />
+    <MediaPlayerModal
+      v-if="playingMedia"
+      :document-id="playingMedia.documentId"
+      :title="playingMedia.title"
+      :file-name="playingMedia.fileName"
+      :seconds="playingMedia.seconds"
+      :api-online="apiOnline"
+      @close="playingMedia = null"
     />
   </div>
 </template>

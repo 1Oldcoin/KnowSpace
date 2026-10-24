@@ -12,7 +12,33 @@ public sealed class KnowledgeChatStore(SqlSugarScope database)
     {
         database.CodeFirst.InitTables<KnowledgeChatSessionSchemaEntity>();
         database.CodeFirst.InitTables<KnowledgeChatMessageSchemaEntity>();
+        EnsureMessageColumns();
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// 引用元数据是后加的列：CodeFirst 只在建表时生效，已存在的旧库不会自动补列，
+    /// 因此像 kb_documents 那样显式检查并补列。
+    /// </summary>
+    private void EnsureMessageColumns()
+    {
+        if (!database.DbMaintenance.IsAnyTable("knowledge_chat_messages", false)) return;
+
+        EnsureMessageColumn("citations", "text", true, null);
+        EnsureMessageColumn("answer_meta", "text", true, null);
+    }
+
+    private void EnsureMessageColumn(string columnName, string dataType, bool isNullable, string? defaultValue)
+    {
+        if (database.DbMaintenance.IsAnyColumn("knowledge_chat_messages", columnName, false)) return;
+
+        database.DbMaintenance.AddColumn("knowledge_chat_messages", new DbColumnInfo
+        {
+            DbColumnName = columnName,
+            DataType = dataType,
+            IsNullable = isNullable,
+            DefaultValue = defaultValue
+        });
     }
 
     public async Task<KnowledgeChatSession> CreateSessionAsync(Guid knowledgeBaseId, string title, CancellationToken cancellationToken)
@@ -135,7 +161,20 @@ public sealed class KnowledgeChatStore(SqlSugarScope database)
         return rows.OrderBy(row => row.Id).Select(ToMessage).ToList();
     }
 
-    public async Task AddSessionExchangeAsync(Guid sessionId, Guid knowledgeBaseId, string userMessage, string assistantMessage, CancellationToken cancellationToken)
+    public Task AddSessionExchangeAsync(Guid sessionId, Guid knowledgeBaseId, string userMessage, string assistantMessage, CancellationToken cancellationToken) =>
+        AddSessionExchangeAsync(sessionId, knowledgeBaseId, userMessage, assistantMessage, null, null, cancellationToken);
+
+    /// <summary>
+    /// 写入一轮问答。助手消息带上引用与答案元数据落库，历史会话重开时才能还原“答到了哪几段资料”。
+    /// </summary>
+    public async Task AddSessionExchangeAsync(
+        Guid sessionId,
+        Guid knowledgeBaseId,
+        string userMessage,
+        string assistantMessage,
+        IReadOnlyList<KnowledgeChatCitation>? citations,
+        KnowledgeChatAnswerMeta? answerMeta,
+        CancellationToken cancellationToken)
     {
         await database.Ado.BeginTranAsync();
         try
@@ -156,7 +195,15 @@ public sealed class KnowledgeChatStore(SqlSugarScope database)
             await database.Insertable(new List<KnowledgeChatMessageSchemaEntity>
             {
                 new() { SessionId = sessionId, Role = UserRole, Content = userMessage, CreatedAt = now },
-                new() { SessionId = sessionId, Role = AssistantRole, Content = assistantMessage, CreatedAt = now }
+                new()
+                {
+                    SessionId = sessionId,
+                    Role = AssistantRole,
+                    Content = assistantMessage,
+                    Citations = KnowledgeChatJson.SerializeCitations(citations),
+                    AnswerMeta = KnowledgeChatJson.SerializeMeta(answerMeta),
+                    CreatedAt = now
+                }
             }).ExecuteCommandAsync(cancellationToken);
 
             await database.Ado.CommitTranAsync();
@@ -189,6 +236,8 @@ public sealed class KnowledgeChatStore(SqlSugarScope database)
                 Id = message.Id,
                 Role = message.Role,
                 Content = message.Content,
+                Citations = message.Citations,
+                AnswerMeta = message.AnswerMeta,
                 CreatedAt = message.CreatedAt
             })
             .ToListAsync(cancellationToken);
@@ -198,7 +247,9 @@ public sealed class KnowledgeChatStore(SqlSugarScope database)
         new(entity.Id, entity.KnowledgeBaseId, entity.Title, entity.CreatedAt, entity.UpdatedAt);
 
     private static KnowledgeChatMessage ToMessage(KnowledgeChatMessageRow row) =>
-        new(row.Id, row.Role, row.Content, row.CreatedAt);
+        new(row.Id, row.Role, row.Content, row.CreatedAt,
+            KnowledgeChatJson.DeserializeCitations(row.Citations),
+            KnowledgeChatJson.DeserializeMeta(row.AnswerMeta));
 }
 
 internal sealed class KnowledgeChatMessageRow
@@ -208,8 +259,21 @@ internal sealed class KnowledgeChatMessageRow
     public long Id { get; set; }
     public string Role { get; set; } = string.Empty;
     public string Content { get; set; } = string.Empty;
+    public string? Citations { get; set; }
+    public string? AnswerMeta { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
 }
 
 public sealed record KnowledgeChatSession(Guid Id, Guid KnowledgeBaseId, string Title, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt);
-public sealed record KnowledgeChatMessage(long Id, string Role, string Content, DateTimeOffset CreatedAt);
+
+/// <summary>
+/// 一条问答消息。<paramref name="Citations"/> 与 <paramref name="AnswerMeta"/> 只对助手消息有值，
+/// 旧数据与用户消息为空集合 / null。
+/// </summary>
+public sealed record KnowledgeChatMessage(
+    long Id,
+    string Role,
+    string Content,
+    DateTimeOffset CreatedAt,
+    IReadOnlyList<KnowledgeChatCitation>? Citations = null,
+    KnowledgeChatAnswerMeta? AnswerMeta = null);

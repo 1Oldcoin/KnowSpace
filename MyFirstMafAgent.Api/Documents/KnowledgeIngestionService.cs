@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Security.Cryptography;
+using System.Text.RegularExpressions;
 using DocumentFormat.OpenXml.Packaging;
 using Microsoft.Extensions.Options;
 using MyFirstMafAgent.Api.Application.Knowledge;
@@ -24,6 +26,13 @@ public sealed class KnowledgeIngestionService(
     private const int ChunkSize = 1400;
     private const int ChunkOverlap = 180;
     private const int SummaryPartSize = 6000;
+
+    /// <summary>场景帧少于这个数就认为"场景检测在这段视频上不适用"，改用均匀采样。</summary>
+    private const int MinimumSceneFrames = 2;
+
+    private static readonly Regex ShowInfoTimePattern = new(
+        @"pts_time:\s*(?<time>[0-9]+(?:\.[0-9]+)?)",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     public async Task<DocumentUploadResponse> UploadAsync(IFormFile file, CancellationToken cancellationToken)
         => await UploadAsync(file, KnowledgeBaseStore.DefaultKnowledgeBaseId, cancellationToken);
@@ -112,14 +121,15 @@ public sealed class KnowledgeIngestionService(
         try
         {
             string text;
+            IReadOnlyList<string>? timelineChunks = null;
             if (LocalDocumentStore.IsVideoExtension(file.Extension))
             {
                 var video = await ProcessVideoAsync(file, cancellationToken);
                 var transcript = FormatTranscript(video.Transcript);
                 var sourceSections = new List<string>();
                 if (!string.IsNullOrWhiteSpace(transcript)) sourceSections.Add($"语音转写：\n{transcript}");
-                if (video.FrameDescriptions.Count > 0)
-                    sourceSections.Add($"关键画面：\n{string.Join("\n", video.FrameDescriptions)}");
+                if (video.Frames.Count > 0)
+                    sourceSections.Add($"关键画面：\n{string.Join("\n", video.Frames.Select(frame => $"[{MediaTimeline.FormatTime(frame.Start)}] {frame.Text}"))}");
                 var summarySource = string.Join("\n\n", sourceSections);
                 if (string.IsNullOrWhiteSpace(summarySource))
                     throw new InvalidOperationException("视频中没有可用于总结的语音或关键画面内容。");
@@ -139,9 +149,26 @@ public sealed class KnowledgeIngestionService(
                         "Video summary skipped for {DocumentId}; publishing transcript only", file.Id);
                 }
 
+                // 时间轴切片：转写与画面描述按时间合并，每片都以 [hh:mm:ss] 开头，
+                // 引用因此能直接定位到"第几分几秒"。摘要本身没有时间坐标，单独放前面。
+                var segments = video.Transcript
+                    .Select(segment => new MediaSegment(segment.Start, segment.Text))
+                    .Concat(video.Frames)
+                    .ToList();
+                var timeline = MediaTimeline.BuildChunks(segments);
+                timelineChunks = string.IsNullOrWhiteSpace(summary)
+                    ? timeline
+                    : [$"视频摘要：\n{summary}", .. timeline];
+
                 text = string.IsNullOrWhiteSpace(summary)
                     ? $"视频转写：\n{summarySource}"
                     : $"视频摘要：\n{summary}\n\n{summarySource}";
+            }
+            else if (LocalDocumentStore.IsAudioExtension(file.Extension))
+            {
+                var audio = await ProcessAudioAsync(file, cancellationToken);
+                text = audio.Text;
+                timelineChunks = audio.Chunks;
             }
             else
             {
@@ -149,7 +176,7 @@ public sealed class KnowledgeIngestionService(
                 text = await ExtractTextAsync(file, cancellationToken);
             }
 
-            var parts = SplitIntoChunks(text);
+            var parts = timelineChunks is { Count: > 0 } ? timelineChunks : SplitIntoChunks(text);
             if (parts.Count == 0)
                 throw new InvalidOperationException("No searchable text could be extracted from the file.");
 
@@ -192,10 +219,119 @@ public sealed class KnowledgeIngestionService(
             case ".jpeg":
             case ".webp":
             case ".gif":
-                return await modelClient.DescribeImageAsync(file.StoragePath, cancellationToken);
+                return await DescribeImageSafelyAsync(file, cancellationToken);
             default:
                 throw new InvalidOperationException($"Unsupported file type: {file.Extension}");
         }
+    }
+
+    /// <summary>
+    /// 图片描述。
+    ///
+    /// <para>
+    /// 视觉描述需要支持图片输入的聊天模型，而离线部署、未配置模型、或模型不支持视觉都会让它失败。
+    /// 图片本身已经是“资产”（表情包、截图、扫描件），不能因为描述不出来就整篇 <c>Failed</c>——
+    /// 那样用户连原图都看不到。所以失败时退化为一段可检索的兜底文本，并记一条 warning。
+    /// </para>
+    /// </summary>
+    private async Task<string> DescribeImageSafelyAsync(QueuedDocument file, CancellationToken cancellationToken)
+    {
+        await knowledgeBase.UpdateDocumentProgressAsync(file.Id, 30, "识别图片内容", cancellationToken);
+        try
+        {
+            var description = await modelClient.DescribeImageAsync(file.StoragePath, cancellationToken);
+            if (!string.IsNullOrWhiteSpace(description)) return description.Trim();
+            throw new InvalidOperationException("The vision model returned an empty description.");
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception,
+                "Image description skipped for {DocumentId}; storing the image without a description", file.Id);
+            return $"图片资料：{file.FileName}（未生成图片描述：视觉模型不可用）";
+        }
+    }
+
+    /// <summary>
+    /// 音频（语音、录音、表情包配套音效）→ 归一化采样率 → Whisper 转写 → 可选摘要。
+    ///
+    /// <para>
+    /// 与视频分开的理由：视频还要抽画面、还要描述帧，音频只需要音轨。
+    /// 但两者共用同一条归一化命令（单声道 16 kHz），因为 Whisper 就吃这个格式，
+    /// 直接喂 mp3/m4a 会随格式与环境变化而失败。
+    /// </para>
+    ///
+    /// <para>没有语音内容（纯音乐/环境音）时不报错，而是发布一条可检索的兜底文本——用户要的是“能存下来”。</para>
+    /// </summary>
+    private async Task<(string Text, IReadOnlyList<string>? Chunks)> ProcessAudioAsync(QueuedDocument file, CancellationToken cancellationToken)
+    {
+        var media = mediaOptions.Value;
+        var tempDirectory = Path.Combine(Path.GetTempPath(), "MyFirstMafAgent", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDirectory);
+        var audioPath = Path.Combine(tempDirectory, "audio.wav");
+        try
+        {
+            await knowledgeBase.UpdateDocumentProgressAsync(file.Id, 15, "提取音频", cancellationToken);
+            var ffmpegPath = GetFfmpegPath(media.FfmpegPath);
+            await RunProcessAsync(ffmpegPath,
+                ["-y", "-i", file.StoragePath, "-vn", "-ac", "1", "-ar", "16000", audioPath], cancellationToken);
+
+            await knowledgeBase.UpdateDocumentProgressAsync(file.Id, 40, "Whisper 语音转写", cancellationToken);
+            var segments = await whisperTranscriber.TranscribeAsync(audioPath, cancellationToken);
+            var transcript = FormatTranscript(segments);
+
+            if (string.IsNullOrWhiteSpace(transcript))
+                return ($"音频资料：{file.FileName}（未检测到语音内容）", null);
+
+            await knowledgeBase.UpdateDocumentProgressAsync(file.Id, 65, "生成音频摘要", cancellationToken);
+            var summary = string.Empty;
+            try
+            {
+                summary = await SummarizeAudioAsync(transcript, cancellationToken);
+                await knowledgeBase.SetDocumentSummaryAsync(file.Id, summary, cancellationToken);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                logger.LogWarning(exception,
+                    "Audio summary skipped for {DocumentId}; publishing transcript only", file.Id);
+            }
+
+            // 与视频一致：转写按时间轴切片，引用才能定位到具体秒数。
+            var timeline = MediaTimeline.BuildChunks(segments
+                .Select(segment => new MediaSegment(segment.Start, segment.Text))
+                .ToList());
+            var chunks = string.IsNullOrWhiteSpace(summary)
+                ? timeline
+                : [$"音频摘要：\n{summary}", .. timeline];
+
+            var text = string.IsNullOrWhiteSpace(summary)
+                ? $"音频转写：\n{transcript}"
+                : $"音频摘要：\n{summary}\n\n音频转写：\n{transcript}";
+            return (text, chunks);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDirectory)) Directory.Delete(tempDirectory, recursive: true);
+        }
+    }
+
+    private async Task<string> SummarizeAudioAsync(string transcript, CancellationToken cancellationToken)
+    {
+        var parts = SplitText(transcript, SummaryPartSize, 0);
+        var partialSummaries = new List<string>(parts.Count);
+        for (var index = 0; index < parts.Count; index++)
+        {
+            var summary = await modelClient.CompleteChatAsync(
+                "你是音频知识库整理助手。根据给定的语音转写，用中文准确提炼内容；不要补充原文没有的信息。",
+                $"请总结这段音频内容，保留核心主题、结论和重要名词。片段 {index + 1}/{parts.Count}：\n\n{parts[index]}",
+                cancellationToken);
+            partialSummaries.Add(summary.Trim());
+        }
+
+        if (partialSummaries.Count == 1) return partialSummaries[0];
+        return await modelClient.CompleteChatAsync(
+            "你是音频知识库整理助手。请把同一段音频的分段摘要合并为一份完整、去重、结构清楚的中文摘要，不要臆测。",
+            string.Join("\n\n", partialSummaries.Select((summary, index) => $"分段摘要 {index + 1}：\n{summary}")),
+            cancellationToken);
     }
 
     private async Task<VideoContent> ProcessVideoAsync(QueuedDocument file, CancellationToken cancellationToken)
@@ -213,10 +349,10 @@ public sealed class KnowledgeIngestionService(
 
             await knowledgeBase.UpdateDocumentProgressAsync(file.Id, 35, "Whisper 语音转写", cancellationToken);
             var transcript = await whisperTranscriber.TranscribeAsync(audioPath, cancellationToken);
-            var frameDescriptions = media.EnableVideoFrameAnalysis
+            var frames = media.EnableVideoFrameAnalysis
                 ? await DescribeKeyFramesAsync(file, tempDirectory, ffmpegPath, media, cancellationToken)
                 : [];
-            return new VideoContent(transcript, frameDescriptions);
+            return new VideoContent(transcript, frames);
         }
         finally
         {
@@ -224,39 +360,178 @@ public sealed class KnowledgeIngestionService(
         }
     }
 
-    private async Task<List<string>> DescribeKeyFramesAsync(
+    /// <summary>
+    /// 抽关键画面并让视觉模型描述。
+    ///
+    /// <para>
+    /// 两件事必须同时成立才算“能用画面内容检索”：<b>时间戳要准</b>、<b>画面要有变化的地方</b>。
+    /// 所以先按场景切换抽（<c>select='gt(scene,阈值)'</c>），再用 <c>showinfo</c> 把 ffmpeg
+    /// 真实输出的 <c>pts_time</c> 读回来——按"第几个文件 × 固定间隔"推算在场景检测下是错的
+    /// （帧会被大量丢弃，序号与时间不成比例）。
+    /// </para>
+    ///
+    /// <para>
+    /// 抽不到足够场景帧时（幻灯片、固定机位、纯色背景）退化成均匀采样，否则整段视频一片空白。
+    /// 视觉模型不可用时只记 warning 并返回已拿到的部分：<b>转写已经成功，不能因为描述失败让整篇资料变 Failed</b>。
+    /// </para>
+    /// </summary>
+    private async Task<IReadOnlyList<MediaSegment>> DescribeKeyFramesAsync(
         QueuedDocument file,
         string tempDirectory,
         string ffmpegPath,
         MediaOptions media,
         CancellationToken cancellationToken)
     {
-        await knowledgeBase.UpdateDocumentProgressAsync(file.Id, 50, "抽取关键画面", cancellationToken);
+        await knowledgeBase.UpdateDocumentProgressAsync(file.Id, 45, "抽取关键画面", cancellationToken);
+
         var framesDirectory = Path.Combine(tempDirectory, "frames");
         Directory.CreateDirectory(framesDirectory);
-        var framePattern = Path.Combine(framesDirectory, "frame-%05d.jpg");
-        await RunProcessAsync(ffmpegPath,
-            ["-y", "-i", file.StoragePath, "-vf", $"fps=1/{media.FrameSampleIntervalSeconds},scale=768:-2",
-                "-frames:v", media.MaxVideoFrames.ToString(), "-q:v", "5", framePattern], cancellationToken);
 
-        var frames = Directory.GetFiles(framesDirectory, "frame-*.jpg")
-            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
-            .Take(media.MaxVideoFrames)
-            .ToArray();
-        var descriptions = new List<string>(frames.Length);
-        for (var index = 0; index < frames.Length; index++)
+        var frames = new List<(string Path, TimeSpan Start)>();
+
+        // 1) 场景切换优先。
+        var sceneFrames = await TryExtractFramesAsync(
+            file, ffmpegPath, framesDirectory, media,
+            $"select='gt(scene,{media.FrameSceneThreshold.ToString(CultureInfo.InvariantCulture)})',showinfo,scale=768:-2",
+            cancellationToken);
+        if (sceneFrames.Count >= MinimumSceneFrames)
+        {
+            frames = sceneFrames;
+        }
+        else
+        {
+            // 2) 退化为均匀采样。先清干净上一次的残留，否则序号会混在一起。
+            foreach (var existing in Directory.GetFiles(framesDirectory, "frame-*.jpg"))
+            {
+                try { File.Delete(existing); } catch (IOException) { }
+            }
+
+            frames = await TryExtractFramesAsync(
+                file, ffmpegPath, framesDirectory, media,
+                $"fps=1/{media.FrameSampleIntervalSeconds},showinfo,scale=768:-2",
+                cancellationToken);
+            logger.LogInformation(
+                "Scene detection produced {SceneFrames} frame(s) for {DocumentId}; fell back to uniform sampling ({Sampled} frame(s))",
+                sceneFrames.Count, file.Id, frames.Count);
+        }
+
+        if (frames.Count == 0) return [];
+
+        await knowledgeBase.UpdateDocumentProgressAsync(file.Id, 55, "分析关键画面", cancellationToken);
+
+        var descriptions = new List<MediaSegment>(frames.Count);
+        var visionUnavailable = false;
+
+        for (var index = 0; index < frames.Count; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var description = await modelClient.DescribeImageAsync(frames[index], cancellationToken);
-            var timestamp = TimeSpan.FromSeconds((long)index * media.FrameSampleIntervalSeconds);
-            descriptions.Add($"[{FormatTime(timestamp)}] {description.Trim()}");
-            if (index == 0 || (index + 1) % 5 == 0 || index == frames.Length - 1)
+            if (visionUnavailable) break;
+
+            try
             {
-                var progress = frames.Length == 0 ? 60 : 50 + (int)(10d * (index + 1) / frames.Length);
+                var description = await modelClient.DescribeImageAsync(frames[index].Path, cancellationToken);
+                if (string.IsNullOrWhiteSpace(description)) continue;
+                descriptions.Add(new MediaSegment(frames[index].Start, description.Trim()));
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                // 视觉模型通常要么全能用要么全不能用；第一帧失败就不再打 N 次同样的请求。
+                visionUnavailable = true;
+                logger.LogWarning(exception,
+                    "Vision model unavailable for {DocumentId}; keyframes stored without descriptions", file.Id);
+            }
+
+            if (index == 0 || (index + 1) % 5 == 0 || index == frames.Count - 1)
+            {
+                var progress = 55 + (int)(10d * (index + 1) / frames.Count);
                 await knowledgeBase.UpdateDocumentProgressAsync(file.Id, progress, "分析关键画面", cancellationToken);
             }
         }
+
+        if (visionUnavailable && descriptions.Count == 0)
+            logger.LogInformation(
+                "No keyframe descriptions for {DocumentId}; the video stays searchable by transcript only", file.Id);
+
         return descriptions;
+    }
+
+    /// <summary>
+    /// 跑一次抽帧，返回"文件 + 时间点"。任何失败（滤镜不支持、编解码器异常）都只记 warning 并返回空，
+    /// 由调用方决定是否退化——绝不能让抽帧失败把整段视频的转写一起带走。
+    ///
+    /// <para>
+    /// <paramref name="filter"/> 是**滤镜链本身**，不包含 <c>-vf</c>：外置进程用 ArgumentList 逐个入参，
+    /// 把 <c>"-vf ..."</c> 拼成一个字符串会变成 ffmpeg 不认识的单一选项。
+    /// 单引号要保留在表达式里，它属于 filtergraph 语法（<c>gt(scene,0.25)</c> 的逗号不能当作分隔符）。
+    /// </para>
+    /// </summary>
+    private async Task<List<(string Path, TimeSpan Start)>> TryExtractFramesAsync(
+        QueuedDocument file,
+        string ffmpegPath,
+        string framesDirectory,
+        MediaOptions media,
+        string filter,
+        CancellationToken cancellationToken)
+    {
+        var pattern = Path.Combine(framesDirectory, "frame-%05d.jpg");
+        string standardError;
+        try
+        {
+            standardError = await RunProcessAsync(ffmpegPath,
+                ["-y", "-i", file.StoragePath, "-vf", filter, "-fps_mode", "vfr",
+                    "-frames:v", media.MaxVideoFrames.ToString(CultureInfo.InvariantCulture), "-q:v", "5", pattern],
+                cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            logger.LogWarning(exception, "Keyframe extraction failed for {DocumentId}", file.Id);
+            return [];
+        }
+
+        var timestamps = ParseShowInfoTimes(standardError);
+        var files = Directory.GetFiles(framesDirectory, "frame-*.jpg")
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .Take(media.MaxVideoFrames)
+            .ToList();
+
+        var result = new List<(string, TimeSpan)>(files.Count);
+        for (var index = 0; index < files.Count; index++)
+        {
+            // showinfo 与输出文件一一对应；对不上时按采样间隔兜底，宁可略偏也不能没有时间点。
+            var start = index < timestamps.Count
+                ? timestamps[index]
+                : TimeSpan.FromSeconds((index + 1) * media.FrameSampleIntervalSeconds);
+            result.Add((files[index], start));
+        }
+
+        return result;
+    }
+
+    /// <summary>从 ffmpeg <c>showinfo</c> 的 stderr 里按顺序取出 <c>pts_time</c>。</summary>
+    internal static IReadOnlyList<TimeSpan> ParseShowInfoTimes(string? standardError)
+    {
+        if (string.IsNullOrWhiteSpace(standardError)) return [];
+
+        var times = new List<TimeSpan>();
+        foreach (var line in standardError.Split('\n'))
+        {
+            var match = ShowInfoTimePattern.Match(line);
+            if (!match.Success) continue;
+            if (!double.TryParse(match.Groups["time"].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var value))
+                continue;
+            if (value < 0 || double.IsNaN(value) || double.IsInfinity(value)) continue;
+            times.Add(TimeSpan.FromSeconds(value));
+        }
+
+        return times;
     }
 
     private async Task<string> SummarizeVideoAsync(string source, CancellationToken cancellationToken)
@@ -281,13 +556,9 @@ public sealed class KnowledgeIngestionService(
 
     private static string FormatTranscript(IReadOnlyList<WhisperTranscriptionSegment> segments) =>
         string.Join("\n", segments.Select(segment =>
-            $"[{FormatTime(segment.Start)}-{FormatTime(segment.End)}] {segment.Text}"));
+            $"[{MediaTimeline.FormatTime(segment.Start)}-{MediaTimeline.FormatTime(segment.End)}] {segment.Text}"));
 
-    private static string FormatTime(TimeSpan time)
-    {
-        var totalSeconds = Math.Max(0, (long)time.TotalSeconds);
-        return $"{totalSeconds / 3600:00}:{totalSeconds % 3600 / 60:00}:{totalSeconds % 60:00}";
-    }
+    private static string FormatTime(TimeSpan time) => MediaTimeline.FormatTime(time);
 
     /// <summary>
     /// 定位 ffmpeg。
@@ -316,7 +587,8 @@ public sealed class KnowledgeIngestionService(
         return PlatformRuntime.WithSuffix("ffmpeg");
     }
 
-    private static async Task RunProcessAsync(string executable, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
+    /// <summary>跑一个外部进程并返回它的 stderr（抽帧时需要从 showinfo 里读时间点）。</summary>
+    private static async Task<string> RunProcessAsync(string executable, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
     {
         var startInfo = new ProcessStartInfo(executable)
         {
@@ -351,7 +623,8 @@ public sealed class KnowledgeIngestionService(
         var error = await standardError;
         _ = await standardOutput;
         if (process.ExitCode != 0)
-            throw new InvalidOperationException($"Media processor '{executable}' failed: {Limit(error)}");
+            throw new InvalidOperationException($"Media processor '{executable}' exited with {process.ExitCode}: {Tail(error)}");
+        return error;
     }
 
     private static List<string> SplitIntoChunks(string text) => SplitText(text, ChunkSize, ChunkOverlap);
@@ -378,9 +651,13 @@ public sealed class KnowledgeIngestionService(
 
     private sealed record VideoContent(
         IReadOnlyList<WhisperTranscriptionSegment> Transcript,
-        IReadOnlyList<string> FrameDescriptions);
+        IReadOnlyList<MediaSegment> Frames);
 
-    private static string Limit(string text) => text.Length > 500 ? text[..500] : text;
+    /// <summary>
+    /// 取 stderr 的**尾部**：ffmpeg/whisper 把版本号、编译器参数、库列表全打在开头，
+    /// 真正的原因永远在最后几行。截前面 500 个字符只会让人看到一屏横幅而看不到错误。
+    /// </summary>
+    private static string Tail(string text) => text.Length > 800 ? "…" + text[^800..] : text;
 
     private static async Task<string> ComputeFileHashAsync(string path, CancellationToken cancellationToken)
     {

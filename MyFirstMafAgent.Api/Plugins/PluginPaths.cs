@@ -39,7 +39,35 @@ public sealed class PluginPaths
 
     public const string VersionsDirectoryName = "versions";
 
+    /// <summary>本项目的主清单文件名。</summary>
     public const string ManifestFileName = "manifest.json";
+
+    /// <summary>
+    /// 认得的清单文件名，按优先级排列。
+    ///
+    /// <para>
+    /// <c>plugin.json</c> / <c>skill.json</c> 是插件生态里既有的命名（QQ Agent 一类）。
+    /// 认它们不是为了兼容某个具体格式，而是因为"把现成插件包丢进来"这件事里，
+    /// 文件名是最不该成为门槛的一环——内容本来就是同一套字段。
+    /// </para>
+    /// </summary>
+    public static IReadOnlyList<string> ManifestFileNames { get; } =
+        [ManifestFileName, "plugin.json", "skill.json"];
+
+    /// <summary>找到目录下的清单文件（按 <see cref="ManifestFileNames"/> 顺序），没有则返回 null。</summary>
+    public static string? FindManifestFile(string directory)
+    {
+        foreach (var name in ManifestFileNames)
+        {
+            var candidate = Path.Combine(directory, name);
+            if (File.Exists(candidate)) return candidate;
+        }
+
+        return null;
+    }
+
+    /// <summary>目录里是否有清单（任意一种命名）。</summary>
+    public static bool HasManifest(string directory) => FindManifestFile(directory) is not null;
 
     public string Root { get; }
 

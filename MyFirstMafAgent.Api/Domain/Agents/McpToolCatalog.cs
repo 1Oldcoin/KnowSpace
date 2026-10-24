@@ -26,6 +26,12 @@ public static class AgentClientCapabilities
     public const string AvatarRead = "avatar:read";
     public const string AvatarWrite = "avatar:write";
 
+    /// <summary>
+    /// 读取聊天历史。刻意与 <c>knowledge:read</c> 分开：私人对话比资料更敏感，
+    /// 只拿到知识库权限的客户端不应该顺带看见用户聊过什么。
+    /// </summary>
+    public const string ChatRead = "chat:read";
+
     /// <summary>可以被授予的全部能力（UI 与校验都以此为准）。</summary>
     public static readonly IReadOnlyList<string> AllKnown =
     [
@@ -36,7 +42,8 @@ public static class AgentClientCapabilities
         FilesRead,
         FilesWrite,
         AvatarRead,
-        AvatarWrite
+        AvatarWrite,
+        ChatRead
     ];
 
     /// <summary>默认能力：只读知识库。新建客户端的最小可用权限。</summary>
@@ -112,7 +119,11 @@ public static class McpToolCatalog
         new("avatar_list_fragments", AgentClientCapabilities.AvatarRead, IsWrite: false, UsesKnowledgeBase: false),
         new("avatar_ask_as_me", AgentClientCapabilities.AvatarRead, IsWrite: false, UsesKnowledgeBase: false),
         new("avatar_feed", AgentClientCapabilities.AvatarWrite, IsWrite: true, UsesKnowledgeBase: false),
-        new("avatar_digest", AgentClientCapabilities.AvatarWrite, IsWrite: true, UsesKnowledgeBase: false)
+        new("avatar_digest", AgentClientCapabilities.AvatarWrite, IsWrite: true, UsesKnowledgeBase: false),
+
+        // 聊天历史回读（只读，独立能力）
+        new("list_chat_sessions", AgentClientCapabilities.ChatRead, IsWrite: false, UsesKnowledgeBase: false),
+        new("chat_search_history", AgentClientCapabilities.ChatRead, IsWrite: false, UsesKnowledgeBase: false)
     ];
 
     private static readonly Dictionary<string, McpToolDescriptor> Index =

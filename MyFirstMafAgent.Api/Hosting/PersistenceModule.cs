@@ -1,4 +1,5 @@
 using MyFirstMafAgent.Api.Domain.Avatar;
+using MyFirstMafAgent.Api.Domain.Chats;
 using MyFirstMafAgent.Api.Domain.Knowledge;
 using MyFirstMafAgent.Api.Domain.Notes;
 using MyFirstMafAgent.Api.Domain.Study;
@@ -57,13 +58,20 @@ public static class PersistenceModule
         services.AddSingleton<SqlSugarAvatarRepository>();
         services.AddSingleton<IAvatarRepository>(sp => sp.GetRequiredService<SqlSugarAvatarRepository>());
 
+        // 聊天历史回读（MCP chat:read）：四张历史表合成一个只读视图。
+        services.AddSingleton<IChatHistoryStore, SqlSugarChatHistoryStore>();
+
         services.AddSingleton<SqlSugarSettingsRepository>();
         services.AddSingleton<ISettingsRepository>(sp => sp.GetRequiredService<SqlSugarSettingsRepository>());
         services.AddSingleton<SqlSugarKnowledgeSearchRepository>();
         services.AddSingleton<IDocumentSearchRepository>(sp => sp.GetRequiredService<SqlSugarKnowledgeSearchRepository>());
+        services.AddSingleton<SqlSugarLexicalSearchRepository>();
+        services.AddSingleton<ILexicalSearchRepository>(sp => sp.GetRequiredService<SqlSugarLexicalSearchRepository>());
         services.AddSingleton<SqlSugarDocumentTextRepository>();
         services.AddSingleton<IDocumentTextRepository>(sp => sp.GetRequiredService<SqlSugarDocumentTextRepository>());
         services.AddSingleton<IKnowledgeBaseDirectory, SqlSugarKnowledgeBaseDirectory>();
+        services.AddSingleton<KnowledgePackageStore>();
+        services.AddSingleton<IKnowledgePackageStore>(sp => sp.GetRequiredService<KnowledgePackageStore>());
         services.AddSingleton<IDatabaseHealthProbe, SqlSugarDatabaseHealthProbe>();
 
         // 插件安装态（启用/配置/授权/范围）与调用审计。

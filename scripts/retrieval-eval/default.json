@@ -1,0 +1,49 @@
+{
+  "name": "默认知识库检索基线",
+  "knowledgeBaseId": "11111111-1111-1111-1111-111111111111",
+  "notes": "expectFiles 为可接受的正确资料（任命中即算命中）；expectText 为额外要求出现在命中切片正文里的片段。cases 里的用例应当能靠资料原文判断，不要为了跑分调参。",
+  "cases": [
+    {
+      "query": "插件协议的握手流程是怎样的？",
+      "expectFiles": ["插件协议要点-ea65061f.md"],
+      "note": "语义类：问题与原文措辞不同，靠向量召回"
+    },
+    {
+      "query": "插件如何与核心通信",
+      "expectFiles": ["插件协议要点-ea65061f.md"],
+      "note": "语义类：原文用的是 JSON-RPC over stdio"
+    },
+    {
+      "query": "写入知识库必须调用什么",
+      "expectFiles": ["插件协议要点-ea65061f.md"],
+      "expectText": "摄取"
+    },
+    {
+      "query": "这些笔记来自哪个平台",
+      "expectFiles": ["欢迎使用插件系统-1e6b95c8.md", "插件协议要点-ea65061f.md"],
+      "expectText": "com.example.sample-platform"
+    },
+    {
+      "query": "note-1001",
+      "expectFiles": ["欢迎使用插件系统-1e6b95c8.md"],
+      "expectText": "note-1001",
+      "note": "字面类：罕见编号，向量几乎不可能命中，考验词法召回"
+    },
+    {
+      "query": "https://example.invalid/notes/1002",
+      "expectFiles": ["插件协议要点-ea65061f.md"],
+      "expectText": "notes/1002",
+      "note": "字面类：URL 原文匹配"
+    },
+    {
+      "query": "小鲸鱼的性格设定",
+      "expectFiles": ["小鲸鱼.md"],
+      "expectText": "温柔"
+    },
+    {
+      "query": "软傲娇被夸之后会怎么反应",
+      "expectFiles": ["小鲸鱼.md"],
+      "note": "语义类：原文是“被夸先开心再小声嘴硬”"
+    }
+  ]
+}

@@ -21,7 +21,7 @@ public sealed class SqlSugarKnowledgeSearchRepository(SqlSugarScope database) : 
         }, cancellationToken);
 
         return rows
-            .Select(row => new RetrievedChunk(row.DocumentId, row.FileName, row.Content, row.Similarity))
+            .Select(row => new RetrievedChunk(row.DocumentId, row.FileName, row.Content, row.Similarity, row.ChunkId, row.ChunkIndex))
             .ToList();
     }
 }
@@ -36,6 +36,12 @@ internal sealed class RetrievedChunkRow
     public string FileName { get; set; } = string.Empty;
     public string Content { get; set; } = string.Empty;
     public double Similarity { get; set; }
+
+    /// <summary>kb_chunks.id；引用元数据用它定位切片。</summary>
+    public long ChunkId { get; set; }
+
+    /// <summary>切片在所属资料内的序号（从 0 开始）。</summary>
+    public int ChunkIndex { get; set; } = -1;
 }
 
 /// <summary>资料原文读取的 SqlSugar 实现。</summary>

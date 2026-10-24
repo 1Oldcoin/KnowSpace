@@ -79,7 +79,8 @@ public sealed record PluginStatusSnapshot(
     string? Integrity,
     bool Configured,
     int InFlightInvocations = 0,
-    bool Draining = false);
+    bool Draining = false,
+    string? Isolation = null);
 
 /// <summary>单次能力调用结果，包含耗时便于审计。</summary>
 public sealed record PluginInvocationResult(
@@ -107,7 +108,7 @@ public sealed record PluginIngestionOutcome(
 }
 
 /// <summary>
-/// 一次调用的上下文：谁发起、是否已确认。
+/// 一次调用上下文：谁发起、是否已确认。
 /// 模型调用永远是“未确认”，因此不能触发需要确认的副作用能力。
 /// </summary>
 public sealed record PluginInvocationContext(string Actor, bool Confirmed)
@@ -118,3 +119,17 @@ public sealed record PluginInvocationContext(string Actor, bool Confirmed)
 
     public static PluginInvocationContext FromAgent() => new(PluginActors.Agent, false);
 }
+
+/// <summary>
+/// 重新扫描插件目录的结果。
+/// <para>
+/// <see cref="Discovered"/> 是这次扫描看到的全部插件（含已在运行的），
+/// <see cref="Started"/> / <see cref="Failed"/> 只包含本次真正尝试启动的，
+/// <see cref="Removed"/> 是目录已消失、被清理掉的。
+/// </para>
+/// </summary>
+public sealed record PluginRescanResult(
+    IReadOnlyList<string> Discovered,
+    IReadOnlyList<string> Started,
+    IReadOnlyList<string> Failed,
+    IReadOnlyList<string> Removed);

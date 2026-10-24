@@ -11,7 +11,7 @@
 ### 当前功能范围
 
 - 创建和切换知识库；默认知识库在 API 启动时自动初始化。
-- 上传 PDF、DOCX、TXT、MD、HTML/HTM、常见图片和视频文件，查看资料处理进度、摘要或错误；在资料卡的更多菜单中可阅读原文、重新解析、复制名称、下载原文件或删除资料。
+- 上传 PDF、DOCX、TXT、MD、HTML/HTM、常见图片、视频与**音频**（MP3/WAV/M4A/AAC/OGG/OPUS/FLAC/WEBA/AMR），查看资料处理进度、摘要或错误；在资料卡的更多菜单中可阅读原文、重新解析、复制名称、下载原文件或删除资料。图片在卡片上直接显示缩略图、音频内联播放——两者都按原文件保存，可直接当素材/表情包/语音库使用。
 - 按知识库管理专题：创建、重命名、删除专题，将资料归入专题，并在侧栏、专题页和资料页按专题筛选；删除专题只解除资料归属。
 - 根据资料内容进行向量检索和带引用问答；问答会话及消息写入数据库。
 - 管理问答历史：新建、重命名、单条删除、批量删除和 Markdown 导出。
@@ -75,12 +75,18 @@ MyFirstMafAgent/
 | `Program.cs` | 控制台入口：构建并启动 `ApiHost`，按配置自动打开浏览器。 |
 | `ApiHost.cs` | 业务组合根：内容根解析、数据目录重定向、便携数据库启动/停止、构建、初始化与端点映射的顺序；控制台版和桌面版共用。 |
 | `Hosting/` | 模块化注册：`HostBootstrap`、`HostOptionsModule`、`PersistenceModule`、`KnowledgeModule`、`DocumentsChatsModule`、`AvatarModule`、`AgentModule`、`McpModule`、`PluginModule`、`WorkerModule`、`HostPipeline`、`DatabaseInitializer`。新增宿主只能复用这些模块，不得复制注册。 |
-| `Plugins/PluginManifestLoader.cs` | 扫描 `Plugins:RootPath` 下的插件目录，解析 `versions/{v}` + `active.json` 布局（兼容扁平布局），校验 manifest 并解析入口。 |
-| `Plugins/PluginPaths.cs` | 插件目录布局的唯一计算入口：版本目录、激活指针、数据目录、暂存目录。 |
+| `Plugins/PluginManifestLoader.cs` | 扫描 `Plugins:RootPath` 下的插件目录（识别 `manifest.json`/`plugin.json`/`skill.json`，解压多一层时下探），解析 `versions/{v}` + `active.json` 布局（兼容扁平布局），校验 manifest 并解析入口（宿主命令 + 包名不要求文件存在）。 |
+| `Plugins/PluginPaths.cs` | 插件目录布局的唯一计算入口：版本目录、激活指针、数据目录、暂存目录；清单文件名别名表（`ManifestFileNames`）。 |
 | `Plugins/PluginInstaller.cs` | 两段式安装：`StageAsync` 只做 ZIP 解压、manifest/入口校验与摘要校验（不碰生效目录），`InstallFromDirectoryAsync` 负责落盘切换；另含激活、回滚、卸载、旧版本修剪。 |
 | `Plugins/PluginIntegrity.cs` | 规范化包摘要（SHA-256）与 ECDSA/RSA 签名校验，`off/warn/enforce` 三档策略。 |
 | `Plugins/PluginAuditWriter.cs` | 插件调用与生命周期审计，入参脱敏、超长截断，写失败不阻断业务。 |
-| `Plugins/PluginProcessHost.cs` | 启动插件子进程、校验握手回执、下发配置、健康检查与带超时/取消的能力调用；维护在途调用计数与排空状态（排空期新调用立即 503）。 |
+| `Plugins/PluginProcessHost.cs` | 启动插件子进程、校验握手回执、下发配置、健康检查与带超时/取消的能力调用；支持两种方言（自有 `plugin/*` 与标准 MCP `initialize`/`tools/list`/`tools/call`）；维护在途调用计数与排空状态（排空期新调用立即 503）。 |
+| `Plugins/Isolation/PluginIsolationOptions.cs` | `Plugins:Isolation` 配置（Mode/额外可读写根/容器名前缀/是否重定向用户目录）与对外回显的 `PluginIsolationReport`。 |
+| `Plugins/Isolation/PluginIsolationPlanner.cs` | 纯计算：权限声明 → 能力 SID（有 `network` 才给 `S-1-15-3-1`）+ 授权路径（插件目录只读、数据目录可写、`.runtimes` 只读）+ 环境重定向。不碰祖先目录。 |
+| `Plugins/Isolation/WindowsAppContainer.cs` | AppContainer 配置创建/SID 派生、ACL 授权（已等价则跳过，避免重复触发继承重整）、容器可读性判定与可照做的错误说明。 |
+| `Plugins/Isolation/AppContainerPluginProcess.cs` | `CreateProcess` + `STARTUPINFOEX` + `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` 启动受限进程；三条自建管道；`CREATE_SUSPENDED` → 挂 Job（`KILL_ON_JOB_CLOSE`）→ 恢复，杜绝孙进程逃逸。 |
+| `Plugins/Isolation/PluginProcess.cs` | 子进程抽象（PID/stdin/stdout/stderr/退出/杀树），让「未隔离」与「隔离」两条启动路径共用宿主后续逻辑。 |
+| `Plugins/Isolation/PluginProcessFactory.cs` | 按 `Isolation.Mode` 选择隔离启动 / 降级启动 / 拒绝启动；环境变量白名单（不复制连接串与 API Key）；`node` 等裸命令优先解析到 `plugins/.runtimes`；为 Node 注入 `--preserve-symlinks-main`。 |
 | `Plugins/PluginManager.cs` | 插件发现、四道启动闸门（启用/完整性/配置/权限）、退避重启、启停/配置/授权/升级/回滚/卸载；升级＝排空 → 停旧进程 → 落盘 → 启动，另暴露 `DrainAsync` 与 `IsScheduledSyncEligible`。 |
 | `Plugins/IPluginRuntime.cs` | 同步用例需要的最小插件运行时端口（调用能力 + 是否参与定时同步），让 `PluginSyncService` 可脱离进程单测。 |
 | `Plugins/PluginSyncService.cs` | 平台同步用例：调插件 → 解析批次 → 上限校验 → 幂等摄取 → 写游标 → 记审计；手动/定时/重试共用这一份逻辑，失败保留旧游标。 |
@@ -112,6 +118,10 @@ MyFirstMafAgent/
 | `Infrastructure/Persistence/SqlSugarAgentClientStore.cs` | 客户端与调用审计的 SqlSugar 实现（损坏 JSON 按最小权限处理）。 |
 | `Hosting/AgentClientGate.cs` | `/mcp` 准入中间件：认证 → 启停 → 限流 → 工具准入 → 审计。 |
 | `Endpoints/AgentClientEndpoints.cs` | 客户端管理、能力/工具清单、密钥轮换与调用审计接口。 |
+| `Domain/Chats/ChatHistory.cs` | 聊天历史读取端口与模型：四个来源名（`knowledge`/`avatar`/`companion`/`companion-import`）、会话摘要与消息命中，只读。 |
+| `Application/Chats/ChatHistoryService.cs` | 聊天历史回读用例：来源名规范化（写错报错而非返回空）、条数夹紧、错误说人话。 |
+| `Infrastructure/Persistence/SqlSugarChatHistoryStore.cs` | 用一条 `UNION ALL` 合并三张会话表与导入记录表的只读视图；LIKE 元字符转义、命中处截取上下文。 |
+| `Mcp/ChatHistoryMcpTools.cs` | MCP 工具 `list_chat_sessions` 与 `chat_search_history`（`chat:read`）。 |
 | `Infrastructure/PortablePostgres/PortablePostgresHost.cs` | 启动/停止 pg0 子进程，等待数据库就绪、创建数据库并执行 `CREATE EXTENSION IF NOT EXISTS vector`。 |
 | `Infrastructure/PortablePostgres/PortablePostgresOptions.cs` | 便携数据库配置：实例名、端口、数据目录、账号、超时与 pg0 路径。 |
 | `Endpoints/ApiEndpointMappings.cs` | 统一注册业务路由模块。 |
@@ -120,7 +130,8 @@ MyFirstMafAgent/
 | `Endpoints/HealthEndpoints.cs` | API/数据库健康检查。 |
 | `Documents/LocalDocumentStore.cs` | 校验文件类型和大小，将原始文件安全保存到本地目录。 |
 | `Documents/ResumableUploadService.cs` | 分块上传会话、偏移量校验和断点续传。 |
-| `Documents/KnowledgeIngestionService.cs` | 文档解析、分块、Embedding 和视频摘要处理。 |
+| `Documents/KnowledgeIngestionService.cs` | 文档解析、分块、Embedding 和视频摘要处理；视频会抽关键帧并调用视觉模型描述，转写与画面按时间轴合并成切片。 |
+| `Documents/MediaTimeline.cs` | 时间轴切片的纯函数：`[hh:mm:ss]` 行格式、只在段边界切分、时间戳反解出引用跳转点。 |
 | `Documents/DocumentIngestJobHandler.cs` | `document.ingest` 任务处理器与补投器：按资料状态推导任务，抢占资料后解析并回写进度/结果。 |
 | `Domain/Jobs/JobModels.cs` | 任务类型、状态、优先级、重试退避与状态迁移规则（纯函数）。 |
 | `Domain/Jobs/JobRecord.cs` | 任务记录、计数、查询条件、入队命令、租约、失败信息与 SSE 事件模型。 |
@@ -134,13 +145,25 @@ MyFirstMafAgent/
 | `Endpoints/JobEndpoints.cs` | 任务中心接口：列表/计数/类型/详情/取消/重跑与 SSE 实时进度。 |
 | `Hosting/JobsModule.cs` | 任务系统的依赖注入组合（调度器、队列、处理器索引、补投器）。 |
 | `Persistence/KnowledgeBaseStore.cs` | 知识库、资料、上传状态、分块和向量检索数据访问。 |
-| `Persistence/KnowledgeChatStore.cs` | 知识库问答会话及消息持久化和历史管理。 |
-| `Persistence/CompanionStore.cs` | 伴侣档案、导入消息和会话数据访问。 |
+| `Persistence/KnowledgeChatStore.cs` | 知识库问答会话及消息持久化和历史管理（含引用与答案元数据列）。 |
+| `Persistence/KnowledgeChatCitations.cs` | 引用元数据模型（引用 / 检索上下文 / 答案元数据）与 JSON 编解码。 |
+| `Domain/Notes/NoteSource.cs` | 笔记引用的一条资料依据（资料 ID / 文件名 / 切片序号 / 相似度 / 片段）。 |
+| `Domain/Notes/NoteQuery.cs` | 笔记筛选条件值对象（关键词/分类/资料/专题）+ 规范化属性，让过滤在 SQL 里做。 |
+| `Domain/Notes/NoteCitationAnchor.cs` | 正文引用锚点 `[1]` / `[2,3]` 的解析：切分文本与锚点、识别悬空序号、导出时转成 Markdown 脚注。纯函数，只认 1-2 位数字（所以链接 `[2024](url)` 与标签 `[TODO]` 不会被误判）。 |
+| `Application/Notes/NoteExportFormatter.cs` | 把多篇笔记渲染成一份 Markdown（纯函数，可单测）。正文写了锚点时输出脚注定义，没写时保持原来的编号列表。 |
+| `Application/KnowledgePackages/KnowledgePackageManifest.cs` | 知识库包清单模型（format/version、专题、资料、笔记、warnings）与 JSON 选项。 |
+| `Application/KnowledgePackages/KnowledgePackageReader.cs` | 包的读取与校验：格式/版本/JSON，条目名归一化（`files\a.md` → `files/a.md`）与索引，条目 SHA-256，重名让路规则。 |
+| `Application/KnowledgePackages/KnowledgePackageExporter.cs` | 把知识库打成 zip（临时文件 + `DeleteOnClose` 流式返回）。 |
+| `Application/KnowledgePackages/KnowledgePackageImporter.cs` | 把包导入成新知识库：重建 ID 映射、校验哈希、资料重新排队解析；失败按「笔记→专题→资料→知识库」逆序回滚，零内容导入直接报错。 |
+| `Persistence/KnowledgePackageStore.cs` | `IKnowledgePackageStore` 实现：把 `KnowledgeBaseStore` 收窄成包需要的动作，并提供回滚用的 `DeleteKnowledgeBaseAsync`。 |
+| `Persistence/CompanionStore.cs` | 伴侣档案、导入消息和会话数据访问，以及 `companion_message_vectors` 的写入与向量检索。 |
+| `Companions/CompanionMemoryIndexer.cs` | 把目标人物的历史消息向量化到独立表（`companion_message_vectors`），并提供语义检索入口；模型不可用时返回 null 让调用方退回词面检索。 |
+| `Companions/ChatHistoryParser.cs` | 聊天导出解析：QQ 块式导出、微信行内时间戳、通用文本、CSV（表头别名/引号/制表符），并剥离 `昵称(QQ号)` 尾部。 |
 | `Persistence/*SchemaEntities.cs` | SqlSugar CodeFirst 表、列和普通索引映射。 |
 | `Persistence/PgVectorSql.cs` | 集中封装 pgvector 专属 SQL（扩展 DDL、余弦距离运算符、vector 类型转换），其余数据访问均走 SqlSugar 原生 API。 |
 | `Models/LocalOnnxEmbeddingService.cs` | 在 API 进程内加载 BGE ONNX 模型并生成归一化向量。 |
 | `Agents/KnowledgeAgent.cs` | 通过 Microsoft Agent Framework 调用聊天模型并组织 RAG 上下文。 |
-| `Chats/KnowledgeChatService.cs` | 组合历史消息、检索结果、Agent 回答和引用信息。 |
+| `Chats/KnowledgeChatService.cs` | 组合历史消息、检索结果、Agent 回答和引用信息（含检索上下文与工具审计），并写入会话。 |
 
 `MyFirstMafAgent` 是独立的 .NET 控制台示例，演示使用 MAF 调用兼容 OpenAI 的聊天模型进行流式对话；它不属于 Vue/API 主系统的启动依赖。
 
@@ -185,13 +208,20 @@ ASP.NET Core 10 Minimal API
 ### 4.2 知识库问答（RAG）
 
 1. `KnowledgeChatService` 校验会话所属知识库，并读取该会话最近 30 条消息作为对话历史。
-2. `KnowledgeRetrievalService` 使用本地 ONNX 模型对问题生成向量，再按当前知识库和 `Ready` 状态过滤资料块。
-3. `KnowledgeBaseStore` 使用 pgvector 的余弦距离运算符 `<=>` 排序。聊天默认取前 5 个片段；显式检索接口的结果数限制为 1–10 条。
-4. `KnowledgeAgent` 将资料片段、最近对话和本轮问题组装成上下文交给聊天模型。提示词要求资料不足时明确说明、标记来源，并将检索内容视为不可信引用数据而非系统指令。
-5. API 返回回答和引用资料名/相似度；本轮用户消息与助手回答保存到 `knowledge_chat_messages`，会话标题初始为首个问题的前 100 个字符。
+2. `RetrievalRouter` 用本地 ONNX 模型对问题生成向量，按当前知识库和 `Ready` 状态过滤资料块，并跳过指纹/维度不一致的索引。
+3. 检索是**混合**的：向量（pgvector 余弦距离 `<=>`）与词法（PostgreSQL 全文）两路召回，再用 RRF 融合。词法侧的 token 由 `Domain/Knowledge/LexicalTokens.cs` 在应用侧切成中文二元组（PostgreSQL 默认解析器不认中文，pg0 也没有 `zhparser`），写入 `kb_chunks.lexical_tokens` 并由 GIN 表达式索引支持；历史切片由 `LexicalIndexWorker` 后台补分词。融合之后可选一层**重排**（`Application/Knowledge/CoverageReranker.cs` → `Domain/Knowledge/RerankScoring.cs`）：`Score = (1-w)·(0.5×融合名次 + 0.5×归一余弦) + w×idf 覆盖率`，`w=0.65`。默认开启，`Retrieval:RerankEnabled=false` 可回到纯 RRF。
+4. 聊天默认取前 5 个片段（**重排开启时**每路召回 60 条再融合，融合后由 `RerankScoring` 重排再截断；关闭时各召回 15 条直接融合）；显式检索接口的结果数限制为 1–20，并可用 `mode` 选 `hybrid` / `vector` / `lexical` / `rerank`。
+5. `ToolCallingAgent` 将资料片段、最近对话和本轮问题组装成上下文交给聊天模型。提示词要求资料不足时明确说明、标记来源，并将检索内容视为不可信引用数据而非系统指令。
+6. API 返回回答和引用元数据；本轮用户消息与助手回答保存到 `knowledge_chat_messages`，会话标题初始为首个问题的前 100 个字符。
 6. “AI 知识问答”页提供三个单轮开关：工具调用（总开关）、联网搜索、本地文件。它们随请求体（`enableToolCalling` / `enableWebSearch` / `enableFileAccess`）发送，为空时沿用设置页保存的偏好，非空时只对本次提问生效且不落库。关闭总开关后不向模型下发任何 `tools`，模型只能用预检索的资料片段回答；关闭联网或本地文件时由 `AgentToolRegistry` 按工具分类过滤，知识库与分身工具不受影响。
 
-聊天历史表保存角色、文本内容和时间；引用信息随问答响应返回，但目前不单独持久化到历史消息表。
+聊天历史表保存角色、文本内容和时间。**引用元数据会随助手消息一起落库**（`citations` / `answer_meta` 两列）：
+
+- `citations` 是数组，每项为 `documentId / fileName / similarity / rank（从 1 开始）/ chunkId / chunkIndex / snippet（≤240 字）`，能定位到“哪份资料的哪一段”。切片标识来自检索 SQL 投影的 `kb_chunks.id` 与 `chunk_index`（旧版直查与新索引两条路径都有）。
+- `answer_meta` 保存 `retrieval`（`indexId` / `embeddingSpecName` / `warning` / `legacyIndex` / `strategy` / `abstained` / `topScore`）、`toolCalls`（工具调用审计）与 `sources`（联网来源链接），回答“为什么是这几条资料”和“答案用了哪些工具”。
+- 写入集中在 `KnowledgeChatStore.AddSessionExchangeAsync`，读回时经 `KnowledgeChatJson` 反序列化；脏 JSON 一律降级为空引用，不让整个会话打不开。
+- 旧库靠 `KnowledgeChatStore.EnsureMessageColumns()` 显式补列（`CodeFirst` 只在建表时生效）。
+- Markdown 导出会为每条助手消息追加「引用资料（序号 / 第 N 段 / 相关度 / 片段）」与「网页来源」引用块。
 
 ### 4.3 问答历史管理
 
@@ -244,7 +274,7 @@ ASP.NET Core 10 Minimal API
 
 ### 4.7 MCP 双向互操作
 
-- **本机知识库作为 MCP 服务端**：`KnowledgeMcpTools`（`Mcp/KnowledgeMcpTools.cs`）、`LocalFileMcpTools`（`Mcp/LocalFileMcpTools.cs`）与 `AvatarMcpTools`（`Mcp/AvatarMcpTools.cs`）通过 `ModelContextProtocol.AspNetCore` 以 Streamable HTTP 暴露在 `Mcp:ServerPath`（默认 `/mcp`，无状态模式）。其他大模型/智能体可调用 `list_knowledge_bases`、`list_documents`、`search_knowledge_base`、`get_document_content`、`get_document_summary`、`workspace_*`、`list_file_roots`、`local_*`，以及 `avatar_get_persona`、`avatar_feed`、`avatar_search_memories`、`avatar_digest`、`avatar_ask_as_me`、`avatar_list_fragments`。
+- **本机知识库作为 MCP 服务端**：`KnowledgeMcpTools`（`Mcp/KnowledgeMcpTools.cs`）、`LocalFileMcpTools`（`Mcp/LocalFileMcpTools.cs`）、`AvatarMcpTools`（`Mcp/AvatarMcpTools.cs`）与 `ChatHistoryMcpTools`（`Mcp/ChatHistoryMcpTools.cs`）通过 `ModelContextProtocol.AspNetCore` 以 Streamable HTTP 暴露在 `Mcp:ServerPath`（默认 `/mcp`，无状态模式）。其他大模型/智能体可调用 `list_knowledge_bases`、`list_documents`、`search_knowledge_base`、`get_document_content`、`get_document_summary`、`upload_document`、`workspace_*`、`list_file_roots`、`local_*`、`avatar_get_persona`、`avatar_feed`、`avatar_search_memories`、`avatar_digest`、`avatar_ask_as_me`、`avatar_list_fragments`，以及 `list_chat_sessions`、`chat_search_history`（共 **24** 个工具，能力与准入见 `docs/MCP-ACCESS.md`）。
 - **本机作为 MCP 客户端**：`Mcp/McpClientRegistry.cs` 按 `Mcp:Servers` 惰性连接外部服务器（`http` Streamable HTTP 或 `stdio`），工具列表缓存 30 秒；`Mcp/McpToolSource.cs` 把远端工具桥接为 `mcp__{server}__{tool}`（名称清洗、去重、≤64 字符）供聊天模型调用。
 - 连接失败只影响对应服务器，状态通过 `GET /api/mcp/status` 暴露；设置页“AI 工具与 MCP”卡片展示 MCP 端点、连接数与工具清单。
 
@@ -355,6 +385,7 @@ ASP.NET Core 10 Minimal API
 
 - 聊天模型工具（`AvatarToolSource`，分类 `avatar`）：`avatar_get_persona`、`avatar_feed`（创建异步整理任务）、`avatar_search_memories`、`avatar_digest`、`avatar_ask_as_me`。
 - MCP 工具（`AvatarMcpTools`）：`avatar_get_persona`、`avatar_feed`、`avatar_search_memories`、`avatar_digest`、`avatar_ask_as_me`、`avatar_list_fragments`。
+- MCP 工具（`ChatHistoryMcpTools`，能力 `chat:read`）：`list_chat_sessions`、`chat_search_history`——读回对话原话（含导入的 QQ/微信/CSV 记录），与「记忆」分开授权。
 
 **保留能力**：`avatar_profile`（基础画像）、`avatar_experiences`、`avatar_behaviors`、`avatar_relationships`、`avatar_simulations`（未来轨迹推演，`POST /api/avatar/simulations`）仍在后端可用，前端不再作为独立页签展示。
 
@@ -370,7 +401,7 @@ ASP.NET Core 10 Minimal API
 | `kb_knowledge_bases` | 知识库元数据。 | 含固定默认知识库和用户创建的知识库。 |
 | `kb_topics` | 知识库下的专题名称、颜色和时间。 | 关联知识库；资料通过 `kb_documents.topic_id` 归属专题。 |
 | `kb_documents` | 资料文件名、存储路径、状态、进度、摘要、错误信息、文件哈希、内容哈希和当前内容版本。 | 关联知识库；可关联专题，删除专题时置空。 |
-| `kb_notes` | 学习笔记标题、正文、分类、颜色、标签、置顶状态和来源资料。 | 关联知识库；`tags` 以 JSON 数组文本保存。 |
+| `kb_notes` | 学习笔记标题、正文、分类、颜色、标签、置顶状态、来源资料、专题与引用片段。 | 关联知识库；`tags`、`sources` 以 JSON 文本保存；`topic_id`/`source_document_id`/`source_session_id` 为可空 uuid。旧库启动时由 `SqlSugarNoteRepository.EnsureColumns()` 补列。 |
 | `kb_chunks` | 资料切片文本、序号、内容版本和内容哈希；`embedding` 仅保留为历史兼容列。 | 关联资料；`(document_id, document_version, chunk_index)` 唯一。 |
 | `kb_document_versions` | 资料每次内容变化产生的分块版本、内容哈希和切片数。 | 关联资料；`(document_id, version)` 唯一。 |
 | `kb_embedding_specs` | 向量模型规格、维度、序列长度、revision 和唯一指纹。 | 指纹相同的模型视为同一向量空间。 |
@@ -382,9 +413,10 @@ ASP.NET Core 10 Minimal API
 | `kb_document_summaries` | 按内容哈希与摘要模型指纹缓存的摘要。 | 与向量索引生命周期完全解耦。 |
 | `kb_upload_sessions` | 断点续传会话、暂存路径和已上传字节数。 | 关联知识库，可关联完成后的资料记录。 |
 | `knowledge_chat_sessions` | 知识库问答会话标题与时间。 | 关联知识库，删除知识库时级联删除会话。 |
-| `knowledge_chat_messages` | 问题和回答文本、角色与时间。 | 关联问答会话，删除会话时级联删除消息。 |
+| `knowledge_chat_messages` | 问题和回答文本、角色与时间；助手消息额外带 `citations`（引用数组）与 `answer_meta`（检索上下文 / 工具调用 / 网页来源）。 | 关联问答会话，删除会话时级联删除消息。 |
 | `companion_profiles` | AI 伴侣档案、目标发言者、平台及风格描述。 | 档案独立于知识库问答。 |
 | `companion_messages` | 导入的原始聊天记录。 | 关联档案。 |
+| `companion_message_vectors` | 伴侣历史消息的向量：`message_id` 主键、规格 id、指纹、维度与 pgvector 列。 | **独立于 `kb_*`**：私聊不进资料索引，避免「问资料」时把私聊当证据引用；查询按指纹 + `profile_id` + `sender` 过滤。 |
 | `companion_sessions` | 伴侣对话会话。 | 关联档案。 |
 | `companion_session_messages` | 伴侣会话中的用户和 AI 消息。 | 关联会话。 |
 | `app_settings` | 前端设置页保存的 JSON 配置。 | 单机密钥存储，接口只返回掩码提示。 |
@@ -476,9 +508,12 @@ Embedding 与聊天模型采用分离配置：切换本地/云端聊天模型不
 | `GET` | `/api/knowledge-bases/{knowledgeBaseId}/sessions/{sessionId}/export` | 下载 Markdown 对话记录。 |
 | `GET` / `POST` | `/api/knowledge-bases/{knowledgeBaseId}/topics` | 列出/创建专题。 |
 | `PUT` / `DELETE` | `/api/knowledge-bases/{knowledgeBaseId}/topics/{topicId}` | 重命名/删除专题（删除时资料移回未分类）。 |
-| `GET` / `POST` | `/api/knowledge-bases/{knowledgeBaseId}/notes` | 列出（可按 `query`/`category` 过滤）/创建笔记。 |
+| `GET` / `POST` | `/api/knowledge-bases/{knowledgeBaseId}/notes` | 列出（`query`/`category`/`documentId`/`topicId` 均下推到 SQL 过滤）/创建笔记。 |
 | `GET` / `PUT` / `DELETE` | `/api/knowledge-bases/{knowledgeBaseId}/notes/{noteId}` | 读取/更新/删除笔记。 |
 | `POST` | `/api/knowledge-bases/{knowledgeBaseId}/notes/{noteId}/pin` | 设置或取消笔记置顶。 |
+| `POST` | `/api/knowledge-bases/{knowledgeBaseId}/notes/export` | 批量导出笔记为一份 Markdown（`noteIds` 为空即全部）。 |
+| `GET` | `/api/knowledge-bases/{knowledgeBaseId}/package` | 导出知识库包（zip：`manifest.json` + 原始文件），统计在 `X-Package-*` 响应头。 |
+| `POST` | `/api/knowledge-bases/import` | 导入知识库包（multipart，字段名 `file`），一律新建知识库并重新排队解析；失败或零内容会回滚并返回 400。 |
 | `PUT` / `GET` | `/api/documents/{documentId}/topic` | 设置/读取资料所属专题。 |
 | `GET` / `PUT` | `/api/settings` | 读取/保存模型与学习偏好设置；密钥只返回掩码提示。 |
 | `GET` / `POST` | `/api/study/checkins` | 读取学习打卡统计/记录今日打卡。 |
@@ -515,6 +550,7 @@ Embedding 与聊天模型采用分离配置：切换本地/云端聊天模型不
 | `GET` / `POST` | `/api/avatar/relationships` | 保留：列出/新增关系人；`PUT`、`DELETE /api/avatar/relationships/{id}` 修改与删除。 |
 | `GET` / `POST` | `/api/avatar/simulations` | 保留：列出/发起未来轨迹推演；`GET`、`DELETE /api/avatar/simulations/{id}` 查看与删除。 |
 | `/api/companions/*` | — | 导入历史、查询/删除档案、生成画像、创建会话、读取消息和发送伴侣对话。 |
+| `GET` / `POST` | `/api/companions/{id}/index`、`/api/companions/{id}/reindex` | 查询「语义记忆」已索引条数 / 手动触发重建（`?limit=` 控制本批上限，导入后会后台自动跑一次）。 |
 
 知识库问答会话接口的路径均包含 `knowledgeBaseId`，后端据此校验会话归属，避免通过其他知识库 ID 操作会话。
 
@@ -538,9 +574,13 @@ Embedding 与聊天模型采用分离配置：切换本地/云端聊天模型不
 | `Embedding:MaxModelFileSizeBytes` | 单个本地模型文件上限。 | 默认 1 GiB；同时决定 API 请求体上限。 |
 | `Embedding:DefaultSpecName` | 默认向量规格名称。 | 设置页保存的默认规格优先于该配置。 |
 | `Indexing:RollbackWindowMinutes` | 旧索引可回滚的时间窗口。 | 默认 60 分钟，超时后由后台清理。 |
+| `Retrieval:HybridEnabled` | 是否启用混合检索（向量 + 词法 RRF 融合）。 | 默认 `true`；设为 `false` 整体退回纯向量检索，行为与 P2-1 之前一致。 |
+| `Retrieval:RrfK` | RRF 平滑常数 k。 | 默认 60。越大越看重"两路合并排名"，越小越只看头部命中。 |
+| `Retrieval:CandidateMultiplier` / `Retrieval:MaxCandidates` | 每一路的候选倍数与候选上限。 | 默认 3 / 60：融合前多取一些，融合后再截到调用方要的条数。 |
 | `Storage:RootPath` | 原始资料和分块暂存文件目录。 | 默认 `App_Data/uploads`。 |
 | `Storage:MaxFileSizeBytes` | 普通文件上限。 | 默认 50 MiB。 |
 | `Storage:MaxVideoFileSizeBytes` | 视频文件上限。 | 默认 5 GiB。 |
+| `Storage:MaxAudioFileSizeBytes` | 音频文件上限（语音消息/录音/播客）。 | 默认 300 MiB。音频单独一档，不跟普通文档共用 50 MiB，否则一条长语音就会被拒。 |
 | `Storage:UploadChunkSizeBytes` | 单个上传分块上限/默认分块大小。 | 默认 16 MiB。 |
 | `Media:FfmpegPath` | FFmpeg 可执行文件路径。 | **默认空 = 自动定位**：先找 `ExternalTools/ffmpeg/<rid>/`，再找旧版扁平布局，最后回落到 PATH 里的 `ffmpeg`（容器里用 apt 安装即可）。 |
 | `Media:WhisperModel` / `Media:WhisperModelPath` | Whisper 模型类型和缓存路径。 | 默认 Base；模型缺失时首次转写会尝试下载，也可在设置页导入本地模型。 |
@@ -557,6 +597,10 @@ Embedding 与聊天模型采用分离配置：切换本地/云端聊天模型不
 | `Plugins:ScheduledSyncEnabled` | 是否启用定时同步（插件返回 `nextSyncAfterSeconds` 后由补投器按间隔入队）。 | 默认 `true`；关闭后只能手动触发同步。 |
 | `Plugins:MinScheduledSyncIntervalSeconds` | 定时同步的最小间隔，插件报的间隔比它小就按它算。 | 默认 `60`，合法区间 30–86400。 |
 | `Plugins:TrustedPublisherKeys` | 受信任发布者公钥（按 `PluginId` 域名段前缀匹配）。 | 与库表 `plugin_trusted_keys` 合并，**配置项优先**且不可经由接口删除。 |
+| `Plugins:MaxQueuedInvocationsPerPlugin` | 单个插件允许多少次调用**排队**（不含正在运行）。 | 默认 `16`；在途上限 = manifest 的 `maxConcurrentInvocations` + 本值；`0` 表示「没有空闲槽位就立即拒绝」。超额返回 **429**（`code=-32006`），不是无限排队。 |
+| `Plugins:StartupConcurrency` | 启动阶段并行拉起的插件数。 | 默认 `4`。**插件数量本身没有上限**（扫描不截断、列表不分页）；这个值只约束「同时 spawn 多少个进程」。 |
+| `Plugins:MaxQueuedInvocationsPerCapability` | 单个能力的排队上限。 | 默认 `8`；只对在 `CapabilityConcurrencyLimits` 里配了上限的能力生效。 |
+| `Plugins:CapabilityConcurrencyLimits` | 能力级并发上限。键写 `"<pluginId>/<capabilityId>"`（只对某插件）或 `"<capabilityId>"`（对所有同名能力）。 | 默认空（只有插件级闸门）。它是在插件预算里**再切一刀**，不会放大插件上限。改完需重启。 |
 | `VITE_API_BASE_URL` | 前端 API 根地址。 | 未设置时使用同源（空字符串）；Vite 开发服务器通过 `/api` 代理转发到 `http://127.0.0.1:5056`。 |
 
 ### 8.2 本地启动
@@ -615,6 +659,39 @@ powershell -ExecutionPolicy Bypass -File scripts\Publish-Portable.ps1 -Target de
 
 Electron 调试用 `cd desktop-electron; npm install; npm start`（可用 `MAF_API_EXE` 指向已发布的 API）。打安装包：`cd desktop-electron; npm run dist:full`（等价于 `scripts\Build-ElectronInstaller.ps1`，会先发布 sidecar 再跑 electron-builder）。自动更新已接入（`desktop-electron/updater.js` + `electron-updater`），发布用 `npm run dist:publish`，详见 `docs/DEPLOYMENT.md` §7。
 
+### 8.3.1 检索评估（可复跑基线）
+
+检索改动的正确验证方式不是"感觉更准了"，而是同一份问题集在改动前后的 recall / MRR 对比：
+
+```powershell
+# 先确认 API 在跑、知识库里有 Ready 资料
+powershell -ExecutionPolicy Bypass -File scripts\Evaluate-Retrieval.ps1 -ListFiles
+# 对比纯向量 / 纯词法 / 混合，并把原始报告存档
+powershell -ExecutionPolicy Bypass -File scripts\Evaluate-Retrieval.ps1 -Modes vector,lexical,hybrid -OutFile C:\Temp\eval.json
+# 四档阶梯（加上重排）
+powershell -ExecutionPolicy Bypass -File scripts\Evaluate-Retrieval.ps1 -Modes vector,lexical,hybrid,rerank -OutFile C:\Temp\eval.json
+```
+
+问题集写在 `scripts/retrieval-eval/default.json`：每条包含 `query`、可接受的 `expectFiles`，以及可选的 `expectText`（要求命中切片正文出现这段文字）。也可以写 `"expectAbstain": true` + `"expectFiles": []` 表示“这题语料里本来就没有答案，正确行为是拒答”；这类用例不进 recall 分母，脚本会额外打印一张**拒答阈值扫描表**（阈值 → 该拒的拒了几条 / 不该拒却拒了几条）。脚本对每种模式输出逐题排名与 `recall@K` / `MRR`。
+
+> 语料只有几份资料时三种模式都会满分——那是烟雾测试。真正的对比需要几十份同主题资料 + 会互相混淆的问题。详见 `scripts/retrieval-eval/README.md`。
+
+#### 同主题混淆语料（T-3）
+
+```powershell
+# 建库 + 上传 27 份资料 + 等 Ready，并把知识库 ID 写进 corpus.kb.txt（可重复执行，按文件名跳过已存在的）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Seed-RetrievalCorpus.ps1
+
+# corpus.json 故意把 knowledgeBaseId 留空，由同目录的 corpus.kb.txt 提供
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Evaluate-Retrieval.ps1 -Fixture scripts\retrieval-eval\corpus.json -Modes vector,lexical,hybrid,rerank
+```
+
+`corpus/` 下 27 份中文资料分三簇（插件运行时 / 索引 / 任务中心，各 8 份 + 1 份总览），簇内共用大量词汇；`corpus.json` 有 42 个有答案用例（分「字面 / 语义 / 区分 / 总览陷阱」四类）+ 8 个无答案用例，报告按类分别输出 recall 与 MRR。基线（bge-small-zh-v1.5，top-5，连跑两次一致）：vector `0.8571 / 0.7270`、lexical `0.9524 / 0.8460`、hybrid `0.9762 / 0.8492`、rerank `1.0000 / 0.9075`。
+
+> 重排模式下响应里的 `similarity` 是**重排得分**（`RerankScoring`，`(1-w)·先验 + w·覆盖率`），不是余弦；跨模式比大小没有意义。拒答阈值默认关闭（`Retrieval:AbstainEnabled=false`），因为实测这份语料上有答案/无答案的得分完全重叠，详见 `docs/ROADMAP.md` D-4。
+
+> 语料建在哪个知识库上就用哪个向量模型：如果默认规格被切成了桩/云端模型，先用 `POST /api/knowledge-bases/{id}/indexes { embeddingSpecId, activateWhenReady: true }` 把本地 BGE 索引切过去，否则数字描述的是那个模型而不是 BGE。
+
 ### 8.4 跨平台与容器
 
 同一份后端代码支持 `win-x64` / `linux-x64` / `linux-arm64` / `osx-arm64` / `osx-x64`（`win-arm64` 无上游便携数据库发行包）。
@@ -654,11 +731,11 @@ docker compose up -d --build
 - 当前无用户认证和授权，不能将默认配置视为多用户或公网部署方案；对外开放前需补充认证、授权、请求限流、HTTPS 和敏感配置管理。
 - 原始文件与数据库分开保存，数据库备份不包含上传文件。恢复时需要同时恢复数据库和 `App_Data`，并确保资料记录中的存储路径仍有效。
 - 选择在线聊天模型时，问题、检索片段、提示词及伴侣对话会发送给所配置的服务商；选择本地聊天端点时可避免此类云端调用。Embedding 始终在 API 进程本地运行。
-- 图片描述要求聊天模型支持视觉输入。视频转写依赖 FFmpeg；Whisper 模型（`ggml-base.bin`，约 141 MB）**不随安装包分发**，可在「设置 → 语音转写（Whisper）」里**导入本地 ggml 文件**或点「联网下载」，存在 `%LOCALAPPDATA%\MyFirstMafAgentData\models` 后无需重启即生效。离线部署建议把 `Media:AutoDownloadWhisperModel` 设为 `false`：缺模型时会立刻提示去哪里导入，而不是卡在下载上。转写完成后会尝试用聊天模型生成摘要，**未配置有效聊天端点时只丢摘要，转写内容仍会发布并可检索**。视频关键帧分析默认关闭，启用后还需视觉模型。
+- 图片描述要求聊天模型支持视觉输入；**未配置视觉模型时图片依然会保存并直接显示缩略图**，只是内容变成一句兜底文本（`图片资料：xxx.png（未生成图片描述：视觉模型不可用）`）参与检索，不会整篇失败。视频转写依赖 FFmpeg；Whisper 模型（`ggml-base.bin`，约 141 MB）**不随安装包分发**，可在「设置 → 语音转写（Whisper）」里**导入本地 ggml 文件**或点「联网下载」，存在 `%LOCALAPPDATA%\MyFirstMafAgentData\models` 后无需重启即生效。离线部署建议把 `Media:AutoDownloadWhisperModel` 设为 `false`：缺模型时会立刻提示去哪里导入，而不是卡在下载上。转写完成后会尝试用聊天模型生成摘要，**未配置有效聊天端点时只丢摘要，转写内容仍会发布并可检索**。视频关键帧分析默认关闭，启用后还需视觉模型。音频（语音消息/录音）走同一条 FFmpeg + Whisper 链路（单声道 16 kHz），**没有语音内容时不会失败**，而是存成 `音频资料：xxx.mp3（未检测到语音内容）`；纯音乐、音效、表情包配套音频因此都能原样保存。
 - AI 伴侣仅支持可读 UTF-8 JSON/TXT，未实现微信/QQ 私有格式解密或官方格式适配。伴侣历史检索基于关键词，不是向量检索。
 - 学习笔记已持久化；当前知识库检索以 pgvector 相似度为主，未实现全文与向量混合检索或重排。
 - 上述尚未实现的能力（含代码签名、插件隔离、多用户认证等）已整理成待办清单，见 **`docs/ROADMAP.md`**。
-- 问答历史导出为 Markdown；持久化消息目前不包含独立的引用元数据，导出内容以会话标题、时间、角色和消息文本为主。
+- 问答历史导出为 Markdown，助手消息下会附上引用资料（序号 / 段落 / 相关度 / 片段）与网页来源；引用元数据存于 `knowledge_chat_messages.citations` 与 `answer_meta`，历史会话重开时同样呈现。
 - 分身是模仿而非本人：记忆不足时问答接口直接返回 400 提示先投喂，不会硬编回答；记忆、向量、洞察与会话均与知识库表完全隔离，不参与知识库检索，也不会被当作事实引用。若使用云端聊天模型或云端向量模型，投喂文本、记忆与人格洞察会发送给服务商；这些数据不属于医疗、法律或投资建议。
 - 便携数据库首次启动会把 PostgreSQL 18 与 pgvector 释放到 `%USERPROFILE%\.pg0`，数据写入 `%LOCALAPPDATA%\MyFirstMafAgentData\pgsql`，首次解压通常需要 10~60 秒。
 - 便携数据库对路径有硬约束（pg0 自身限制）：**可执行文件路径与数据目录必须是纯 ASCII**。启动器统一把 pg0 复制到 `%LOCALAPPDATA%\MyFirstMafAgentData\tools`，数据目录固定在 `%LOCALAPPDATA%` 下，因此中文安装目录可用；若这些都不可写（例如文件夹版放在桌面），请改用安装包、移出受保护目录或在安全软件中放行。

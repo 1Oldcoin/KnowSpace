@@ -39,6 +39,9 @@ public sealed class KnowledgeBaseStore(SqlSugarScope database) : IDocumentIndexS
         database.CodeFirst.InitTables<KnowledgeChunkSchemaEntity>();
         database.CodeFirst.InitTables<KnowledgeUploadSessionSchemaEntity>();
 
+        // 词法检索依赖 kb_chunks.lexical_tokens 的 GIN 表达式索引；按列建索引，必须在补列之后。
+        await database.Ado.ExecuteCommandAsync(LexicalSearchSql.EnsureIndexSql, null, cancellationToken);
+
         // 索引生命周期、事务性 Outbox、摘要缓存与模型规格表。
         database.CodeFirst.InitTables<EmbeddingSpecSchemaEntity>();
         database.CodeFirst.InitTables<ModelBindingSchemaEntity>();
@@ -98,6 +101,9 @@ public sealed class KnowledgeBaseStore(SqlSugarScope database) : IDocumentIndexS
 
         EnsureChunkColumn("document_version", "integer", false, "1");
         EnsureChunkColumn("content_hash", "text", true, null);
+
+        // 词法检索的预分词列：旧库必须显式补列，否则 GIN 索引建不出来。
+        EnsureChunkColumn("lexical_tokens", "text", true, null);
     }
 
     private void EnsureChunkColumn(string columnName, string dataType, bool isNullable, string? defaultValue)
@@ -111,6 +117,37 @@ public sealed class KnowledgeBaseStore(SqlSugarScope database) : IDocumentIndexS
             IsNullable = isNullable,
             DefaultValue = defaultValue
         });
+    }
+
+    /// <summary>
+    /// 为缺少预分词的历史切片补齐 <c>lexical_tokens</c>（一次一批，返回处理条数）。
+    /// <para>
+    /// 分词必须在应用侧完成（PostgreSQL 默认解析器不认中文），所以无法用一条 UPDATE 补齐；
+    /// 由 <c>LexicalIndexWorker</c> 在后台分批推进，新切片在发布时已经带分词。
+    /// 空内容会写成空字符串而不是 NULL，避免同一行被反复拾取。
+    /// </para>
+    /// </summary>
+    public async Task<int> BackfillLexicalTokensAsync(int batchSize, CancellationToken cancellationToken)
+    {
+        var rows = await database.Ado.SqlQueryAsync<LexicalBackfillRow>(
+            LexicalSearchSql.PendingTokensSql,
+            new { limit = Math.Clamp(batchSize, 1, 2_000) },
+            cancellationToken);
+
+        if (rows.Count == 0) return 0;
+
+        foreach (var row in rows)
+        {
+            await database.Updateable<KnowledgeChunkSchemaEntity>()
+                .SetColumns(chunk => new KnowledgeChunkSchemaEntity
+                {
+                    LexicalTokens = LexicalTokens.Build(row.Content)
+                })
+                .Where(chunk => chunk.Id == row.Id)
+                .ExecuteCommandAsync(cancellationToken);
+        }
+
+        return rows.Count;
     }
 
     public async Task<bool> RetryDocumentAsync(Guid id, CancellationToken cancellationToken)
@@ -627,6 +664,7 @@ public sealed class KnowledgeBaseStore(SqlSugarScope database) : IDocumentIndexS
                     ChunkIndex = index,
                     Content = content,
                     ContentHash = ComputeSha256(content),
+                    LexicalTokens = LexicalTokens.Build(content),
                     CreatedAt = now
                 }).ToList();
 
@@ -966,6 +1004,15 @@ internal sealed class IndexSourceChunkRow
     public int ChunkIndex { get; set; }
     public string Content { get; set; } = string.Empty;
     public string? ContentHash { get; set; }
+}
+
+/// <summary>待补分词的切片行（只投影 id 与 content，避开向量列）。</summary>
+internal sealed class LexicalBackfillRow
+{
+    public LexicalBackfillRow() { }
+
+    public long Id { get; set; }
+    public string Content { get; set; } = string.Empty;
 }
 
 internal sealed class DocumentListRow

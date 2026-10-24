@@ -3,6 +3,7 @@ using MyFirstMafAgent.Api.Agents.Tooling;
 using MyFirstMafAgent.Api.Application.Avatar;
 using MyFirstMafAgent.Api.Application.Knowledge;
 using MyFirstMafAgent.Api.Application.Settings;
+using MyFirstMafAgent.Api.Domain.Knowledge;
 using MyFirstMafAgent.Api.Domain.Settings;
 using MyFirstMafAgent.Api.Persistence;
 
@@ -35,9 +36,26 @@ public sealed class KnowledgeChatService(
             .WithOverrides(enableToolCalling, enableWebSearch, enableFileAccess);
 
         var history = await store.ListRecentSessionMessagesAsync(sessionId, knowledgeBaseId, 30, cancellationToken);
-        var references = await search.SearchAsync(message, knowledgeBaseId, 5, cancellationToken);
-        var answer = await agent.AskAsync(message, knowledgeBaseId, references, history, cancellationToken, userPreferences);
-        await store.AddSessionExchangeAsync(sessionId, knowledgeBaseId, message, answer.Text, cancellationToken);
+
+        // 走带诊断的检索：索引上下文（索引实例 / 向量模型 / 降级提示）要和引用一起落库，
+        // 否则模型换了、索引回退了，历史答案的“可信度”就无法回溯。
+        var retrieval = await search.SearchWithDiagnosticsAsync(message, knowledgeBaseId, 5, cancellationToken);
+        var answer = await agent.AskAsync(
+            message, knowledgeBaseId, retrieval.Chunks, history, cancellationToken, userPreferences,
+            BuildReferenceNote(retrieval));
+
+        var citations = KnowledgeChatJson.FromChunks(retrieval.Chunks);
+        var retrievalInfo = new KnowledgeChatRetrieval(
+            retrieval.IndexId,
+            retrieval.EmbeddingSpecName,
+            retrieval.Warning,
+            retrieval.IndexId is null,
+            retrieval.Strategy,
+            retrieval.Abstained,
+            retrieval.TopScore);
+        var answerMeta = new KnowledgeChatAnswerMeta(retrievalInfo, answer.ToolCalls, answer.Sources);
+
+        await store.AddSessionExchangeAsync(sessionId, knowledgeBaseId, message, answer.Text, citations, answerMeta, cancellationToken);
 
         // 时刻记录：把问答活动沉淀为分身的行为数据（30 分钟内同类只记一次）。
         await activityRecorder.TryRecordAsync("学习",
@@ -46,10 +64,25 @@ public sealed class KnowledgeChatService(
             "chat",
             cancellationToken);
 
-        var citations = references.Select(item => new KnowledgeChatCitation(item.DocumentId, item.FileName, item.Similarity)).ToList();
         var flags = KnowledgeChatFlags.From(userPreferences);
         return new KnowledgeChatResult(answer.Text, citations, answer.ToolCalls, answer.Sources,
-            flags.ToolCallingEnabled, flags.WebSearchEnabled, flags.FileAccessEnabled);
+            flags.ToolCallingEnabled, flags.WebSearchEnabled, flags.FileAccessEnabled, retrievalInfo);
+    }
+
+    /// <summary>
+    /// 拒答时给模型一句明确的交代。没有这句提示时，模型会把"没有检索到"理解成
+    /// "检索没帮上忙"，于是用常识把答案编出来——这正是拒答要阻止的行为。
+    /// </summary>
+    internal static string? BuildReferenceNote(KnowledgeRetrievalResult retrieval)
+    {
+        if (!retrieval.Abstained) return null;
+
+        return "本轮检索已判定为“资料里没有相关内容”：最高相关度 "
+            + RerankScoring.FormatScore(retrieval.TopScore)
+            + "，低于阈值 "
+            + RerankScoring.FormatScore(retrieval.AbstainThreshold)
+            + "。请直接告诉用户资料里没有相关内容，建议换个问法或补充资料；"
+            + "不要用常识或推测补全，也不要编造引用。";
     }
 }
 
@@ -70,6 +103,5 @@ public sealed record KnowledgeChatResult(
     IReadOnlyList<string>? Sources = null,
     bool ToolCallingEnabled = false,
     bool WebSearchEnabled = false,
-    bool FileAccessEnabled = false);
-
-public sealed record KnowledgeChatCitation(Guid DocumentId, string FileName, double Similarity);
+    bool FileAccessEnabled = false,
+    KnowledgeChatRetrieval? Retrieval = null);

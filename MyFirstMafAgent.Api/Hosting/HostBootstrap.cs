@@ -60,11 +60,12 @@ public static class HostBootstrap
     public static void ConfigureHttp(WebApplicationBuilder builder)
     {
         var maxFileRequestSize = builder.Configuration.GetValue<long?>("Storage:MaxFileSizeBytes") ?? 52_428_800;
+        var maxAudioFileSize = builder.Configuration.GetValue<long?>("Storage:MaxAudioFileSizeBytes") ?? 314_572_800;
         var uploadChunkSize = builder.Configuration.GetValue<int?>("Storage:UploadChunkSizeBytes") ?? 16_777_216;
         var maxEmbeddingModelSize = builder.Configuration.GetValue<long?>("Embedding:MaxModelFileSizeBytes") ?? 1_073_741_824;
         // Whisper 模型（large-v3 约 3 GB）也算请求体，不能只按 Embedding 的 1 GB 算。
         var maxWhisperModelSize = builder.Configuration.GetValue<long?>("Media:MaxWhisperModelBytes") ?? 3_221_225_472;
-        var maxRequestBodySize = Math.Max(Math.Max(maxFileRequestSize, uploadChunkSize),
+        var maxRequestBodySize = Math.Max(Math.Max(Math.Max(maxFileRequestSize, maxAudioFileSize), uploadChunkSize),
             Math.Max(maxEmbeddingModelSize, maxWhisperModelSize)) + 1_048_576;
 
         builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = maxRequestBodySize);

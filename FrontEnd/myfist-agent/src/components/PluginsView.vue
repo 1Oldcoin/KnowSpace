@@ -8,7 +8,7 @@ import {
   checkPluginHealth, deleteTrustedKey, drainPlugin, getPlugin, installPlugin, listPluginAudit,
   listPlugins, listPluginSyncStates, listTrustedKeys, pluginPermissionLabels, pluginStateLabels,
   restartPlugin, rollbackPlugin, savePluginConfig, savePluginPermissions, savePluginScope,
-  saveTrustedKey, setPluginEnabled, syncPluginAsync, uninstallPlugin,
+  saveTrustedKey, setPluginEnabled, syncPluginAsync, uninstallPlugin, rescanPlugins,
 } from '../services/api'
 import type {
   PluginAuditEntry, PluginDetail, PluginState, PluginStatus, PluginSyncStateView, PluginTrustedKeyView,
@@ -107,8 +107,40 @@ const pendingPlugins = computed(() =>
 const syncCapabilities = computed(() =>
   (detail.value?.declaredCapabilities ?? []).filter(capability => capability.kind === 'platform-connector'))
 
+// MCP 插件的清单里通常一个能力都不写（能力来自 tools/list），
+// 这时必须展示运行期发现的那批，否则界面会误报"插件未声明任何能力"。
+const displayCapabilities = computed(() => {
+  const declared = detail.value?.declaredCapabilities ?? []
+  if (declared.length > 0) return declared
+  return detail.value?.discoveredCapabilities ?? []
+})
+
 const activeKnowledgeBaseName = computed(() =>
   props.knowledgeBases.find(item => item.id === props.activeKnowledgeBaseId)?.name ?? '默认知识库')
+
+// 并发占用：运行/上限 + 排队。0 排队时不展示排队数，避免细节噪音。
+const concurrencyText = computed(() => {
+  const value = detail.value?.concurrency
+  if (!value) return '—'
+  const base = `${value.running}/${value.concurrencyLimit}`
+  return value.queued > 0 ? `${base} · 排队 ${value.queued}` : base
+})
+
+const capabilityConcurrency = computed(() => {
+  const items = detail.value?.concurrency?.capabilities ?? []
+  return items.map(item => `${item.capabilityId} ${item.running}/${item.concurrencyLimit}`).join(' · ')
+})
+
+// 沙箱：把后端的一句话讲成用户能判断的话——进没进沙箱、有没有网。
+const isolationText = computed(() => {
+  const value = detail.value?.isolation
+  if (!value) return '—'
+  if (!value.applied) return `未隔离（${value.detail ?? value.kind}）`
+  if (value.kind !== 'windows-appcontainer') return `${value.kind}（${value.network ? '允许联网' : '禁止联网'}）`
+  return value.network
+    ? 'Windows AppContainer · 允许联网（internetClient）'
+    : 'Windows AppContainer · 禁止联网 / 只读插件目录'
+})
 
 function stateLabel(state: PluginState | string) {
   return pluginStateLabels[state as PluginState] ?? state
@@ -180,6 +212,31 @@ async function refresh(options: { silent?: boolean } = {}) {
     loadError.value = error instanceof Error ? error.message : '无法读取插件列表。'
   } finally {
     isLoading.value = false
+  }
+}
+
+/**
+ * 重新扫描：把插件文件夹拷进目录后，不用重启 API 就能被认出来。
+ * 插件数量没有上限，所以“发现”必须能随时重跑，而不是只在开机时跑一次。
+ */
+const rescanning = ref(false)
+async function rescan() {
+  if (!props.apiOnline || rescanning.value) return
+  rescanning.value = true
+  loadError.value = ''
+  try {
+    const result = await rescanPlugins()
+    plugins.value = result.plugins
+    const parts = [`发现 ${result.discovered.length} 个`]
+    if (result.started.length) parts.push(`启动 ${result.started.length} 个`)
+    if (result.failed.length) parts.push(`失败 ${result.failed.length} 个`)
+    if (result.removed.length) parts.push(`清理 ${result.removed.length} 个`)
+    emit('notice', `重新扫描完成：${parts.join('，')}。`)
+    if (detail.value) await reloadDetail(detail.value.status.id, { silent: true })
+  } catch (error) {
+    loadError.value = error instanceof Error ? error.message : '重新扫描失败。'
+  } finally {
+    rescanning.value = false
   }
 }
 
@@ -549,6 +606,9 @@ onBeforeUnmount(() => {
       <button class="button button-soft" :disabled="!apiOnline || isLoading" @click="refresh()">
         <RefreshCw :size="14" :class="{ spinning: isLoading }" /> 刷新
       </button>
+      <button class="button button-soft" :disabled="!apiOnline || rescanning" title="重新扫描插件目录（新拷进来的文件夹会被发现，已删除的会被清理）" @click="rescan">
+        <RefreshCw :size="14" :class="{ spinning: rescanning }" /> 重新扫描
+      </button>
       <button class="button button-primary" :disabled="!apiOnline || installing" @click="installInput?.click()">
         <LoaderCircle v-if="installing" :size="14" class="spinning" />
         <Upload v-else :size="14" />
@@ -743,6 +803,7 @@ onBeforeUnmount(() => {
             <div class="plugin-stats">
               <div><span>健康</span><strong>{{ detail.health ?? '—' }}</strong></div>
               <div><span>在途调用</span><strong>{{ detail.inFlightInvocations }}</strong></div>
+              <div><span>并发占用</span><strong>{{ concurrencyText }}</strong></div>
               <div><span>排空</span><strong>{{ detail.draining ? '是' : '否' }}</strong></div>
               <div><span>配置</span><strong>{{ detail.status.configured ? '已填写' : '未填写' }}</strong></div>
             </div>
@@ -751,17 +812,21 @@ onBeforeUnmount(() => {
 
             <dl class="plugin-facts">
               <div><dt>当前版本</dt><dd>{{ detail.status.activeVersion ?? detail.status.version }}</dd></div>
+              <div><dt>协议方言</dt><dd class="plugins-mono">{{ detail.dialect === 'mcp' ? 'MCP（tools/list 现取能力）' : '自有 protocol 1.0' }}</dd></div>
+              <div><dt>沙箱</dt><dd class="plugins-mono">{{ isolationText }}</dd></div>
               <div><dt>已安装版本</dt><dd>{{ detail.status.installedVersions.join('、') || '—' }}</dd></div>
               <div><dt>目录</dt><dd class="plugins-mono">{{ detail.status.directory }}</dd></div>
               <div><dt>完整性</dt><dd class="plugins-mono">{{ detail.status.integrity ?? '未签名' }}</dd></div>
               <div><dt>受信任公钥</dt><dd class="plugins-mono">{{ detail.trustedKey ? `${detail.trustedKey.keyId}（${detail.trustedKey.fingerprint}）` : '—' }}</dd></div>
               <div><dt>并发上限</dt><dd>{{ detail.limits?.maxConcurrentInvocations ?? '—' }}</dd></div>
+              <div><dt>排队上限</dt><dd>{{ detail.concurrency ? detail.concurrency.queueLimit : '—' }}</dd></div>
+              <div v-if="capabilityConcurrency"><dt>能力级并发</dt><dd>{{ capabilityConcurrency }}</dd></div>
             </dl>
 
             <div class="plugin-capabilities">
-              <span class="plugin-block-label">能力（{{ detail.declaredCapabilities.length }}）</span>
-              <div v-if="detail.declaredCapabilities.length === 0" class="plugins-keys-empty">插件未声明任何能力。</div>
-              <div v-for="capability in detail.declaredCapabilities" :key="capability.name" class="plugin-capability">
+              <span class="plugin-block-label">能力（{{ displayCapabilities.length }}）</span>
+              <div v-if="displayCapabilities.length === 0" class="plugins-keys-empty">插件未声明任何能力。</div>
+              <div v-for="capability in displayCapabilities" :key="capability.id || capability.name" class="plugin-capability">
                 <div>
                   <strong>{{ capability.name }}</strong>
                   <small>{{ capability.kind }} · 副作用 {{ capability.sideEffect ?? 'read' }}</small>

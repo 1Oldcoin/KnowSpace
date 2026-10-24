@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { Boxes, Check, Cloud, Cpu, Database, Download, KeyRound, LoaderCircle, Mic, Plug, RefreshCw, RotateCcw, Save, SlidersHorizontal, Sparkles, Trash2, Upload, UserRound } from 'lucide-vue-next'
-import { deleteWhisperModel, downloadWhisperModel, getWhisperModelStatus, importWhisperModel } from '../services/api'
+import { Archive, ArrowDownToLine, ArrowUpFromLine, Boxes, Check, Cloud, Cpu, Database, Download, KeyRound, LoaderCircle, Mic, Plug, RefreshCw, RotateCcw, Save, SlidersHorizontal, Sparkles, Trash2, Upload, UserRound } from 'lucide-vue-next'
+import { deleteWhisperModel, downloadWhisperModel, exportKnowledgeBasePackage, getWhisperModelStatus, importWhisperModel, importKnowledgeBasePackage } from '../services/api'
 import { getAgentInfo, getMcpStatus, importLocalEmbeddingSpec, listAgentTools, probeEmbeddingSpec, registerCloudEmbeddingSpec } from '../services/api'
 import { normalizeAgentSettings } from '../services/api'
-import type { AgentInfo, AgentSettings, AgentToolInfo, AppSettings, EmbeddingSpec, McpStatus, SaveSettingsPayload, WhisperModelStatus } from '../services/api'
+import type { AgentInfo, AgentSettings, AgentToolInfo, AppSettings, EmbeddingSpec, KnowledgeBase, KnowledgePackageImportResult, McpStatus, SaveSettingsPayload, WhisperModelStatus } from '../services/api'
 
 const props = defineProps<{
   settings: AppSettings | null
@@ -12,10 +12,13 @@ const props = defineProps<{
   busy: boolean
   loading: boolean
   knowledgeBaseNames: Record<string, string>
+  knowledgeBases?: KnowledgeBase[]
+  activeKnowledgeBaseId?: string
 }>()
 const emit = defineEmits<{
   save: [payload: SaveSettingsPayload]
   reload: []
+  imported: [knowledgeBaseId: string]
 }>()
 
 const useCloudApi = ref(true)
@@ -485,6 +488,78 @@ function knowledgeBaseName(id: string) {
   return props.knowledgeBaseNames[id] || '知识库'
 }
 
+// ---- 知识库包（导出 / 导入） ----
+
+const packageKnowledgeBaseId = ref('')
+const packageExporting = ref(false)
+const packageImporting = ref(false)
+const packageMessage = ref('')
+const packageError = ref('')
+const packageWarnings = ref<string[]>([])
+const packageFileInput = ref<HTMLInputElement>()
+
+const packageKnowledgeBases = computed(() => props.knowledgeBases ?? [])
+const packageKnowledgeBaseName = computed(() => knowledgeBaseName(packageKnowledgeBaseId.value))
+
+// 跟着当前知识库走，但允许用户在这里临时换成别的库做备份。
+watch(() => [props.activeKnowledgeBaseId, packageKnowledgeBases.value.length], () => {
+  if (!packageKnowledgeBaseId.value && props.activeKnowledgeBaseId) packageKnowledgeBaseId.value = props.activeKnowledgeBaseId
+}, { immediate: true })
+
+function resetPackageFeedback() {
+  packageMessage.value = ''
+  packageError.value = ''
+  packageWarnings.value = []
+}
+
+async function exportPackage() {
+  if (!packageKnowledgeBaseId.value || packageExporting.value) return
+  resetPackageFeedback()
+  packageExporting.value = true
+  try {
+    const result = await exportKnowledgeBasePackage(packageKnowledgeBaseId.value)
+    const url = URL.createObjectURL(result.blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = result.fileName
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+
+    packageMessage.value = `已导出「${packageKnowledgeBaseName.value}」：资料 ${result.documents} 份、笔记 ${result.notes} 篇、专题 ${result.topics} 个。`
+    if (result.warnings) packageWarnings.value = [`导出过程中有 ${result.warnings} 条内容被跳过（详见包内 manifest.json 的 warnings）。`]
+  } catch (error) {
+    packageError.value = errorText(error)
+  } finally {
+    packageExporting.value = false
+  }
+}
+
+function pickPackageFile() {
+  packageFileInput.value?.click()
+}
+
+async function onPackageFileSelected(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+
+  resetPackageFeedback()
+  packageImporting.value = true
+  try {
+    const result = await importKnowledgeBasePackage(file)
+    packageMessage.value = `已导入为「${result.knowledgeBaseName}」：资料 ${result.documents} 份、笔记 ${result.notes} 篇、专题 ${result.topics} 个。资料正在后台解析，稍等片刻即可检索。`
+    packageWarnings.value = result.warnings
+    emit('imported', result.knowledgeBaseId)
+  } catch (error) {
+    packageError.value = errorText(error)
+  } finally {
+    packageImporting.value = false
+  }
+}
+
 function providerLabel(provider: string) {
   return provider === 'onnx-local' ? '本地' : '云端'
 }
@@ -843,6 +918,41 @@ const whisperReady = computed(() => whisperStatus.value?.exists === true)
           <div><dt>API 状态</dt><dd><span class="connection-dot" :class="{ online: apiOnline }"></span>{{ apiOnline ? '已连接' : '未连接' }}</dd></div>
         </dl>
       </article>
+
+      <article class="settings-card settings-card-wide">
+        <header class="settings-card-head">
+          <span class="settings-icon settings-icon-peach"><Archive :size="18" /></span>
+          <div><h2>知识库备份与分享</h2><p>导出成一个可移植的包，换机器、云备份或分享给别人。</p></div>
+        </header>
+
+        <label class="settings-field">
+          <span>要导出的知识库</span>
+          <select v-model="packageKnowledgeBaseId">
+            <option v-if="packageKnowledgeBases.length === 0" value="">（暂无知识库）</option>
+            <option v-for="item in packageKnowledgeBases" :key="item.id" :value="item.id">{{ item.name }}</option>
+          </select>
+        </label>
+
+        <p class="settings-package-hint">
+          包里包含：原始资料文件、资料摘要、学习笔记（含引用依据与专题）、专题。不含向量与切片——导入方会重新解析建索引，这样换机器也不会失效。
+        </p>
+
+        <div class="settings-package-actions">
+          <button class="button button-primary" :disabled="!apiOnline || !packageKnowledgeBaseId || packageExporting" @click="exportPackage">
+            <LoaderCircle v-if="packageExporting" :size="15" class="spinning" /><ArrowDownToLine v-else :size="15" /> 导出知识库包
+          </button>
+          <button class="button button-soft" :disabled="!apiOnline || packageImporting" @click="pickPackageFile">
+            <LoaderCircle v-if="packageImporting" :size="15" class="spinning" /><ArrowUpFromLine v-else :size="15" /> 导入知识库包
+          </button>
+          <input ref="packageFileInput" type="file" accept=".zip,.zjpack,application/zip" class="settings-package-file" @change="onPackageFileSelected" />
+        </div>
+
+        <div v-if="packageMessage" class="settings-package-message"><Check :size="14" />{{ packageMessage }}</div>
+        <div v-if="packageError" class="settings-package-error">{{ packageError }}</div>
+        <ul v-if="packageWarnings.length" class="settings-package-warnings">
+          <li v-for="(warning, index) in packageWarnings" :key="index">{{ warning }}</li>
+        </ul>
+      </article>
     </section>
 
     <div class="settings-save-bar">
@@ -855,6 +965,13 @@ const whisperReady = computed(() => whisperStatus.value?.exists === true)
 </template>
 
 <style scoped>
+.settings-card-wide { grid-column: 1 / -1; }
+.settings-package-hint { margin: 0; color: #96a29a; font-size: 8px; line-height: 1.7; }
+.settings-package-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.settings-package-file { display: none; }
+.settings-package-message { display: flex; align-items: flex-start; gap: 6px; padding: 8px 10px; border: 1px solid #dceadf; border-radius: 8px; color: #3f7a5e; background: #f2f8f3; font-size: 9px; line-height: 1.6; }
+.settings-package-error { padding: 8px 10px; border: 1px solid #f0dcdc; border-radius: 8px; color: #a54848; background: #faf1f1; font-size: 9px; line-height: 1.6; }
+.settings-package-warnings { margin: 0; padding-left: 16px; color: #a08a52; font-size: 8px; line-height: 1.7; }
 .settings-agent-switches { display: grid; gap: 8px; margin-top: 12px; }
 .settings-switch {
   display: flex;

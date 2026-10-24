@@ -8,16 +8,19 @@ public sealed class LocalDocumentStore
 {
     private static readonly HashSet<string> AllowedExtensions = [
         ".pdf", ".docx", ".txt", ".md", ".html", ".htm", ".png", ".jpg", ".jpeg", ".webp", ".gif",
-        ".mp4", ".mov", ".mkv", ".webm", ".avi"
+        ".mp4", ".mov", ".mkv", ".webm", ".avi",
+        ".mp3", ".wav", ".m4a", ".aac", ".ogg", ".opus", ".flac", ".weba", ".amr"
     ];
 
     /// <summary>不支持的文件类型提示，SaveAsync 与 CreateUploadSession 共用。</summary>
     public const string SupportedTypesMessage =
-        "Supported file types are PDF, DOCX, TXT, MD, HTML, HTM, PNG, JPG, JPEG, WEBP, GIF, MP4, MOV, MKV, WEBM, and AVI.";
+        "Supported file types are PDF, DOCX, TXT, MD, HTML, HTM, PNG, JPG, JPEG, WEBP, GIF, MP4, MOV, MKV, WEBM, AVI, "
+        + "MP3, WAV, M4A, AAC, OGG, OPUS, FLAC, WEBA, and AMR.";
 
     private readonly string _rootPath;
     private readonly long _maxFileSizeBytes;
     private readonly long _maxVideoFileSizeBytes;
+    private readonly long _maxAudioFileSizeBytes;
     private readonly int _uploadChunkSizeBytes;
 
     public LocalDocumentStore(IOptions<StorageOptions> options, IWebHostEnvironment environment)
@@ -26,6 +29,7 @@ public sealed class LocalDocumentStore
         _rootPath = Path.GetFullPath(storage.RootPath, environment.ContentRootPath);
         _maxFileSizeBytes = storage.MaxFileSizeBytes;
         _maxVideoFileSizeBytes = storage.MaxVideoFileSizeBytes;
+        _maxAudioFileSizeBytes = storage.MaxAudioFileSizeBytes;
         _uploadChunkSizeBytes = storage.UploadChunkSizeBytes;
     }
 
@@ -78,7 +82,60 @@ public sealed class LocalDocumentStore
             throw;
         }
 
-        return new StoredFile(Guid.ParseExact(id, "N"), originalFileName, extension, file.ContentType, file.Length, filePath);
+        return new StoredFile(Guid.ParseExact(id, "N"), originalFileName, extension,
+            NormalizeContentType(extension, file.ContentType), file.Length, filePath);
+    }
+
+    /// <summary>
+    /// 从任意流写入一份资料文件（知识库包导入用：包里的文件不是 <see cref="IFormFile"/>）。
+    /// 校验规则与 <see cref="SaveAsync(IFormFile, Guid, CancellationToken)"/> 完全一致，
+    /// 因为来源同样可以是不可信内容。
+    /// </summary>
+    public async Task<StoredFile> SaveStreamAsync(
+        Guid knowledgeBaseId,
+        string fileName,
+        string? contentType,
+        long lengthBytes,
+        Stream content,
+        CancellationToken cancellationToken)
+    {
+        var originalFileName = Path.GetFileName(fileName);
+        var extension = Path.GetExtension(originalFileName).ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(originalFileName) || !AllowedExtensions.Contains(extension))
+            throw new DocumentUploadException(SupportedTypesMessage);
+        if (lengthBytes <= 0)
+            throw new DocumentUploadException("The imported file is empty.");
+        if (lengthBytes > GetMaxSize(extension))
+            throw new DocumentUploadException($"The file exceeds the {GetMaxSize(extension)}-byte limit.");
+
+        var knowledgeBasePath = Path.Combine(_rootPath, knowledgeBaseId.ToString("N"));
+        Directory.CreateDirectory(knowledgeBasePath);
+        var id = Guid.NewGuid().ToString("N");
+        var filePath = Path.Combine(knowledgeBasePath, $"{id}{extension}");
+
+        try
+        {
+            await using var output = new FileStream(filePath, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+                bufferSize: 81920, useAsync: true);
+            await content.CopyToAsync(output, cancellationToken);
+        }
+        catch
+        {
+            if (File.Exists(filePath)) File.Delete(filePath);
+            throw;
+        }
+
+        var written = new FileInfo(filePath).Length;
+        var limit = GetMaxSize(extension);
+        if (written > limit)
+        {
+            // 声明的长度可以造假，落盘后必须再核一次，否则包能绕过大小限制。
+            File.Delete(filePath);
+            throw new DocumentUploadException($"The file exceeds the {limit}-byte limit.");
+        }
+
+        return new StoredFile(Guid.ParseExact(id, "N"), originalFileName, extension,
+            NormalizeContentType(extension, contentType), written, filePath);
     }
 
     public UploadSession CreateUploadSession(Guid id, Guid knowledgeBaseId, string fileName, string contentType, long sizeBytes)
@@ -99,8 +156,7 @@ public sealed class LocalDocumentStore
         using (new FileStream(stagingPath, FileMode.CreateNew, FileAccess.Write, FileShare.None)) { }
 
         return new UploadSession(id, knowledgeBaseId, safeFileName, extension,
-            string.IsNullOrWhiteSpace(contentType) ? "application/octet-stream" : contentType,
-            sizeBytes, 0, stagingPath, "Uploading", null);
+            NormalizeContentType(extension, contentType), sizeBytes, 0, stagingPath, "Uploading", null);
     }
 
     public async Task<long> AppendUploadChunkAsync(
@@ -184,7 +240,6 @@ public sealed class LocalDocumentStore
         return new StoredFile(session.Id, session.FileName, session.Extension, session.ContentType,
             session.SizeBytes, destinationPath);
     }
-
     public void DeleteUploadStagingFile(Guid id)
     {
         var path = GetStagingPath(id);
@@ -209,7 +264,10 @@ public sealed class LocalDocumentStore
 
     public int UploadChunkSizeBytes => _uploadChunkSizeBytes;
 
-    public long GetMaxSize(string extension) => IsVideoExtension(extension) ? _maxVideoFileSizeBytes : _maxFileSizeBytes;
+    public long GetMaxSize(string extension) =>
+        IsVideoExtension(extension) ? _maxVideoFileSizeBytes
+        : IsAudioExtension(extension) ? _maxAudioFileSizeBytes
+        : _maxFileSizeBytes;
 
     public static bool IsVideoExtension(string extension) =>
         extension.Equals(".mp4", StringComparison.OrdinalIgnoreCase)
@@ -217,6 +275,65 @@ public sealed class LocalDocumentStore
         || extension.Equals(".mkv", StringComparison.OrdinalIgnoreCase)
         || extension.Equals(".webm", StringComparison.OrdinalIgnoreCase)
         || extension.Equals(".avi", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>纯音频：走 FFmpeg 归一化 + Whisper 转写，不需要抽画面。</summary>
+    public static bool IsAudioExtension(string extension) =>
+        extension.Equals(".mp3", StringComparison.OrdinalIgnoreCase)
+        || extension.Equals(".wav", StringComparison.OrdinalIgnoreCase)
+        || extension.Equals(".m4a", StringComparison.OrdinalIgnoreCase)
+        || extension.Equals(".aac", StringComparison.OrdinalIgnoreCase)
+        || extension.Equals(".ogg", StringComparison.OrdinalIgnoreCase)
+        || extension.Equals(".opus", StringComparison.OrdinalIgnoreCase)
+        || extension.Equals(".flac", StringComparison.OrdinalIgnoreCase)
+        || extension.Equals(".weba", StringComparison.OrdinalIgnoreCase)
+        || extension.Equals(".amr", StringComparison.OrdinalIgnoreCase);
+
+    public static bool IsImageExtension(string extension) =>
+        extension.Equals(".png", StringComparison.OrdinalIgnoreCase)
+        || extension.Equals(".jpg", StringComparison.OrdinalIgnoreCase)
+        || extension.Equals(".jpeg", StringComparison.OrdinalIgnoreCase)
+        || extension.Equals(".webp", StringComparison.OrdinalIgnoreCase)
+        || extension.Equals(".gif", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 按扩展名确定 Content-Type。
+    ///
+    /// <para>
+    /// 为什么不能直接信客户端上报的 <c>IFormFile.ContentType</c>：浏览器/脚本经常给
+    /// <c>application/octet-stream</c> 或干脆空字符串，那样 <c>/download</c> 会把图片当二进制下载、
+    /// 音频也无法在 <c>&lt;audio&gt;</c> 里直接播。这里按扩展名归一化，客户端值只作为未知扩展名的傅底。
+    /// </para>
+    /// </summary>
+    public static string NormalizeContentType(string extension, string? fallback)
+    {
+        var normalized = extension.ToLowerInvariant();
+        return normalized switch
+        {
+            ".png" => "image/png",
+            ".jpg" or ".jpeg" => "image/jpeg",
+            ".webp" => "image/webp",
+            ".gif" => "image/gif",
+            ".mp3" => "audio/mpeg",
+            ".wav" => "audio/wav",
+            ".m4a" => "audio/mp4",
+            ".aac" => "audio/aac",
+            ".ogg" or ".opus" => "audio/ogg",
+            ".flac" => "audio/flac",
+            ".weba" => "audio/webm",
+            ".amr" => "audio/amr",
+            ".mp4" => "video/mp4",
+            ".mov" => "video/quicktime",
+            ".mkv" => "video/x-matroska",
+            ".webm" => "video/webm",
+            ".avi" => "video/x-msvideo",
+            ".pdf" => "application/pdf",
+            ".docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ".txt" => "text/plain",
+            ".md" => "text/markdown",
+            ".html" or ".htm" => "text/html",
+            _ => string.IsNullOrWhiteSpace(fallback) ? "application/octet-stream" : fallback
+        };
+    }
 
     private string GetStagingPath(Guid id) => Path.Combine(_rootPath, ".staging", $"{id:N}.part");
 }

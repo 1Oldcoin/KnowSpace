@@ -1,4 +1,5 @@
 using MyFirstMafAgent.Api.Application.Knowledge;
+using MyFirstMafAgent.Api.Application.KnowledgePackages;
 using MyFirstMafAgent.Api.Documents;
 using MyFirstMafAgent.Api.Domain.Knowledge;
 using MyFirstMafAgent.Api.Infrastructure.Embedding;
@@ -16,6 +17,8 @@ public static class KnowledgeModule
     {
         services.AddSingleton<IEmbeddingGeneratorProvider, EmbeddingModelRegistry>();
         services.AddSingleton<EmbeddingSpecService>();
+        // 重排是无状态纯计算；换神经重排只需替换这一行注册。
+        services.AddSingleton<IChunkReranker, CoverageReranker>();
         services.AddSingleton<RetrievalRouter>();
         services.AddSingleton<IndexLifecycleManager>();
         services.AddScoped<ISummaryModelClient, SummaryModelClient>();
@@ -24,6 +27,10 @@ public static class KnowledgeModule
         services.AddScoped<SummaryService>();
         services.AddScoped<KnowledgeSearchService>();
         services.AddScoped<DocumentContentService>();
+
+        // 知识库包：导出是纯读，导入会写文件与数据库，按请求生命周期注册。
+        services.AddScoped<KnowledgePackageExporter>();
+        services.AddScoped<KnowledgePackageImporter>();
 
         return services;
     }

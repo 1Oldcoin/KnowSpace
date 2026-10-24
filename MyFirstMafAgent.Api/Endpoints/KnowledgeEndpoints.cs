@@ -217,13 +217,21 @@ public static class KnowledgeEndpoints
             if (string.IsNullOrWhiteSpace(request.Query)) return Results.BadRequest(new { error = "Query is required." });
             var id = request.KnowledgeBaseId ?? KnowledgeBaseStore.DefaultKnowledgeBaseId;
             if (await knowledgeBases.GetKnowledgeBaseAsync(id, cancellationToken) is null) return Results.NotFound();
-            var outcome = await search.SearchWithDiagnosticsAsync(request.Query, id, request.Limit, cancellationToken);
+            var mode = RetrievalModes.Parse(request.Mode);
+            var outcome = await search.SearchWithDiagnosticsAsync(request.Query, id, request.Limit, cancellationToken, mode);
             return Results.Ok(new
             {
                 results = outcome.Chunks,
                 indexId = outcome.IndexId,
                 embeddingSpec = outcome.EmbeddingSpecName,
-                warning = outcome.Warning
+                warning = outcome.Warning,
+                // strategy/mode 让评估脚本能确认"这一轮到底跑的是哪条链路"。
+                strategy = outcome.Strategy,
+                mode = mode?.ToWire() ?? outcome.Strategy,
+                // 拒答与得分：评估脚本靠 topScore 标定阈值，前端靠 abstained 提示"资料里没有"。
+                abstained = outcome.Abstained,
+                topScore = outcome.TopScore,
+                abstainThreshold = outcome.AbstainThreshold
             });
         }).WithTags("检索");
 
@@ -238,23 +246,35 @@ public static class KnowledgeEndpoints
             if (string.IsNullOrWhiteSpace(request.Message)) return Results.BadRequest(new { error = "Message is required." });
             var id = request.KnowledgeBaseId ?? KnowledgeBaseStore.DefaultKnowledgeBaseId;
             if (await knowledgeBases.GetKnowledgeBaseAsync(id, cancellationToken) is null) return Results.NotFound();
-            var references = await search.SearchAsync(request.Message, id, 5, cancellationToken);
+            var retrieval = await search.SearchWithDiagnosticsAsync(request.Message, id, 5, cancellationToken);
 
             // 单轮工具开关：null 沿用设置页偏好，非 null 只覆盖本次请求。
             var effective = (await preferences.GetAsync(cancellationToken))
                 .WithOverrides(request.EnableToolCalling, request.EnableWebSearch, request.EnableFileAccess);
-            var completion = await agent.AskAsync(request.Message, id, references,
-                Array.Empty<KnowledgeChatMessage>(), cancellationToken, effective);
-            var citations = references.Select(item => new { documentId = item.DocumentId, fileName = item.FileName, similarity = item.Similarity });
+            var completion = await agent.AskAsync(request.Message, id, retrieval.Chunks,
+                Array.Empty<KnowledgeChatMessage>(), cancellationToken, effective,
+                KnowledgeChatService.BuildReferenceNote(retrieval));
+
+            // 引用元数据与多轮问答保持同一形状：rank/chunkId/chunkIndex/snippet 都能回溯原文。
+            var citations = KnowledgeChatJson.FromChunks(retrieval.Chunks);
 
             // 开关状态随响应透出，前端据此提示“已开启工具/联网”，无需再单独查设置。
             var flags = KnowledgeChatFlags.From(effective);
+            var retrievalInfo = new KnowledgeChatRetrieval(
+                retrieval.IndexId,
+                retrieval.EmbeddingSpecName,
+                retrieval.Warning,
+                retrieval.IndexId is null,
+                retrieval.Strategy,
+                retrieval.Abstained,
+                retrieval.TopScore);
             return Results.Ok(new
             {
                 answer = completion.Text,
                 citations,
                 toolCalls = completion.ToolCalls,
                 sources = completion.Sources,
+                retrieval = retrievalInfo,
                 toolCallingEnabled = flags.ToolCallingEnabled,
                 webSearchEnabled = flags.WebSearchEnabled,
                 fileAccessEnabled = flags.FileAccessEnabled

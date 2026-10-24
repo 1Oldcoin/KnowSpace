@@ -21,6 +21,7 @@ public static class CompanionEndpoints
             IFormFile file,
             ChatHistoryParser parser,
             CompanionStore store,
+            CompanionMemoryIndexer indexer,
             ILoggerFactory loggerFactory,
             CancellationToken cancellationToken) =>
         {
@@ -46,6 +47,23 @@ public static class CompanionEndpoints
                 loggerFactory.CreateLogger("MyFirstMafAgent.Api.CompanionImports")
                     .LogInformation("Imported companion profile {ProfileId} with {MessageCount} messages from {FileName}",
                         profile.Id, messages.Count, file.FileName);
+
+                // 向量化是后台任务：几万条消息的 embedding 不能让导入请求挂着。
+                // 失败也不影响导入结果——检索会退回词面匹配，接口里的 indexed 会保持 0。
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await indexer.IndexAsync(
+                            profile.Id, profile.TargetSender, CompanionMemoryIndexer.DefaultBatchSize, CancellationToken.None);
+                    }
+                    catch (Exception exception)
+                    {
+                        loggerFactory.CreateLogger("MyFirstMafAgent.Api.CompanionImports")
+                            .LogWarning(exception, "Companion indexing failed for {ProfileId}; staying keyword-only", profile.Id);
+                    }
+                }, CancellationToken.None);
+
                 return Results.Ok(profile);
             }
             catch (ChatImportException exception)
@@ -64,6 +82,41 @@ public static class CompanionEndpoints
 
         companions.MapDelete("/{profileId:guid}", async (Guid profileId, CompanionStore store, CancellationToken cancellationToken) =>
             await store.DeleteProfileAsync(profileId, cancellationToken) ? Results.NoContent() : Results.NotFound());
+
+        companions.MapPost("/{profileId:guid}/reindex", async (
+            Guid profileId,
+            int? limit,
+            CompanionStore store,
+            CompanionMemoryIndexer indexer,
+            CancellationToken cancellationToken) =>
+        {
+            var profile = await store.GetProfileAsync(profileId, cancellationToken);
+            if (profile is null) return Results.NotFound();
+
+            var outcome = await indexer.IndexAsync(
+                profile.Id, profile.TargetSender, limit ?? CompanionMemoryIndexer.DefaultBatchSize, cancellationToken);
+            var indexed = await indexer.CountIndexedAsync(profileId, cancellationToken);
+
+            return Results.Ok(new
+            {
+                profileId,
+                indexed = outcome.Indexed,
+                failed = outcome.Failed,
+                total = indexed,
+                warning = outcome.Warning
+            });
+        });
+
+        companions.MapGet("/{profileId:guid}/index", async (
+            Guid profileId,
+            CompanionStore store,
+            CompanionMemoryIndexer indexer,
+            CancellationToken cancellationToken) =>
+        {
+            var profile = await store.GetProfileAsync(profileId, cancellationToken);
+            if (profile is null) return Results.NotFound();
+            return Results.Ok(new { profileId, indexed = await indexer.CountIndexedAsync(profileId, cancellationToken) });
+        });
 
         companions.MapPost("/{profileId:guid}/persona", async (
             Guid profileId,

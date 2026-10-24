@@ -5,10 +5,12 @@ import {
   createCompanionSession,
   deleteCompanion,
   generateCompanionPersona,
+  getCompanionIndex,
   importChatHistory,
   listCompanionMessages,
   listCompanionSessions,
   listCompanions,
+  reindexCompanion,
   sendCompanionMessage,
   type CompanionMessage,
   type CompanionProfile,
@@ -30,6 +32,8 @@ const busy = ref(false)
 const loading = ref(false)
 const notice = ref('')
 const errorMessage = ref('')
+// 当前向量模型下已建索引的消息数；null = 还没取到（例如向量模型未配置）。
+const indexedCount = ref<number | null>(null)
 
 onMounted(() => { void refreshProfiles() })
 
@@ -71,12 +75,41 @@ async function openProfile(profile: CompanionProfile) {
   selectedSession.value = null
   messages.value = []
   errorMessage.value = ''
+  indexedCount.value = null
   try {
     sessions.value = await listCompanionSessions(profile.id)
     if (sessions.value.length) await openSession(sessions.value[0]!)
     else await newSession()
   } catch (error) {
     errorMessage.value = errorText(error)
+  }
+  // 索引状态是次要信息，取不到不能影响页面打开。
+  void refreshIndexCount(profile.id)
+}
+
+async function refreshIndexCount(profileId: string) {
+  try {
+    indexedCount.value = (await getCompanionIndex(profileId)).indexed
+  } catch {
+    indexedCount.value = null
+  }
+}
+
+async function reindexHistory() {
+  if (!selectedProfile.value) return
+  busy.value = true
+  errorMessage.value = ''
+  notice.value = ''
+  try {
+    const outcome = await reindexCompanion(selectedProfile.value.id)
+    indexedCount.value = outcome.total
+    notice.value = outcome.warning
+      ? `向量索引不可用：${outcome.warning}。语义检索暂不可用，仍可按关键词回忆。`
+      : `已补充 ${outcome.indexed} 条消息的向量（共 ${outcome.total} 条可语义检索）。`
+  } catch (error) {
+    errorMessage.value = errorText(error)
+  } finally {
+    busy.value = false
   }
 }
 
@@ -184,15 +217,15 @@ function messageTime(value: string) {
 
     <template v-if="!selectedProfile">
       <div class="companion-import-panel">
-        <div class="companion-panel-title"><div class="companion-title-icon"><Upload :size="18" /></div><div><h2>导入聊天记录</h2><p>首版支持 UTF-8 编码的通用 JSON / TXT 文件，最大 20 MB。</p></div></div>
+        <div class="companion-panel-title"><div class="companion-title-icon"><Upload :size="18" /></div><div><h2>导入聊天记录</h2><p>支持 QQ / 微信导出的文本、通用 JSON / TXT / CSV，最大 20 MB。</p></div></div>
         <div class="companion-form">
           <label>人物档案名称<input v-model="profileName" maxlength="100" placeholder="例如：小林" /></label>
           <label>平台<select v-model="platform"><option>微信</option><option>QQ</option><option>其他</option></select></label>
           <label>导出中的发言者名称<input v-model="targetSender" maxlength="100" placeholder="必须与导出记录中的名称一致" /></label>
-          <label class="companion-file-label">聊天记录文件<input type="file" accept=".json,.txt,application/json,text/plain" @change="file = ($event.target as HTMLInputElement).files?.[0] ?? null" /><small>{{ file?.name || '选择 .json 或 .txt 文件' }}</small></label>
+          <label class="companion-file-label">聊天记录文件<input type="file" accept=".json,.txt,.csv,application/json,text/plain,text/csv" @change="file = ($event.target as HTMLInputElement).files?.[0] ?? null" /><small>{{ file?.name || '选择 .json / .txt / .csv 文件' }}</small></label>
           <button class="button button-primary companion-import-button" :disabled="busy" @click="importFile"><LoaderCircle v-if="busy" class="spin" :size="16" /><Upload v-else :size="16" /> 导入并保存在本机</button>
         </div>
-        <details class="companion-format"><summary>通用文件格式说明</summary><p>JSON 可使用顶层数组或 messages / records 数组；消息字段支持 sender、content、timestamp，也兼容 from / text / time 等常见字段。TXT 每行格式为 [时间] 发言者: 消息，续行会并入上一条消息。官方导出格式因版本不同可能需要转换。</p></details>
+        <details class="companion-format"><summary>通用文件格式说明</summary><p><strong>QQ</strong>：消息管理器导出的 txt，每条消息上方一行「时间 昵称(QQ号)」，下面的多行都属于这条消息。<strong>微信/其它</strong>：每行「[时间] 昵称: 内容」或「昵称 时间: 内容」，未带时间的续行并入上一条。<strong>JSON</strong>：顶层数组或 messages / records 数组，字段支持 sender / content / timestamp（也认 from / text / time）。<strong>CSV</strong>：有表头时自动识别时间/发送者/内容列，没有表头就按前三列读。加密数据库无法直接导入，请先用客户端导出成文本。</p></details>
       </div>
 
       <div class="companion-list-heading"><h2>人物档案</h2><span>{{ profiles.length }} 个</span></div>
@@ -212,6 +245,11 @@ function messageTime(value: string) {
           <div class="companion-session-heading"><strong>专属陪伴对话</strong><button class="tiny-icon-button" aria-label="新建陪伴对话" @click="newSession"><Plus :size="17" /></button></div>
           <button v-for="session in sessions" :key="session.id" class="companion-session-item" :class="{ selected: selectedSession?.id === session.id }" @click="openSession(session)">{{ session.title }}</button>
           <button class="companion-persona-button" :disabled="busy" @click="createPersona"><Sparkles :size="15" />{{ selectedProfile.personaPrompt ? '重新生成表达画像' : '生成表达风格画像' }}</button>
+          <div class="companion-index-row">
+            <span class="companion-index-label">语义记忆 <b>{{ indexedCount === null ? '—' : indexedCount.toLocaleString() }}</b> 条</span>
+            <button class="tiny-icon-button" :disabled="busy" title="补齐/重建这条档案的向量索引（换向量模型或导入时建索引失败后使用）" aria-label="重建语义索引" @click="reindexHistory"><LoaderCircle v-if="busy" :size="14" class="spin" /><Sparkles v-else :size="14" /></button>
+          </div>
+          <small class="companion-index-hint">已索引的消息可以按意思检索（“上次聊到的那件事”）；没索引时只能按关键词回忆。</small>
         </aside>
         <div class="companion-chat">
           <div class="companion-chat-head"><div class="companion-avatar"><Heart :size="18" /></div><div><strong>{{ selectedProfile.name }} · AI 模拟</strong><small>参考 {{ selectedProfile.messageCount.toLocaleString() }} 条已导入消息</small></div><span class="simulation-tag">AI 模拟</span></div>
@@ -275,6 +313,11 @@ function messageTime(value: string) {
 .companion-session-item.selected, .companion-session-item:hover { color: #7259ac; background: #f0edf8; }
 .companion-persona-button { display: flex; align-items: center; justify-content: center; gap: 7px; margin-top: auto; padding: 10px 7px; border: 1px solid #e8e2f4; border-radius: 9px; color: #7055b0; background: #fff; font-size: 12px; cursor: pointer; }
 .companion-persona-button:disabled { opacity: .6; cursor: wait; }
+/* 语义记忆索引：显示已建向量条数，并提供一次性重建 */
+.companion-index-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: 8px; padding: 6px 8px; border-radius: 8px; background: #f7f5fc; }
+.companion-index-label { color: #6b6480; font-size: 10px; }
+.companion-index-label b { color: #4c3f78; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.companion-index-hint { display: block; margin-top: 5px; color: #a9a4b4; font-size: 9px; line-height: 1.45; }
 .companion-chat { display: grid; min-width: 0; grid-template-rows: auto minmax(250px, 1fr) auto auto; }
 .companion-chat-head { display: flex; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid #efedf3; }
 .companion-chat-head .companion-avatar { width: 34px; height: 34px; }

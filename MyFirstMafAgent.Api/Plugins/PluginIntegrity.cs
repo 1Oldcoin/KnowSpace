@@ -192,7 +192,8 @@ public sealed class PluginIntegrityVerifier(
     }
 
     /// <summary>
-    /// 枚举参与摘要的文件：跳过 <c>manifest.json</c>、<c>active.json</c> 与点开头的目录（<c>.data</c>、<c>.staging</c>）。
+    /// 枚举参与摘要的文件：跳过清单文件（<c>manifest.json</c> / <c>plugin.json</c> / <c>skill.json</c>）、
+    /// <c>active.json</c> 与点开头的目录（<c>.data</c>、<c>.staging</c>）。
     /// </summary>
     private static IEnumerable<string> EnumeratePackageFiles(string packageDirectory)
     {
@@ -206,7 +207,8 @@ public sealed class PluginIntegrityVerifier(
             })
             .Select(file => (File: file, Relative: Path.GetRelativePath(packageDirectory, file).Replace('\\', '/')))
             .Where(item => !item.Relative.Equals("active.json", StringComparison.Ordinal))
-            .Where(item => !item.Relative.Equals("manifest.json", StringComparison.Ordinal))
+            // 清单文件名有三种，摘要里一个都不能包（自引用）。
+            .Where(item => !PluginPaths.ManifestFileNames.Contains(item.Relative, StringComparer.OrdinalIgnoreCase))
             .Where(item => !item.Relative.Split('/').Any(segment => segment.StartsWith('.')))
             .OrderBy(item => item.Relative, StringComparer.Ordinal)
             .Select(item => item.File)

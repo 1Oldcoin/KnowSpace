@@ -122,6 +122,8 @@ plugins/
 | DELETE | `/api/plugins/{id}` | 卸载：停进程、删版本与数据目录、删安装记录 |
 | GET | `/api/plugins/{id}/audit?limit=` | 单个插件审计（时间倒序） |
 | GET | `/api/plugins/audit?pluginId=&limit=` | 全局审计 |
+| GET | `/api/plugins/concurrency` | 每个插件的并发占用：`concurrencyLimit` / `running` / `queued` / `queueLimit` + 能力级明细 |
+| POST | `/api/plugins/rescan` | 重新扫描插件目录：新拷进来的目录被发现并启动，已删除的目录被清理。返回 `discovered` / `started` / `failed` / `removed` |
 
 ## 8. 审计
 
@@ -151,9 +153,66 @@ plugins/
   "AutoGrantPermissions": false,
   "RequireConfirmationForSideEffects": true,
   "KeepVersions": 3,
-  "MaxPackageBytes": 268435456
+  "MaxPackageBytes": 268435456,
+  "DrainTimeoutSeconds": 15,
+  "ScheduledSyncEnabled": true,
+  "MinScheduledSyncIntervalSeconds": 60,
+  "MaxQueuedInvocationsPerPlugin": 16,
+  "MaxQueuedInvocationsPerCapability": 8,
+  "CapabilityConcurrencyLimits": {},
+  "StartupConcurrency": 4,
+  "Isolation": {
+    "Mode": "require",
+    "ReadableRoots": [],
+    "WritableRoots": [],
+    "ContainerNamePrefix": "MyFirstMafAgent.Plugin",
+    "DeleteProfileOnUninstall": false,
+    "RedirectUserDirectories": true
+  }
 }
 ```
+
+### 8.1 隔离配置（D-1）
+
+| 键 | 含义 | 默认 |
+| --- | --- | --- |
+| `Mode` | `require` 隔离失败就拒绍启动；`warn` 降级为普通子进程并记日志；`off` 不隔离 | Windows 上缺省 `require`，其它平台缺省 `warn` |
+| `ReadableRoots` | 额外只读目录（比如共享的运行时）；该目录会对容器 SID 授 `(OI)(CI)(RX)` | `[]` |
+| `WritableRoots` | 额外可写目录；授 `(OI)(CI)(M)` | `[]` |
+| `ContainerNamePrefix` | AppContainer 配置名前缀，同一插件的容器名在重启后保持不变（SID 不变，ACL 不用重写） | `MyFirstMafAgent.Plugin` |
+| `DeleteProfileOnUninstall` | 卸载插件时是否删掉 AppContainer 配置 | `false` |
+| `RedirectUserDirectories` | 是否把 `USERPROFILE`/`TEMP`/`APPDATA`/`LOCALAPPDATA` 指向插件数据目录 | `true` |
+
+两个只靠读代码看不出来的行为：
+
+- **不会给祖先目录写 ACL**。容器凭插件目录上的继承 ACE 就能穿越整条路径；给 `C:\` 写 ACE 会让 Windows 在整个驱动器上递归重整继承（实测卡死数分钟），且普通用户本来也无权改 `C:\` 的 ACL。
+- **已授过的目录不会重复写**。`SetAccessControl` 每次都会触发继承重整，插件重启时等于把成本乘上启动次数。
+
+运行时固定放 `App_Data/plugins/.runtimes/{命令名}/`：解析 `"command": "node"` 这类裸命令时**优先 `.runtimes`、其次 `PATH`**，因为 `PATH` 上的 `C:\Program Files\nodejs\node.exe` 对容器是拒绝访问的。
+
+## 9.1 插件数量：没有上限，但启动要限流
+
+**扫描不截断、列表不分页、注册表不设配额**，所以插件数量本身没有上限。唯一被收敛的是「同时 spawn 多少个进程」（`Plugins:StartupConcurrency`，默认 4）：
+
+- 启动阶段改成 `Parallel.ForEachAsync` + `MaxDegreeOfParallelism`。原来是 `foreach ... await` 串行，每插件握手最长 30s，50 个插件最坏就是 25 分钟启动时间。
+- 每个插件都是独立子进程，进程数是真正的成本，所以是“并发拉起数”而不是“数量上限”。
+
+**热发现（`POST /api/plugins/rescan`）**：把插件文件夹拷进 `Plugins:RootPath` 后点一下「重新扫描」就能用，不必重启 API（重启会中断正在跑的解析任务与对话）。行为：
+
+| 情况 | 结果 |
+| --- | --- |
+| 新目录 | 校验（四道闸门）后启动，进 `started` |
+| 已在运行且目录未变 | 不动它，避免打断在途调用 |
+| 校验/授权/配置未过 | 进 `failed`，`lastError` 写明原因 |
+| 目录已删（且进程已停） | 停进程、清计数、从列表移除，进 `removed` |
+
+两个实测得到的约束：
+
+- **用户意图优先于扫描**：上一次停用过的插件，即使目录仍在，rescan 也不会把它拉起来（走闸门 1 变 `Disabled`）。这是刻意的。
+- **Windows 上正在运行的插件目录删不掉**（exe/dll 被锁）。要删先停用，让进程退出；这不是 bug，是文件锁的必然结果。
+
+`CapabilityConcurrencyLimits` 的键两种写法：`"<pluginId>/<capabilityId>"`（只对某个插件）或 `"<capabilityId>"`（对所有同名能力生效）。
+能力级上限只是**再切一刀**，不会把插件级上限放大。配了 `<pluginId>/<capabilityId>` 就不再匹配同名能力的通配项。
 
 ## 10. 验证
 
@@ -366,15 +425,62 @@ Stage（只读校验，失败则插件继续正常服务）
 - `integrity` 是**状态字符串**（`verified`/`not-provided`/`skipped`/`digest-mismatch`/`signature-invalid`/`untrusted-publisher`），不是布尔；`not-provided` 不能显示成绿色「已校验签名」。
 - 卸载后详情面板要立刻关掉：10 秒定时刷新会拿已删除的 id 去 `GET`，否则每 10 秒弹一次 404。
 
-## 14. 仍未实现
+## 14. 调用准入：并发上限与有界队列（阶段 11）
+
+### 14.1 为什么要有这一层
+
+原本只有 `PluginProcessHost` 里的一个 `SemaphoreSlim`（容量取 manifest 的 `limits.maxConcurrentInvocations`）。
+`WaitAsync` 的排队**没有上限**，所以「插件只允许 2 并发」在真实使用中没有可感知的表现：连续发 10 个请求，
+结果是 2 个跑完、8 个一直挂着直到调用方自己的 HTTP 超时。使用者看到的是**卡死**，而不是**太忙**。
+
+现在的模型（`Application/Plugins/PluginInvocationLimiter.cs`，单例）：
+
+| 层 | 上限来源 | 超限行为 |
+| --- | --- | --- |
+| 插件队列 | `Plugins:MaxQueuedInvocationsPerPlugin`（默认 16） | 立刻 `429` |
+| 能力队列 | `Plugins:MaxQueuedInvocationsPerCapability`（默认 8，仅对配了能力级上限的能力生效） | 立刻 `429` |
+| 插件并发 | manifest `limits.maxConcurrentInvocations` | 排队；超过 `waitTimeout` 后 `429` |
+| 能力并发 | `Plugins:CapabilityConcurrencyLimits` | 排队；超过 `waitTimeout` 后 `429` |
+
+关键规则：
+
+- **在途上限 = 并发 + 队列**。`MaxQueuedInvocationsPerPlugin = 0` 的含义是「没有空闲槽位就拒绝」，
+  而不是「一律拒绝」——两者差一个把系统用死的 bug。
+- **先拿能力闸门，再拿插件闸门**。反过来会让一次调用一边占着插件容量一边空等能力槽位，
+  插件级 `running` 也会虚高（看着在跑，其实在排队），并且会挡住同插件的其它能力。
+- **拒绝不吃名额**：占队位失败、排队超时、调用方取消，三条路径都会把已占的计数/信号量还回去。
+  这是最容易写错的地方，`PluginInvocationLimiterTests` 专门盯着它。
+- **计数是进程内的**：多进程部署时每进程各自限流（与 `JobTypeQuota` 同一口径）。
+- 错误码 `-32006`（`PluginProtocol.ErrorOverloaded`）→ HTTP **429**（不是 503：这是「太忙，退避重试」）。
+  新增了 `GET /api/plugins/concurrency` 与详情里的 `concurrency` 字段，界面在「概览」显示「并发占用 1/2 · 排队 3」。
+
+### 14.2 实测证据（Windows，release 版 API + 真实插件子进程）
+
+示例插件的 `notes.slow-echo` 能力（每次 1500 ms），manifest 声明 `maxConcurrentInvocations: 2`。
+
+| 场景 | 配置 | 结果 |
+| --- | --- | --- |
+| 拒绝而非排队 | `Plugins__MaxQueuedInvocationsPerPlugin=0` | 10 个并发 → `200×2 + 429×8`，消息「并发已满（2），且排队已达上限 0」；采样 `running` 峰值 2；结束后 `running=0 queued=0` |
+| 有界队列 | `MaxQueuedInvocationsPerPlugin=2` + `CapabilityConcurrencyLimits["notes.slow-echo"]=1` | 10 个并发 → `200×4 + 429×6`（在途上限 2+2），插件级 `running` 峰值 **1**、能力级 `notes.slow-echo 1/1`，结束后全部归零 |
+
+启动日志会打印生效值（`Plugin invocation limits: queue per plugin=2, queue per capability=8, capability limits=notes.slow-echo=1`）——
+限流是最容易「配了没生效」的地方，没有这行只能靠压测反推。
+
+### 14.3 还得注意
+
+- 改配置需要**重启 API**（没有热更新）。
+- `waitTimeout` 复用的是能力的 `invocationTimeoutMs`：一次调用最坏是 `invocationTimeoutMs`（排队）+ 调用超时，不是无限。
+- 队列里的等待**不计入**审计里的 `elapsedMilliseconds`（计时从拿到执行机会开始），所以那个数字仍是「插件自己跑了多久」。
+
+## 15. 仍未实现
 
 | 能力 | 说明 |
 | --- | --- |
 | 受限令牌 / AppContainer / 容器隔离 | 当前子进程与核心同用户同权限，权限闸门只是准入控制 |
 | 跨机器/分布式执行 | 一个 API 进程内的子进程，没有远程插件主机 |
 | 插件市场 / 远程源 | 只支持上传本地 ZIP |
-| 插件级并发配额 | 只有全局 `Plugins:MaxConcurrentJobs` 之外的进程内 `maxConcurrentInvocations` |
+| 跨进程/集群配额 | 并发与队列计数都在进程内；多进程部署时是「每进程上限」 |
 | 手动作 invoke | 界面不提供裸调用调试入口；工具桥（`PluginToolBridge`）按 `agent-tool` 能力自动暴露给 Agent |
 | 签名工作流工具链 | 界面能粘公钥，但没有「生成密钥 → 算摘要 → 签包」的脚本（见 ROADMAP P1-6） |
 
-这些项的排期、依赖与验收标准见 **`docs/ROADMAP.md`**（P1-4、P1-6、P3 各节）。
+这些项的排期、依赖与验收标准见 **`docs/ROADMAP.md`**（P1-6、P3 各节）。

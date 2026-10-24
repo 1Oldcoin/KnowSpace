@@ -39,8 +39,9 @@ public static class HostOptionsModule
         services.AddOptions<MediaOptions>()
             .BindConfiguration(MediaOptions.SectionName)
             .Validate(options => options.FrameSampleIntervalSeconds is >= 1 and <= 3600
-                && options.MaxVideoFrames is >= 1 and <= 240,
-                "Video frame sampling must be between 1 and 3,600 seconds with 1 to 240 frames per video.")
+                && options.MaxVideoFrames is >= 1 and <= 240
+                && options.FrameSceneThreshold is > 0 and < 1,
+                "Video frame sampling must be between 1 and 3,600 seconds with 1 to 240 frames per video, and the scene threshold must be between 0 and 1 (exclusive).")
             .ValidateOnStart();
         services.AddOptions<IndexingOptions>()
             .BindConfiguration(IndexingOptions.SectionName)
@@ -49,6 +50,16 @@ public static class HostOptionsModule
                 && options.PollIntervalSeconds > 0
                 && options.QualityProbeCount >= 0,
                 "Indexing windows, retention, poll interval, and quality probe count must be positive.")
+            .ValidateOnStart();
+        services.AddOptions<RetrievalOptions>()
+            .BindConfiguration(RetrievalOptions.SectionName)
+            .Validate(options => options.RrfK >= 1
+                && options.CandidateMultiplier is >= 1 and <= 10
+                && options.MaxCandidates is >= 1 and <= 200
+                && options.RerankCandidateLimit is >= 1 and <= 200
+                && options.RerankLexicalWeight is >= 0 and <= 1
+                && options.AbstainMinScore is >= 0 and <= 1,
+                "Retrieval RRF k, candidate multiplier, candidate ceiling, rerank candidate limit, rerank lexical weight and abstain threshold must be within range.")
             .ValidateOnStart();
         services.AddOptions<AgentOptions>()
             .BindConfiguration(AgentOptions.SectionName)

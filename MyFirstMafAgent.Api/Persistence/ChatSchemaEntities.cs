@@ -1,3 +1,4 @@
+using MyFirstMafAgent.Api.Infrastructure.Persistence;
 using SqlSugar;
 
 namespace MyFirstMafAgent.Api.Persistence;
@@ -37,6 +38,19 @@ public sealed class KnowledgeChatMessageSchemaEntity
 
     [SugarColumn(ColumnName = "content", ColumnDataType = "text", IsNullable = false)]
     public string Content { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 助手消息的引用元数据（JSON 数组，见 <see cref="KnowledgeChatCitation"/>）。
+    /// 用户消息与历史数据为 null。
+    /// </summary>
+    [SugarColumn(ColumnName = "citations", ColumnDataType = "text", IsNullable = true)]
+    public string? Citations { get; set; }
+
+    /// <summary>
+    /// 助手消息的答案元数据（检索上下文 / 工具调用 / 网页来源，见 <see cref="KnowledgeChatAnswerMeta"/>）。
+    /// </summary>
+    [SugarColumn(ColumnName = "answer_meta", ColumnDataType = "text", IsNullable = true)]
+    public string? AnswerMeta { get; set; }
 
     [SugarColumn(ColumnName = "created_at", ColumnDataType = "timestamptz", IsNullable = false, DefaultValue = "now()")]
     public DateTimeOffset CreatedAt { get; set; }
@@ -85,6 +99,36 @@ public sealed class CompanionMessageSchemaEntity
 
     [SugarColumn(ColumnName = "created_at", ColumnDataType = "timestamptz", IsNullable = false, DefaultValue = "now()")]
     public DateTimeOffset CreatedAt { get; set; }
+}
+
+/// <summary>
+/// 伴侣聊天历史的向量。**与知识库索引完全隔离**：不写任何 kb_* 表，也不会被资料检索命中。
+/// <para>
+/// 为什么不复用知识库：伴侣记录是私人对话，混进资料索引会让"问资料"时把私聊当证据引用出来。
+/// 同一条消息在不同向量模型下可以各存一行？不行——主键是 message_id，
+/// 换模型靠 <c>embedding_fingerprint</c> 区分，旧模型的向量在重建时被覆盖。
+/// </para>
+/// </summary>
+[SugarTable("companion_message_vectors")]
+public sealed class CompanionMessageVectorSchemaEntity
+{
+    [SugarColumn(ColumnName = "message_id", ColumnDataType = "int8", IsPrimaryKey = true, IsNullable = false)]
+    public long MessageId { get; set; }
+
+    [SugarColumn(ColumnName = "embedding_spec_id", ColumnDataType = "uuid", IsNullable = false)]
+    public Guid EmbeddingSpecId { get; set; }
+
+    [SugarColumn(ColumnName = "embedding_fingerprint", ColumnDataType = "text", IsNullable = false)]
+    public string EmbeddingFingerprint { get; set; } = string.Empty;
+
+    [SugarColumn(ColumnName = "dimensions", ColumnDataType = "integer", IsNullable = false)]
+    public int Dimensions { get; set; }
+
+    [SugarColumn(ColumnName = "embedding", ColumnDataType = "vector", IsNullable = true, InsertSql = PgVectorSql.EmbeddingInsertCast)]
+    public string? Embedding { get; set; }
+
+    [SugarColumn(ColumnName = "updated_at", ColumnDataType = "timestamptz", IsNullable = false, DefaultValue = "now()")]
+    public DateTimeOffset UpdatedAt { get; set; }
 }
 
 [SugarTable("companion_sessions")]

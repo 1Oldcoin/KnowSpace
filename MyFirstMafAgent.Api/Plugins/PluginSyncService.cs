@@ -107,8 +107,10 @@ public sealed class PluginSyncService(
             await SaveFailureAsync(syncStates, stored, scopeKey, pluginId, capabilityId, targetKnowledgeBase, applied,
                 exception.Message, cancellationToken).ConfigureAwait(false);
 
-            // 权限/配置/未知能力这类问题重试也没用；进程不健康才值得退避重试。
-            var retryable = exception.Code is PluginProtocol.ErrorUnhealthy or PluginProtocol.ErrorCancelled;
+            // 权限/配置/未知能力这类问题重试也没用；进程不健康或核心限流才值得退避重试。
+            var retryable = exception.Code is PluginProtocol.ErrorUnhealthy
+                or PluginProtocol.ErrorCancelled
+                or PluginProtocol.ErrorOverloaded;
             throw new PluginSyncException(exception.Message, retryable, exception);
         }
 

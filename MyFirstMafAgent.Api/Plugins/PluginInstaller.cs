@@ -133,7 +133,9 @@ public sealed class PluginInstaller(
 
             var packageRoot = LocatePackageRoot(extractRoot);
             if (packageRoot is null)
-                return PluginStagedPackage.Fail(staging, "插件包内找不到 manifest.json");
+                return PluginStagedPackage.Fail(
+                    staging,
+                    $"插件包内找不到清单文件（{string.Join(" / ", PluginPaths.ManifestFileNames)}）");
 
             var load = loader.Load(packageRoot);
             if (load.Manifest is null || !load.Validation.IsValid)
@@ -389,14 +391,14 @@ public sealed class PluginInstaller(
         }
     }
 
-    /// <summary>找到包含 manifest.json 的目录；包内允许有一层包裹目录。</summary>
+    /// <summary>找到包含清单文件的目录（manifest.json / plugin.json / skill.json）；包内允许有一层包裹目录。</summary>
     private static string? LocatePackageRoot(string extractRoot)
     {
         var current = extractRoot;
 
         for (var depth = 0; depth < 5; depth++)
         {
-            if (File.Exists(Path.Combine(current, PluginPaths.ManifestFileName))) return current;
+            if (PluginPaths.HasManifest(current)) return current;
 
             var children = Directory.EnumerateDirectories(current)
                 .Where(directory =>

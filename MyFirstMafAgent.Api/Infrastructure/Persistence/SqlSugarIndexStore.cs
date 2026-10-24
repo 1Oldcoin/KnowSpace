@@ -383,7 +383,7 @@ public sealed class SqlSugarIndexStore(SqlSugarScope database) : IKnowledgeIndex
             knowledgeBaseId,
             limit = Math.Clamp(limit, 1, 50)
         }, cancellationToken);
-        return rows.Select(row => new RetrievedChunk(row.DocumentId, row.FileName, row.Content, row.Similarity)).ToList();
+        return rows.Select(row => new RetrievedChunk(row.DocumentId, row.FileName, row.Content, row.Similarity, row.ChunkId, row.ChunkIndex)).ToList();
     }
 
     public async Task<IndexVectorStats> GetStatsAsync(Guid indexId, CancellationToken cancellationToken)

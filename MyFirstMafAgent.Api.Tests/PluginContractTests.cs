@@ -444,6 +444,63 @@ public sealed class PluginManifestLoaderTests
 /// 协议层测试：用内存流驱动服务端分派，避免依赖真实子进程；
 /// 真实进程链路由 scripts/Test-PluginContract.ps1 覆盖。
 /// </summary>
+/// <summary>
+/// “连接在线但永远没有数据”的输入流。
+///
+/// <para>
+/// 取消类测试原本用空 <see cref="MemoryStream"/> 当输入，读循环会立即读到 EOF，
+/// 并以“连接已关闭”失败所有在途请求——于是测试结果取决于 50/80ms 定时器与读循环的赛跑。
+/// 这是测试脚手架的问题，不是协议实现的问题，因此用这个流把连接保住。
+/// </para>
+/// </summary>
+internal sealed class SilentStdioStream : Stream
+{
+    private readonly CancellationTokenSource _closed = new();
+
+    public override bool CanRead => true;
+    public override bool CanSeek => false;
+    public override bool CanWrite => false;
+    public override long Length => 0;
+
+    public override long Position
+    {
+        get => 0;
+        set => throw new NotSupportedException();
+    }
+
+    public override void Flush() { }
+
+    public override int Read(byte[] buffer, int offset, int count) =>
+        ReadAsync(buffer.AsMemory(offset, count)).AsTask().GetAwaiter().GetResult();
+
+    public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(_closed.Token, cancellationToken);
+        try
+        {
+            await Task.Delay(Timeout.Infinite, linked.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // 关闭时返回 0，读循环以 EOF 结束。
+        }
+
+        return 0;
+    }
+
+    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+    public override void SetLength(long value) => throw new NotSupportedException();
+
+    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) _closed.Cancel();
+        base.Dispose(disposing);
+    }
+}
+
 public sealed class PluginRpcProtocolTests
 {
     [Fact]
@@ -517,7 +574,7 @@ public sealed class PluginRpcProtocolTests
     public async Task Client_times_out_and_sends_a_cancel_notification()
     {
         var output = new MemoryStream();
-        await using var peer = new JsonRpcPeer(new MemoryStream(), output);
+        await using var peer = new JsonRpcPeer(new SilentStdioStream(), output);
         peer.Start();
 
         var exception = await Assert.ThrowsAsync<PluginRpcException>(() =>
@@ -535,7 +592,7 @@ public sealed class PluginRpcProtocolTests
     public async Task Caller_cancellation_is_propagated_as_operation_cancelled()
     {
         var output = new MemoryStream();
-        await using var peer = new JsonRpcPeer(new MemoryStream(), output);
+        await using var peer = new JsonRpcPeer(new SilentStdioStream(), output);
         peer.Start();
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
 

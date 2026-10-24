@@ -210,36 +210,40 @@ public sealed class SqlSugarAvatarRepository(SqlSugarScope database) : IAvatarRe
         foreach (var memory in memories)
         {
             var entity = ToEntity(memory);
-            await database.Updateable<AvatarMemorySchemaEntity>()
-                .SetColumns(item => new AvatarMemorySchemaEntity
+
+            // 必须用实体驱动的 UpdateColumns：SetColumns 会把「求值为 null 的可空列」
+            // （valid_from/valid_to/supersedes_id/last_confirmed_at/last_used_at）推断成
+            // AnsiString 参数，PostgreSQL 报 42804，整条记忆更新失败。
+            // UpdateColumns 按实体属性类型绑定，空值仍然是 timestamptz / uuid。
+            await database.Updateable(entity)
+                .UpdateColumns(item => new
                 {
-                    FragmentId = entity.FragmentId,
-                    Kind = entity.Kind,
-                    Title = entity.Title,
-                    Summary = entity.Summary,
-                    Content = entity.Content,
-                    OccurredAt = entity.OccurredAt,
-                    People = entity.People,
-                    Tags = entity.Tags,
-                    Emotion = entity.Emotion,
-                    Importance = entity.Importance,
-                    Source = entity.Source,
-                    VectorState = entity.VectorState,
-                    MemoryType = entity.MemoryType,
-                    Stability = entity.Stability,
-                    Confidence = entity.Confidence,
-                    LifecycleStatus = entity.LifecycleStatus,
-                    ValidFrom = entity.ValidFrom,
-                    ValidTo = entity.ValidTo,
-                    SupersedesId = entity.SupersedesId,
-                    StructuredData = entity.StructuredData,
-                    PrivacyLevel = entity.PrivacyLevel,
-                    LastConfirmedAt = entity.LastConfirmedAt,
-                    LastUsedAt = entity.LastUsedAt,
-                    EvidenceCount = entity.EvidenceCount,
-                    UpdatedAt = entity.UpdatedAt
+                    item.FragmentId,
+                    item.Kind,
+                    item.Title,
+                    item.Summary,
+                    item.Content,
+                    item.OccurredAt,
+                    item.People,
+                    item.Tags,
+                    item.Emotion,
+                    item.Importance,
+                    item.Source,
+                    item.VectorState,
+                    item.MemoryType,
+                    item.Stability,
+                    item.Confidence,
+                    item.LifecycleStatus,
+                    item.ValidFrom,
+                    item.ValidTo,
+                    item.SupersedesId,
+                    item.StructuredData,
+                    item.PrivacyLevel,
+                    item.LastConfirmedAt,
+                    item.LastUsedAt,
+                    item.EvidenceCount,
+                    item.UpdatedAt
                 })
-                .Where(item => item.Id == entity.Id)
                 .ExecuteCommandAsync(cancellationToken);
         }
     }
@@ -756,25 +760,44 @@ public sealed class SqlSugarAvatarRepository(SqlSugarScope database) : IAvatarRe
     public async Task AddSimulationAsync(AvatarSimulation simulation, CancellationToken cancellationToken) =>
         await database.Insertable(ToEntity(simulation)).ExecuteCommandAsync(cancellationToken);
 
-    public async Task UpdateSimulationAsync(AvatarSimulation simulation, CancellationToken cancellationToken) =>
-        await database.Updateable<AvatarSimulationSchemaEntity>()
-            .SetColumns(item => new AvatarSimulationSchemaEntity
+    public async Task UpdateSimulationAsync(AvatarSimulation simulation, CancellationToken cancellationToken)
+    {
+        // completed_at 可空：SetColumns 会把 null 推断成 AnsiString → 42804，故走实体驱动的 UpdateColumns。
+        var entity = new AvatarSimulationSchemaEntity
+        {
+            Id = simulation.Id,
+            Status = simulation.Status,
+            SuccessProbability = simulation.SuccessProbability,
+            Confidence = simulation.Confidence,
+            Summary = simulation.Summary,
+            Report = simulation.Report,
+            KeyFactors = Serialize(simulation.KeyFactors),
+            Milestones = Serialize(simulation.Milestones),
+            Risks = Serialize(simulation.Risks),
+            NextActions = Serialize(simulation.NextActions),
+            Model = simulation.Model,
+            ErrorMessage = simulation.ErrorMessage,
+            CompletedAt = simulation.CompletedAt
+        };
+
+        await database.Updateable(entity)
+            .UpdateColumns(item => new
             {
-                Status = simulation.Status,
-                SuccessProbability = simulation.SuccessProbability,
-                Confidence = simulation.Confidence,
-                Summary = simulation.Summary,
-                Report = simulation.Report,
-                KeyFactors = Serialize(simulation.KeyFactors),
-                Milestones = Serialize(simulation.Milestones),
-                Risks = Serialize(simulation.Risks),
-                NextActions = Serialize(simulation.NextActions),
-                Model = simulation.Model,
-                ErrorMessage = simulation.ErrorMessage,
-                CompletedAt = simulation.CompletedAt
+                item.Status,
+                item.SuccessProbability,
+                item.Confidence,
+                item.Summary,
+                item.Report,
+                item.KeyFactors,
+                item.Milestones,
+                item.Risks,
+                item.NextActions,
+                item.Model,
+                item.ErrorMessage,
+                item.CompletedAt
             })
-            .Where(item => item.Id == simulation.Id)
             .ExecuteCommandAsync(cancellationToken);
+    }
 
     public async Task<bool> DeleteSimulationAsync(Guid simulationId, CancellationToken cancellationToken) =>
         await database.Deleteable<AvatarSimulationSchemaEntity>()
@@ -922,23 +945,22 @@ public sealed class SqlSugarAvatarRepository(SqlSugarScope database) : IAvatarRe
         return rows.Select(ToDomain).ToList();
     }
 
-    public async Task<int> RequeueStaleIngestionsAsync(
+    public Task<int> RequeueStaleIngestionsAsync(
         TimeSpan staleAfter,
         CancellationToken cancellationToken)
     {
         var threshold = DateTimeOffset.UtcNow - staleAfter;
-        return await database.Updateable<AvatarIngestionSchemaEntity>()
-            .SetColumns(entity => new AvatarIngestionSchemaEntity
+        return database.Ado.ExecuteCommandAsync(
+            RequeueStaleIngestionsSql,
+            new SugarParameter[]
             {
-                Status = AvatarIngestion.Queued,
-                Stage = AvatarIngestion.StageReceived,
-                Error = null,
-                StartedAt = null,
-                UpdatedAt = DateTimeOffset.UtcNow
-            })
-            .Where(entity => entity.Status == AvatarIngestion.Running
-                && (entity.StartedAt == null || entity.StartedAt < threshold))
-            .ExecuteCommandAsync(cancellationToken);
+                new("@status", AvatarIngestion.Running),
+                new("@queued", AvatarIngestion.Queued),
+                new("@stage", AvatarIngestion.StageReceived),
+                new("@now", DateTimeOffset.UtcNow),
+                new("@threshold", threshold)
+            },
+            cancellationToken);
     }
 
     public async Task<AvatarIngestion?> ClaimNextIngestionAsync(CancellationToken cancellationToken)
@@ -951,17 +973,17 @@ public sealed class SqlSugarAvatarRepository(SqlSugarScope database) : IAvatarRe
         if (rows.Count == 0) return null;
 
         var now = DateTimeOffset.UtcNow;
-        var affected = await database.Updateable<AvatarIngestionSchemaEntity>()
-            .SetColumns(entity => new AvatarIngestionSchemaEntity
+        var affected = await database.Ado.ExecuteCommandAsync(
+            ClaimIngestionSql,
+            new SugarParameter[]
             {
-                Status = AvatarIngestion.Running,
-                Stage = AvatarIngestion.StageExtracting,
-                StartedAt = now,
-                UpdatedAt = now,
-                Error = null
-            })
-            .Where(entity => entity.Id == rows[0].Id && entity.Status == AvatarIngestion.Queued)
-            .ExecuteCommandAsync(cancellationToken);
+                new("@id", rows[0].Id),
+                new("@queued", AvatarIngestion.Queued),
+                new("@running", AvatarIngestion.Running),
+                new("@stage", AvatarIngestion.StageExtracting),
+                new("@now", now)
+            },
+            cancellationToken);
         if (affected == 0) return null;
 
         rows[0].Status = AvatarIngestion.Running;
@@ -972,26 +994,70 @@ public sealed class SqlSugarAvatarRepository(SqlSugarScope database) : IAvatarRe
         return ToDomain(rows[0]);
     }
 
-    public async Task UpdateIngestionAsync(AvatarIngestion ingestion, CancellationToken cancellationToken)
-    {
-        var entity = ToEntity(ingestion);
-        await database.Updateable<AvatarIngestionSchemaEntity>()
-            .SetColumns(item => new AvatarIngestionSchemaEntity
-            {
-                SourceRef = entity.SourceRef,
-                Status = entity.Status,
-                Stage = entity.Stage,
-                Error = entity.Error,
-                MemoryCount = entity.MemoryCount,
-                InsightCount = entity.InsightCount,
-                StatsJson = entity.StatsJson,
-                UpdatedAt = entity.UpdatedAt,
-                StartedAt = entity.StartedAt,
-                CompletedAt = entity.CompletedAt
-            })
-            .Where(item => item.Id == entity.Id)
-            .ExecuteCommandAsync(cancellationToken);
-    }
+    public Task UpdateIngestionAsync(AvatarIngestion ingestion, CancellationToken cancellationToken) =>
+        database.Ado.ExecuteCommandAsync(
+            UpdateIngestionSql,
+            BuildIngestionUpdateParameters(ingestion),
+            cancellationToken);
+
+    /// <summary>
+    /// 投喂任务的状态推进必须走显式 SQL，不能用 <c>Updateable.SetColumns</c>：
+    /// SqlSugar 把「求值为 null 的 DateTimeOffset?」声明成 <c>DbType.AnsiString</c> 参数，
+    /// PostgreSQL 不做 text → timestamptz 的隐式赋值，直接报
+    /// <c>42804: column "completed_at" is of type timestamp with time zone but expression is of type text</c>。
+    /// 这条语句是投喂流程的第一次状态回写，一旦失败任务就永远停在 running/extracting，
+    /// 原文永远不进记忆、不建向量。时间列因此统一加 CAST，参数类型不再影响写入。
+    /// </summary>
+    internal static SugarParameter[] BuildIngestionUpdateParameters(AvatarIngestion ingestion) =>
+    [
+        new("@id", ingestion.Id),
+        new("@sourceRef", (object?)ingestion.SourceRef ?? DBNull.Value),
+        new("@status", ingestion.Status),
+        new("@stage", ingestion.Stage),
+        new("@error", (object?)ingestion.Error ?? DBNull.Value),
+        new("@memoryCount", ingestion.MemoryCount),
+        new("@insightCount", ingestion.InsightCount),
+        new("@statsJson", ingestion.StatsJson),
+        new("@updatedAt", ingestion.UpdatedAt),
+        new("@startedAt", ingestion.StartedAt.HasValue ? (object)ingestion.StartedAt.Value : DBNull.Value),
+        new("@completedAt", ingestion.CompletedAt.HasValue ? (object)ingestion.CompletedAt.Value : DBNull.Value)
+    ];
+
+    internal const string UpdateIngestionSql = """
+        UPDATE avatar_ingestions SET
+            source_ref = @sourceRef,
+            status = @status,
+            stage = @stage,
+            error = @error,
+            memory_count = @memoryCount,
+            insight_count = @insightCount,
+            stats_json = @statsJson,
+            updated_at = CAST(@updatedAt AS timestamptz),
+            started_at = CAST(@startedAt AS timestamptz),
+            completed_at = CAST(@completedAt AS timestamptz)
+        WHERE id = @id
+        """;
+
+    private const string RequeueStaleIngestionsSql = """
+        UPDATE avatar_ingestions SET
+            status = @queued,
+            stage = @stage,
+            error = NULL,
+            started_at = NULL,
+            updated_at = CAST(@now AS timestamptz)
+        WHERE status = @status
+            AND (started_at IS NULL OR started_at < CAST(@threshold AS timestamptz))
+        """;
+
+    private const string ClaimIngestionSql = """
+        UPDATE avatar_ingestions SET
+            status = @running,
+            stage = @stage,
+            started_at = CAST(@now AS timestamptz),
+            updated_at = CAST(@now AS timestamptz),
+            error = NULL
+        WHERE id = @id AND status = @queued
+        """;
 
     public async Task<AvatarIngestion?> FindIngestionByKeyAsync(
         string idempotencyKey,
@@ -1265,21 +1331,36 @@ public sealed class SqlSugarAvatarRepository(SqlSugarScope database) : IAvatarRe
             CompletedAt = run.CompletedAt
         }).ExecuteCommandAsync(cancellationToken);
 
-    public async Task UpdateEvalRunAsync(AvatarEvalRun run, CancellationToken cancellationToken) =>
-        await database.Updateable<AvatarEvalRunSchemaEntity>()
-            .SetColumns(entity => new AvatarEvalRunSchemaEntity
+    public async Task UpdateEvalRunAsync(AvatarEvalRun run, CancellationToken cancellationToken)
+    {
+        // completed_at 可空：同 UpdateMemoriesAsync，用实体驱动绑定避免 null 被推断成 AnsiString。
+        var entity = new AvatarEvalRunSchemaEntity
+        {
+            Id = run.Id,
+            Status = run.Status,
+            Total = run.Total,
+            Passed = run.Passed,
+            FactErrorCount = run.FactErrorCount,
+            CitationAccuracy = run.CitationAccuracy,
+            StyleScore = run.StyleScore,
+            Summary = run.Summary,
+            CompletedAt = run.CompletedAt
+        };
+
+        await database.Updateable(entity)
+            .UpdateColumns(item => new
             {
-                Status = run.Status,
-                Total = run.Total,
-                Passed = run.Passed,
-                FactErrorCount = run.FactErrorCount,
-                CitationAccuracy = run.CitationAccuracy,
-                StyleScore = run.StyleScore,
-                Summary = run.Summary,
-                CompletedAt = run.CompletedAt
+                item.Status,
+                item.Total,
+                item.Passed,
+                item.FactErrorCount,
+                item.CitationAccuracy,
+                item.StyleScore,
+                item.Summary,
+                item.CompletedAt
             })
-            .Where(entity => entity.Id == run.Id)
             .ExecuteCommandAsync(cancellationToken);
+    }
 
     public async Task<AvatarEvalRun?> GetEvalRunAsync(Guid runId, CancellationToken cancellationToken)
     {

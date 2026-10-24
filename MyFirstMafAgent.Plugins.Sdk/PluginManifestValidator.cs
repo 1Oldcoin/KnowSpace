@@ -32,6 +32,11 @@ public static class PluginManifestValidator
         @"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$",
         RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
+    /// <summary>MCP 方言放宽 ID：不要求反向域名，但仍须能安全地当目录名。</summary>
+    private static readonly Regex McpIdPattern = new(
+        @"^[a-z0-9][a-z0-9._-]{0,127}$",
+        RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
     private static readonly Regex CapabilityIdPattern = new(
         @"^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$",
         RegexOptions.CultureInvariant | RegexOptions.Compiled);
@@ -43,16 +48,47 @@ public static class PluginManifestValidator
         AllowTrailingCommas = true
     };
 
-    /// <summary>从 JSON 文本解析并校验。</summary>
+    private static readonly JsonDocumentOptions DocumentOptions = new()
+    {
+        CommentHandling = JsonCommentHandling.Skip,
+        AllowTrailingCommas = true
+    };
+
+    /// <summary>
+    /// 从 JSON 文本解析并校验。
+    ///
+    /// <para>
+    /// 反序列化<b>之前</b>先过一遍 <see cref="PluginManifestNormalizer"/>：生态里的别名
+    /// （<c>inputSchema</c>、<c>net.outbound</c>、<c>args</c>、<c>"protocol": "mcp"</c> …）
+    /// 在这里被改名成契约词汇，并把改过名的字段作为 warning 透出——不静默生效。
+    /// </para>
+    /// </summary>
     public static (PluginManifest? Manifest, PluginManifestValidationResult Result) Parse(string json)
     {
         if (string.IsNullOrWhiteSpace(json))
             return (null, PluginManifestValidationResult.Fail("manifest is empty"));
 
+        JsonNode? node;
+        try
+        {
+            node = JsonNode.Parse(json, documentOptions: DocumentOptions);
+        }
+        catch (JsonException exception)
+        {
+            return (null, PluginManifestValidationResult.Fail($"manifest is not valid JSON: {exception.Message}"));
+        }
+
+        if (node is not JsonObject)
+            return (null, PluginManifestValidationResult.Fail("manifest root must be a JSON object"));
+
+        var (normalized, notes) = PluginManifestNormalizer.Normalize(node);
+        if (normalized is null)
+            return (null, PluginManifestValidationResult.Fail("manifest root must be a JSON object"));
+
         PluginManifest? manifest;
         try
         {
-            manifest = JsonSerializer.Deserialize<PluginManifest>(json, SerializerOptions);
+            manifest = normalized.Deserialize<PluginManifest>(SerializerOptions);
         }
         catch (JsonException exception)
         {
@@ -62,7 +98,11 @@ public static class PluginManifestValidator
         if (manifest is null)
             return (null, PluginManifestValidationResult.Fail("manifest deserialized to null"));
 
-        return (manifest, Validate(manifest));
+        var result = Validate(manifest);
+        if (notes.Count > 0)
+            result = new PluginManifestValidationResult(result.Errors, [.. notes, .. result.Warnings]);
+
+        return (manifest, result);
     }
 
     /// <summary>校验已反序列化的 manifest。</summary>
@@ -70,6 +110,11 @@ public static class PluginManifestValidator
     {
         var errors = new List<string>();
         var warnings = new List<string>();
+
+        var isMcp = PluginDialects.IsMcp(manifest.Dialect);
+
+        if (!string.IsNullOrWhiteSpace(manifest.Dialect) && !PluginDialects.IsKnown(manifest.Dialect))
+            errors.Add($"dialect '{manifest.Dialect}' is not supported; use 'plugin' or 'mcp'");
 
         if (string.IsNullOrWhiteSpace(manifest.SchemaVersion))
             errors.Add("schemaVersion is required");
@@ -80,8 +125,10 @@ public static class PluginManifestValidator
             errors.Add("id is required (reverse-domain form, e.g. com.example.notes)");
         else if (manifest.Id.Length > 128)
             errors.Add("id must be at most 128 characters");
-        else if (!IdPattern.IsMatch(manifest.Id))
-            errors.Add($"id '{manifest.Id}' must be lowercase reverse-domain (e.g. com.example.notes)");
+        else if (isMcp ? !McpIdPattern.IsMatch(manifest.Id) : !IdPattern.IsMatch(manifest.Id))
+            errors.Add(isMcp
+                ? $"id '{manifest.Id}' must be lowercase alphanumeric with '.', '_' or '-'"
+                : $"id '{manifest.Id}' must be lowercase reverse-domain (e.g. com.example.notes)");
 
         if (string.IsNullOrWhiteSpace(manifest.Name))
             errors.Add("name is required");
@@ -103,6 +150,13 @@ public static class PluginManifestValidator
         {
             errors.Add("protocol is required (minVersion/maxVersion)");
         }
+        else if (isMcp)
+        {
+            // MCP 的版本由 initialize 的 protocolVersion 协商，语义与我们这套区间不同，不做区间判定。
+            if (!SemanticVersion.TryParse(manifest.Protocol.MinVersion, out _)
+                || !SemanticVersion.TryParse(manifest.Protocol.MaxVersion, out _))
+                errors.Add("protocol.minVersion/maxVersion must be semantic versions");
+        }
         else
         {
             if (!SemanticVersion.TryParse(manifest.Protocol.MinVersion, out _))
@@ -113,7 +167,10 @@ public static class PluginManifestValidator
                 errors.Add($"protocol is incompatible with this core: {reason}");
         }
 
-        ValidateCapabilities(manifest, errors, warnings);
+        ValidatePermissions(manifest.Permissions, "manifest", errors);
+
+        // MCP 的能力来自 tools/list，清单里可以是空的；自有协议必须自己声明。
+        ValidateCapabilities(manifest, errors, warnings, requireAtLeastOne: !isMcp);
         ValidateLimits(manifest, errors, warnings);
 
         if (manifest.Config is not null && !string.IsNullOrWhiteSpace(manifest.Config.Schema))
@@ -135,11 +192,12 @@ public static class PluginManifestValidator
     private static void ValidateCapabilities(
         PluginManifest manifest,
         List<string> errors,
-        List<string> warnings)
+        List<string> warnings,
+        bool requireAtLeastOne = true)
     {
         if (manifest.Capabilities.Count == 0)
         {
-            errors.Add("capabilities must declare at least one capability");
+            if (requireAtLeastOne) errors.Add("capabilities must declare at least one capability");
             return;
         }
 
@@ -175,6 +233,19 @@ public static class PluginManifestValidator
             if (!string.IsNullOrWhiteSpace(capability.Parameters)
                 && !IsValidJsonSchema(capability.Parameters, out var error))
                 errors.Add($"capability '{capability.Id}' parameters is not valid JSON Schema: {error}");
+        }
+    }
+
+    /// <summary>顶层权限（MCP 方言下唯一能写权限的地方）。</summary>
+    private static void ValidatePermissions(
+        IReadOnlyList<string> permissions,
+        string owner,
+        List<string> errors)
+    {
+        foreach (var permission in permissions)
+        {
+            if (!PluginPermissions.IsKnown(permission))
+                errors.Add($"{owner} requests unknown permission '{permission}'");
         }
     }
 

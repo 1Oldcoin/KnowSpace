@@ -4,8 +4,15 @@ using MyFirstMafAgent.Api.Persistence;
 
 namespace MyFirstMafAgent.Api.Companions;
 
-public sealed class CompanionService(CompanionStore store, OpenAiCompatibleModelClient modelClient)
+public sealed class CompanionService(
+    CompanionStore store,
+    CompanionMemoryIndexer indexer,
+    OpenAiCompatibleModelClient modelClient,
+    ILogger<CompanionService> logger)
 {
+    /// <summary>RRF 融合常数。与知识库混合检索取同一个值，便于解释排序。</summary>
+    private const int RrfK = 60;
+
     public async Task<CompanionProfile?> GeneratePersonaAsync(Guid profileId, CancellationToken cancellationToken)
     {
         var profile = await store.GetProfileAsync(profileId, cancellationToken);
@@ -30,11 +37,14 @@ public sealed class CompanionService(CompanionStore store, OpenAiCompatibleModel
         var profile = await store.GetProfileAsync(profileId, cancellationToken);
         if (profile is null || !await store.SessionBelongsToProfileAsync(sessionId, profileId, cancellationToken)) return null;
 
-        var memories = await store.FindRelevantMessagesAsync(profile.Id, profile.TargetSender, message, 8, cancellationToken);
+        var memories = await RecallAsync(profile, message, 8, cancellationToken);
         var history = await store.ListSessionMessagesAsync(sessionId, cancellationToken);
+        // 按**相关度**顺序送进提示词（最相关在前），不再按时间反转。
+        // 反转是"词面检索按时间倒序"时代的遗留：检索结果一变成按相似度排序，
+        // 反转就把最相关的那条压到最后一行，模型最容易忽略的恰好是最该看到的证据。
         var memoryContext = memories.Count == 0
             ? "没有检索到与本轮问题相关的原始聊天片段。不要编造具体的共同经历。"
-            : string.Join("\n", memories.AsEnumerable().Reverse().Select(item =>
+            : string.Join("\n", memories.Select(item =>
                 $"[{(item.SentAt?.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) ?? "时间未知")}] {item.Sender}: {item.Content}"));
         var conversation = string.Join("\n", history.Select(item => $"{(item.Role == "user" ? "用户" : "AI 模拟")}: {item.Content}"));
 
@@ -43,6 +53,66 @@ public sealed class CompanionService(CompanionStore store, OpenAiCompatibleModel
         var answer = await modelClient.CompleteChatAsync(systemPrompt, userPrompt, cancellationToken);
         await store.AddSessionExchangeAsync(sessionId, message, answer, cancellationToken);
         return new CompanionChatResult(answer, memories.Count);
+    }
+
+    /// <summary>
+    /// 召回相关历史消息：**向量优先，词面兜底，两路都有就按 RRF 融合**。
+    ///
+    /// <para>
+    /// 为什么必须是两路而不是"只上向量"：聊天里的人名、地点、编号这类字面信息向量经常召不回，
+    /// 而"上次聊到的那件事"这种语义问题词面又召不回。融合的代价很小（一次额外查询），
+    /// 收益是"想不起来具体词也能问出来"和"记得原话就能精确命中"同时成立。
+    /// </para>
+    ///
+    /// <para>
+    /// 向量模型不可用时 <see cref="CompanionMemoryIndexer.TrySearchAsync"/> 返回 null，
+    /// 这里自动退化成纯词面检索——与 D-6 之前的行为一致，不会让功能整体不可用。
+    /// </para>
+    /// </summary>
+    private async Task<IReadOnlyList<CompanionRecall>> RecallAsync(
+        CompanionProfile profile,
+        string query,
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        var lexical = await store.FindLexicalMessagesAsync(
+            profile.Id, profile.TargetSender, query, limit, cancellationToken);
+
+        if (string.IsNullOrWhiteSpace(query)) return lexical;
+
+        var vector = await indexer.TrySearchAsync(
+            profile.Id, profile.TargetSender, query, limit, cancellationToken);
+
+        if (vector is null || vector.Count == 0) return lexical;
+
+        var fused = new Dictionary<long, (CompanionRecall Recall, double Score)>();
+        for (var rank = 0; rank < vector.Count; rank++)
+        {
+            var hit = vector[rank];
+            fused[hit.MessageId] = (new CompanionRecall(hit.MessageId, hit.Sender, hit.Content, hit.SentAt),
+                1d / (RrfK + rank + 1));
+        }
+
+        for (var rank = 0; rank < lexical.Count; rank++)
+        {
+            var hit = lexical[rank];
+            var score = 1d / (RrfK + rank + 1);
+            fused[hit.MessageId] = fused.TryGetValue(hit.MessageId, out var existing)
+                ? (existing.Recall, existing.Score + score)
+                : (hit, score);
+        }
+
+        // 这条日志是"语义检索真的生效了吗"的唯一现场证据：词面经常一条都召不回，
+        // 只有 vector>0 才说明问法不靠字面也能命中。
+        logger.LogInformation(
+            "Companion recall for {ProfileId}: vector={VectorCount} lexical={LexicalCount} fused={FusedCount}",
+            profile.Id, vector.Count, lexical.Count, fused.Count);
+
+        return fused.Values
+            .OrderByDescending(item => item.Score)
+            .Take(limit)
+            .Select(item => item.Recall)
+            .ToList();
     }
 }
 

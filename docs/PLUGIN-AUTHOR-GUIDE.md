@@ -2,6 +2,7 @@
 
 本文描述**已经实现**的插件契约。安装/升级/回滚/卸载、配置、授权、审计、摘要/签名校验、
 平台条目映射与去重、撤回删除、同步游标、知识库作用域与配额均已落地；
+两种对话方言（自有协议 `plugin/*` 与标准 **MCP**）都可用，见 §3.2；
 内核级隔离（受限令牌/容器）尚未实现，文中以「未实现」明确标注。
 
 ## 1. 心智模型
@@ -19,6 +20,8 @@
 1. **插件是独立进程。** 不把第三方程序集加载进核心；不用 `AssemblyLoadContext` 做隔离（其卸载是协作式的，无法提供安全边界）。
 2. **stdout 只承载协议消息。** 任何日志写 stderr（`PluginBase.Log` 已代为处理）。
 3. **插件不写数据库。** 平台内容通过 `platform-connector` 返回值提交，由核心调用既有摄取用例（版本、Outbox、索引生命周期全部复用）。
+
+> 已经写好的 stdio MCP server 不用改造：清单里写一行 `"protocol": "mcp"` 就能载入，详见 §3.2。
 
 ## 2. 最小插件
 
@@ -96,14 +99,70 @@ internal sealed class MyPlugin : PluginBase
 
 | 字段 | 规则 |
 | --- | --- |
-| `schemaVersion` | 必须等于 `1.0` |
-| `id` | 小写反向域名，段间用 `.`，段内 `a-z0-9-`，总长 ≤ 128 |
+| `schemaVersion` | 必须等于 `1.0`（缺省即 `1.0`） |
+| `id` | 小写反向域名，段间用 `.`，段内 `a-z0-9-`，总长 ≤ 128；`dialect: mcp` 时放宽为单段 `a-z0-9._-` |
 | `version` | SemVer（`1.10.0 > 1.9.0`；`1.0.0-rc1 < 1.0.0`） |
-| `protocol` | 闭区间必须包含核心协议 `1.0.0` |
-| `capabilities` | 至少 1 项；`id` 唯一且小写；`kind` ∈ `agent-tool` / `platform-connector`；`sideEffect` ∈ `read` / `write-local` / `write-external` / `destructive`；`permissions` ∈ `network` / `file-read` / `file-write` / `clipboard` / `process`；`parameters` 必须是 JSON Schema 对象 |
+| `protocol` | 闭区间必须包含核心协议 `1.0.0`；`dialect: mcp` 时不做区间判定（版本由 MCP 自己协商） |
+| `capabilities` | 自有协议至少 1 项；`dialect: mcp` 可为空（能力来自 `tools/list`）。`id` 唯一且小写；`kind` ∈ `agent-tool` / `platform-connector`；`sideEffect` ∈ `read` / `write-local` / `write-external` / `destructive`；`permissions` ∈ `network` / `file-read` / `file-write` / `clipboard` / `process`；`parameters` 必须是 JSON Schema 对象 |
 | `limits` | `maxMemoryMb` 64–4096；并发 1–16；超时 1s–600s；请求 ≤ 16 MiB；`maxRetries` 0–5 |
 | `integrity.sha256` | 64 位十六进制；缺失只报警告（阶段 4 会改为强制） |
-| `entry` | 相对路径必须真实存在；宿主命令（如 `dotnet`）取 `arguments` 里第一个 `.dll`/`.js` |
+| `entry` | 相对路径必须真实存在；宿主命令（如 `dotnet`、`npx`）取 `arguments` 里第一个 `.dll`/`.js`/`.py`，没有文件参数时视为「运行期由 PATH/包管理器决定」，不判失败 |
+
+### 3.1 清单文件名与字段别名（D-2）
+
+清单文件名认 `manifest.json`、`plugin.json`、`skill.json` 三种，内容格式相同。
+下面这些**生态常见写法**在读取时会被改名成上面的契约词汇，并作为 warning 出现在插件状态里（不静默生效）：
+
+| 你写的 | 等价于 | 说明 |
+| --- | --- | --- |
+| `"protocol": "mcp"` 或 `"dialect": "mcp"` | 方言声明 | 见 §3.2 |
+| `entry.args` | `entry.arguments` | Claude Desktop / MCP 配置的写法 |
+| `entry.cwd` | `entry.workingDirectory` | 同上 |
+| `entry.command: ["npx","-y","pkg"]` | `command` + `arguments` | 命令与参数写成一个数组 |
+| `entry.env: { "K": 3 }` | `{ "K": "3" }` | 环境变量的值必须是字符串 |
+| 能力的 `inputSchema` / `input_schema` / `parametersSchema` | `parameters` | MCP 的 schema 是对象，内部统一成字符串 |
+| 能力的 `requires`（顶层也可） | `permissions` | 顶层 `requires`/`permissions` 对所有能力生效 |
+| `net.outbound` / `net` / `internet` | `network` | 权限词汇别名 |
+| `fs` / `filesystem` / `file` | `file-read` + `file-write` | 一个词展开成两个权限 |
+| `fs.read` / `fs.write` | `file-read` / `file-write` | |
+| `proc` / `exec` / `shell` | `process` | |
+| `kind: tool` / `function` | `agent-tool` | |
+| `kind: connector` / `platform` | `platform-connector` | |
+| `sideEffect: none` / `readonly` | `read` | |
+| `sideEffect: write` | `write-local` | |
+| `capabilities: ["search","Fetch Page"]` | 两个 `agent-tool` | 只写工具名也认 |
+| 能力缺 `kind` | `agent-tool` | 平台连接器必须显式声明 |
+| 顶层 `configSchema` / `config` 为字符串 | `config.schema` | |
+
+认不出来的权限词**不会被丢掉**，而是原样保留并报错——你必须能看见自己写错了什么。
+
+### 3.2 用 MCP 方言写插件（现成 MCP server 直接载入）
+
+如果插件本来就是一个 stdio MCP server，清单里写 `"protocol": "mcp"`（或 `"dialect": "mcp"`）即可，**不必实现本项目的 `plugin/*` 方法**：
+
+```json
+{
+  "id": "filesystem",
+  "protocol": "mcp",
+  "entry": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] }
+}
+```
+
+核心会：
+
+1. 发 `initialize`（`protocolVersion: 2024-11-05`）→ 读 `serverInfo`（只记录，不与清单对账）；
+2. 发 `notifications/initialized`；
+3. 发 `tools/list`（跟 `nextCursor` 翻页，最多 20 页）→ 每个 tool 变成一个 `agent-tool` 能力，`inputSchema` 原样作为工具参数；
+4. 调用时发 `tools/call`，把 `content` 里的文本拼成一段结果返回给模型；`isError: true` 转成调用失败并把文本作为错误信息；
+5. 健康检查用 `ping`（对端回 `-32601` 视为健康）；停止时**关闭 stdin**（MCP 约定的退出信号），不做 `shutdown` 请求；
+6. 取消用 `notifications/cancelled`（`{ requestId, reason }`）。
+
+副作用等级取自 MCP 的 `annotations`：`destructiveHint` → `destructive`，`readOnlyHint: false` → `write-local`，否则 `read`。你也可以在清单里写同名能力来覆盖（例如把某个工具标成 `write-external` 以强制确认）。
+
+配置通过**环境变量**下发：清单 `entry.env` 里的键值原样注入；用户配置里的每个标量字段注入为 `MYFIRSTMAFAGENT_CONFIG_<KEY大写>`。改配置会重启插件进程。
+
+限制（当前实现）：`notifications/tools/list_changed` 只记日志，不热重建能力表（重启插件生效）；SSE / HTTP 传输的 MCP server 不支持，只支持 stdio。
+
 
 ## 4. 协议
 
@@ -251,9 +310,28 @@ curl.exe -s http://127.0.0.1:5056/api/plugins
 - **默认不信任。** 只申请实际需要的权限；`sideEffect` 如实标注，`write-external`/`destructive` 会被标记为需要用户确认，且**不会暴露给聊天模型**（模型无法提供确认信息）。
 - `platform-connector` 返回的网页/平台内容属**不可信数据**，不得当作指令执行。
 - 凭证不要写进 manifest；配置由用户填写，核心通过 `plugin/configure` 下发。
-- 插件能访问的写目录只有 `%LOCALAPPDATA%\...\plugins\.data\{pluginId}`（`MYFIRSTMAFAGENT_PLUGIN_DATA`）。
-- **同一 OS 用户下的子进程不是安全沙箱。** 进程隔离解决的是故障隔离（崩溃/死循环/协议错误只影响自己）。
-  摘要与签名校验已实现（见第 8 节），升级前的排空也已实现（见第 9 节）；受限令牌与 AppContainer/容器隔离仍未实现。
+- 插件能访问的写目录只有 `<plugins>/.data/{pluginId}`（`MYFIRSTMAFAGENT_PLUGIN_DATA`）。
+
+### 7.1 你真的会被关进沙箱（Windows，D-1 起）
+
+Windows 上插件进程跑在 **AppContainer** 里，权限表不再只是"说了算"，而是内核强制执行：
+
+| 你声明了什么 | 实际效果 |
+| --- | --- |
+| 没声明 `network` | 令牌里没有 `internetClient`（`S-1-15-3-1`），`socket()` 直接失败。实测 Node `net.connect` → `EACCES`，不是超时、不是"连不上" |
+| 声明 `network` 且用户已授予 | 出站网络正常（实测同一段代码 → `CONNECT_OK`） |
+| 任何情况 | 只能读**自己的插件目录**、只能写 `.data/{pluginId}`；读 `C:\...` 其它位置会被拒绝 |
+| 任何情况 | 拿不到核心的环境变量（连接串、API Key 不在子进程环境里） |
+
+因此写插件时请注意：
+
+- **运行时（node/python/dotnet…）不能假设装在 `Program Files` 就能用**。容器读不到那里（`C:\Program Files\nodejs` 只授了 `Users` 组）。把运行时放到 `<plugins>/.runtimes/{命令名}/`，清单里继续写 `"command": "node"` 即可——核心解析命令时**优先 `.runtimes`**，再查 `PATH`。
+- 需要写入的东西一律写到 `MYFIRSTMAFAGENT_PLUGIN_DATA`；`USERPROFILE`/`TEMP`/`APPDATA`/`LOCALAPPDATA` 已被核心重定向到该目录下，所以 `fs.mkdtemp()` 这类调用能正常工作。
+- Node 插件：核心会自动注入 `NODE_OPTIONS=--preserve-symlinks-main`。原因是 node 解析入口脚本时要 `realpath('C:\')`，而容器读不到驱动器根（那需要管理员改 `C:\` 的 ACL）。如果你的插件对这个语义敏感（比如依赖符号链接指向真实路径），请自己在 `entry.env` 里覆盖 `NODE_OPTIONS`。
+- **不要依赖 `plugins/.runtimes` 之外的绝对路径**。你如果确实需要某个额外的只读目录，请让用户在 `Plugins:Isolation:ReadableRoots` 里加，而不是假设它能读。
+- 隔离失败时核心会**拒绝启动**并把原因写进 `GET /api/plugins/{id}` 的 `isolation.detail`（例如"容器没有读取入口程序的权限"）。`isolation.applied=false` 表示**没有**沙箱在保护用户，用户应当看到这条信息。
+
+非 Windows 平台目前没有等价隔离：`isolation.kind = unsupported`、`applied = false`，权限表只作准入控制。**不要把"只在 Windows 上被限制"当作可以依赖的行为差异**——两边都应该按最小权限写。
 
 ## 8. 完整性与签名（阶段 4 已实现）
 
@@ -308,7 +386,8 @@ base64 -w0 sig.bin
 
 | 能力 | 计划阶段 |
 | --- | --- |
-| 受限令牌 / AppContainer / 容器级隔离 | 后续 |
+| Linux `bwrap`/`unshare -n`、macOS `sandbox-exec` 的等价隔离 | 后续（未实测，当前标 `unsupported`） |
+| 域名白名单 / 只读路径白名单 / CPU·内存限额 | 后续（当前只做「有/无」两档） |
 | 插件市场 / 远程源（目前只支持上传本地 ZIP） | 后续 |
 | 插件市场 / 远程安装源 | 后续 |
 | TypeScript SDK | 后续（协议已跨语言） |

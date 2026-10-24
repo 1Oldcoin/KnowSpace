@@ -1,3 +1,5 @@
+using MyFirstMafAgent.Api.Plugins.Isolation;
+
 namespace MyFirstMafAgent.Api.Options;
 
 /// <summary>
@@ -90,6 +92,42 @@ public sealed class PluginOptions
     /// 避免一个写错单位的插件把任务队列刷爆。
     /// </summary>
     public int MinScheduledSyncIntervalSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// 启动阶段并行拉起的插件数上限。
+    ///
+    /// <para>
+    /// <b>插件数量本身没有上限</b>（扫描时不截断、列表接口不分页、注册表不设配额）；
+    /// 这个值只约束“同时 spawn 多少个进程”。不收敛的话，装了上百个插件时
+    /// 开机会瞬间创建一个百个子进程 + 百次握手，CPU 与句柄都会被打满。
+    /// </para>
+    /// </summary>
+    public int StartupConcurrency { get; set; } = 4;
+
+    /// <summary>
+    /// 每个插件允许多少调用<b>排队</b>（不含正在运行的）。超过就立刻返回 429，而不是让调用方挂到超时。
+    /// 在途上限 = manifest 的 <c>maxConcurrentInvocations</c> + 本值；<c>0</c> 表示没有空闲槽位就拒绝。
+    /// </summary>
+    public int MaxQueuedInvocationsPerPlugin { get; set; } = 16;
+
+    /// <summary>
+    /// 单个能力允许多少调用排队。只对在 <see cref="CapabilityConcurrencyLimits"/> 里配了上限的能力生效
+    /// （没配就没有能力级队列，只有插件级闸门）。
+    /// </summary>
+    public int MaxQueuedInvocationsPerCapability { get; set; } = 8;
+
+    /// <summary>
+    /// 能力级并发上限。键可以是 <c>"&lt;pluginId&gt;/&lt;capabilityId&gt;"</c>（只对某个插件），
+    /// 也可以只是 <c>"&lt;capabilityId&gt;"</c>（对所有同名能力生效，例如 <c>"sync"</c>）。
+    /// 未配置的能力只受插件级并发约束。
+    /// </summary>
+    public Dictionary<string, int> CapabilityConcurrencyLimits { get; set; } = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// 进程隔离。默认 Windows 上强制（AppContainer，无 <c>network</c> 授权就真的不能联网），
+    /// 隔离建不起来时拒绝启动——静默降级等于没有隔离。
+    /// </summary>
+    public PluginIsolationOptions Isolation { get; set; } = new();
 }
 
 /// <summary>受信任的发布者公钥。按 pluginId 前缀匹配（按域名段）。</summary>
