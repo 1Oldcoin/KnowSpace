@@ -1,15 +1,17 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Bell, CircleHelp, Search, Sparkles, X } from 'lucide-vue-next'
-import { assignDocumentTopic, checkApiHealth, checkInStudy, createKnowledgeBase as createKnowledgeBaseApi, createKnowledgeChatSession, createNote as createNoteApi, createTopic as createTopicApi, deleteDocument as deleteDocumentApi, deleteKnowledgeChatSession as deleteKnowledgeChatSessionApi, deleteKnowledgeChatSessions, deleteNote as deleteNoteApi, deleteTopic as deleteTopicApi, downloadDocument, exportKnowledgeChatSession, getAgentInfo, getAppSettings, getStudySummary, listDocuments, listKnowledgeBases, listKnowledgeChatMessages, listKnowledgeChatSessions, listNotes, listTopics, renameKnowledgeChatSession as renameKnowledgeChatSessionApi, retryDocument as retryDocumentApi, saveAppSettings, searchKnowledgeBase, sendKnowledgeChatMessage, setNotePinned as setNotePinnedApi, updateNote as updateNoteApi, updateTopic as updateTopicApi, uploadDocument } from './services/api'
+import { assignDocumentTopic, checkApiHealth, checkInStudy, createKnowledgeBase as createKnowledgeBaseApi, createKnowledgeChatSession, createNote as createNoteApi, createTopic as createTopicApi, deleteDocument as deleteDocumentApi, deleteKnowledgeChatSession as deleteKnowledgeChatSessionApi, deleteKnowledgeChatSessions, deleteNote as deleteNoteApi, deleteTopic as deleteTopicApi, downloadDocument, exportKnowledgeChatSession, getAgentInfo, getAppSettings, getJobCounts, getStudySummary, listDocuments, listKnowledgeBases, listKnowledgeChatMessages, listKnowledgeChatSessions, listNotes, listTopics, renameKnowledgeChatSession as renameKnowledgeChatSessionApi, retryDocument as retryDocumentApi, saveAppSettings, searchKnowledgeBase, sendKnowledgeChatMessage, setNotePinned as setNotePinnedApi, updateNote as updateNoteApi, updateTopic as updateTopicApi, uploadDocument } from './services/api'
 import type { AgentSettings, AppSettings, ChatToolOptions, KnowledgeBase, KnowledgeChatSession, NoteInput, NoteRecord, SaveSettingsPayload, SemanticSearchResult, StudySummary, Topic } from './services/api'
 import { defaultChatToolOptions } from './services/api'
 import AssistantView from './components/AssistantView.vue'
 import AvatarView from './components/AvatarView.vue'
 import CompanionView from './components/CompanionView.vue'
+import JobsView from './components/JobsView.vue'
 import LibraryView from './components/LibraryView.vue'
 import NotesView from './components/NotesView.vue'
 import OverviewView from './components/OverviewView.vue'
+import PluginsView from './components/PluginsView.vue'
 import SearchOverlay from './components/SearchOverlay.vue'
 import SettingsView from './components/SettingsView.vue'
 import SidebarNav from './components/SidebarNav.vue'
@@ -108,14 +110,18 @@ const notesSaving = ref(false)
 const readerDocument = ref<{ id: string; title: string; fileName?: string; extension?: string } | null>(null)
 
 const chatMessages = ref<AssistantMessage[]>([])
-const pageTitle = computed(() => ({ overview: '总览', materials: '我的资料', notes: '学习笔记', assistant: 'AI 知识问答', companions: 'AI 伴侣', avatar: '我的分身', topics: '我的专题', settings: '设置' })[currentView.value])
+const pendingJobCount = ref(0)
+const pageTitle = computed(() => ({ overview: '总览', materials: '我的资料', notes: '学习笔记', assistant: 'AI 知识问答', companions: 'AI 伴侣', avatar: '我的分身', topics: '我的专题', jobs: '任务中心', plugins: '插件', settings: '设置' })[currentView.value])
 const displayName = computed(() => appSettings.value?.preferences.displayName || 'Lin')
 const dailyGoalMinutes = computed(() => appSettings.value?.preferences.dailyGoalMinutes ?? 60)
 const knowledgeBaseNameMap = computed<Record<string, string>>(() =>
   Object.fromEntries(knowledgeBases.value.map(item => [item.id, item.name])))
 
 onMounted(() => {
-  const refreshHealth = async () => { apiOnline.value = await checkApiHealth() }
+  const refreshHealth = async () => {
+    apiOnline.value = await checkApiHealth()
+    void refreshPendingJobs()
+  }
   void refreshHealth()
   void loadKnowledgeBases()
   void loadAppSettings()
@@ -144,6 +150,21 @@ function navigate(view: ViewName) {
   currentView.value = view
   sidebarOpen.value = false
   searchQuery.value = ''
+}
+
+/** 侧栏的任务角标：只关心“还在跑/在排队”的数量，失败与完成不叫人。 */
+async function refreshPendingJobs() {
+  if (!apiOnline.value) {
+    pendingJobCount.value = 0
+    return
+  }
+
+  try {
+    const counts = await getJobCounts()
+    pendingJobCount.value = counts.queued + counts.running
+  } catch {
+    // 角标是辅助信息，失败就保持原值，不弹提示。
+  }
 }
 
 function showToast(message: string) {
@@ -976,6 +997,7 @@ async function exportHistorySession(sessionId: string) {
        :active-topic-id="activeTopicId"
        :material-count="materials.length"
        :note-count="notes.length"
+       :pending-job-count="pendingJobCount"
        :display-name="displayName"
        @navigate="navigate"
        @select-knowledge-base="changeKnowledgeBase"
@@ -1004,6 +1026,8 @@ async function exportHistorySession(sessionId: string) {
         <SettingsView v-else-if="currentView === 'settings'" :settings="appSettings" :api-online="apiOnline" :busy="isSettingsSaving" :loading="isSettingsLoading" :knowledge-base-names="knowledgeBaseNameMap" @save="saveSettings" @reload="loadAppSettings" />
         <AssistantView v-else-if="currentView === 'assistant'" :messages="chatMessages" :busy="isChatBusy || isChatHistoryMutating" :api-online="apiOnline" :sessions="knowledgeChatSessions" :active-session-id="activeKnowledgeChatSessionId" :sessions-loading="isChatHistoryLoading" :tool-options="chatToolOptions" :tools-available="chatToolsAvailable" @send="sendMessage" @new-chat="startNewChat" @select-session="selectKnowledgeChatSession" @rename-session="renameHistorySession" @delete-session="deleteHistorySession" @delete-sessions="deleteSelectedHistorySessions" @export-session="exportHistorySession" @update:tool-options="updateChatToolOptions" />
         <AvatarView v-else-if="currentView === 'avatar'" :api-online="apiOnline" @notice="showToast" />
+        <JobsView v-else-if="currentView === 'jobs'" :api-online="apiOnline" @notice="showToast" @counts="pendingJobCount = $event" />
+        <PluginsView v-else-if="currentView === 'plugins'" :api-online="apiOnline" :knowledge-bases="knowledgeBases" :active-knowledge-base-id="activeKnowledgeBaseId" @notice="showToast" />
         <CompanionView v-else />
       </div>
       <footer v-if="currentView !== 'assistant'" class="page-footer"><span>知间 <span>·</span> 让每一份学习都有迹可循</span><span>本地优先，安心记录 <span class="footer-leaf">✳</span></span></footer>

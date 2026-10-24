@@ -51,7 +51,11 @@ public sealed class PortablePostgresHost : IAsyncDisposable
 
     /// <summary>
     /// 卸载/更新前同步停止便携数据库。安装器删除程序目录时，若 PostgreSQL 子进程仍在运行，
-    /// 会因为文件被占用而残留。此方法不依赖 API 主机，可安全用于 Velopack 卸载钩子。
+    /// 会因为文件被占用而残留。此方法不依赖 API 主机，供安装器/卸载脚本直接调用。
+    /// <para>
+    /// 注意：当前应用内没有调用方（旧的 Velopack 钩子已移除），Electron 安装包的卸载钩子
+    /// 需要重新接上它，见 <c>docs/ROADMAP.md</c>。
+    /// </para>
     /// </summary>
     public static void TryStopForUninstall(string contentRoot)
     {
@@ -114,18 +118,40 @@ public sealed class PortablePostgresHost : IAsyncDisposable
 
     private static string? ResolveExecutableForStop(PortablePostgresOptions options, string contentRoot)
     {
-        var configured = string.IsNullOrWhiteSpace(options.ExecutablePath)
-            ? "ExternalTools/pgSQL/pg0-windows-x86_64.exe"
-            : options.ExecutablePath;
-        var source = Path.IsPathRooted(configured)
-            ? configured
-            : Path.GetFullPath(Path.Combine(contentRoot, configured.Replace('/', Path.DirectorySeparatorChar)));
-
-        if (File.Exists(source)) return source;
+        // 与正常启动走同一条解析链（配置路径 → 按 RID 自动定位），
+        // 否则「升级/卸载时停不掉旧的 pg0」会在非 Windows 平台上静默失效。
+        var resolved = PlatformRuntime.ResolveTool(
+            contentRoot, options.ExecutablePath, Pg0ToolFolder, Pg0BaseName,
+            vendorFileName: PlatformRuntime.Pg0VendorFileName);
+        if (resolved is not null) return resolved;
 
         // 常规运行时 pg0 已被缓存到用户数据目录（安装目录可能已被升级替换）。
-        var cached = Path.Combine(AppPaths.UserDataRoot, "tools", "pg0-windows-x86_64.exe");
-        return File.Exists(cached) ? cached : null;
+        foreach (var cached in CachedExecutableCandidates())
+        {
+            if (File.Exists(cached)) return cached;
+        }
+
+        return null;
+    }
+
+    /// <summary>工具目录（相对内容根）。</summary>
+    private const string Pg0ToolFolder = "ExternalTools/pgSQL";
+
+    /// <summary>不带平台后缀的程序名。</summary>
+    private const string Pg0BaseName = "pg0";
+
+    /// <summary>
+    /// 用户数据目录里的 pg0 缓存路径。
+    /// 第一个是当前平台的规范名；第二个是旧版（只有一个 Windows 包时）写入的文件名，
+    /// 升级上来的机器仍能复用它，不会重复解压 60 MB。
+    /// </summary>
+    private static IEnumerable<string> CachedExecutableCandidates()
+    {
+        var tools = Path.Combine(AppPaths.UserDataRoot, "tools");
+        yield return Path.Combine(tools, $"pg0-{PlatformRuntime.RuntimeIdentifier}{PlatformRuntime.ExecutableSuffix}");
+
+        if (PlatformRuntime.RuntimeIdentifier == "win-x64")
+            yield return Path.Combine(tools, "pg0-windows-x86_64.exe");
     }
 
     /// <summary>
@@ -237,19 +263,10 @@ public sealed class PortablePostgresHost : IAsyncDisposable
         string portableRoot,
         Action<string>? log)
     {
-        var configured = string.IsNullOrWhiteSpace(options.ExecutablePath)
-            ? "ExternalTools/pgSQL/pg0-windows-x86_64.exe"
-            : options.ExecutablePath;
-        var source = Path.IsPathRooted(configured)
-            ? configured
-            : Path.GetFullPath(Path.Combine(contentRoot, configured.Replace('/', Path.DirectorySeparatorChar)));
-
-        if (!File.Exists(source))
-        {
-            throw new FileNotFoundException(
-                $"找不到便携数据库程序：{source}。请确认 ExternalTools/pgSQL/pg0-windows-x86_64.exe 已随应用发布。",
-                source);
-        }
+        var source = PlatformRuntime.ResolveTool(
+                contentRoot, options.ExecutablePath, Pg0ToolFolder, Pg0BaseName, log,
+                PlatformRuntime.Pg0VendorFileName)
+            ?? throw new FileNotFoundException(BuildMissingExecutableMessage(contentRoot, options), options.ExecutablePath);
 
         // pg0 启动的 postgres.exe 会继承工作目录，而 pg0 自身也会在 exe 同目录写入运行文件。
         // 如果直接使用程序目录里的 pg0：
@@ -257,20 +274,30 @@ public sealed class PortablePostgresHost : IAsyncDisposable
         //   2. postgres 子进程会锁住安装目录，导致升级/卸载时报“拒绝访问”。
         // 因此统一把 pg0 复制到用户数据目录（纯 ASCII、可写）后再运行。
         var cacheDirectory = Path.Combine(portableRoot, "tools");
-        if (IsUnder(source, cacheDirectory)) return source;
-        if (!options.CacheExecutableInLocalAppData) return source;
+        if (IsUnder(source, cacheDirectory))
+        {
+            PlatformRuntime.EnsureExecutable(source);
+            return source;
+        }
 
-        var createError = TryCreateWritableDirectory(cacheDirectory);
-        if (createError is not null)
+        if (!options.CacheExecutableInLocalAppData)
+        {
+            PlatformRuntime.EnsureExecutable(source);
+            return source;
+        }
+
+        var cacheError = TryCreateWritableDirectory(cacheDirectory);
+        if (cacheError is not null)
         {
             throw new InvalidOperationException(
                 $"应用安装路径包含非 ASCII 字符（{source}），pg0 无法在该路径下运行，"
-                + $"且无法建立缓存目录 {cacheDirectory}（{createError}）。"
+                + $"且无法建立缓存目录 {cacheDirectory}（{cacheError}）。"
                 + AppPaths.BuildLocationAdvice() + "。"
                 + "也可以改用外部 PostgreSQL（配置 ConnectionStrings:KnowledgeBase）。");
         }
 
-        var target = Path.Combine(cacheDirectory, "pg0-windows-x86_64.exe");
+        var target = Path.Combine(
+            cacheDirectory, $"pg0-{PlatformRuntime.RuntimeIdentifier}{PlatformRuntime.ExecutableSuffix}");
         var sourceInfo = new FileInfo(source);
 
         if (!File.Exists(target)
@@ -284,6 +311,8 @@ public sealed class PortablePostgresHost : IAsyncDisposable
                 // File.Copy 会立刻抛 UnauthorizedAccessException，稍后重试通常可成功。
                 CopyWithRetry(source, temp, log);
                 File.Move(temp, target, overwrite: true);
+                // Unix 上复制会丢掉 +x 位，不补上的话 Process.Start 直接 Permission denied。
+                PlatformRuntime.EnsureExecutable(target);
                 log?.Invoke($"已将 pg0 缓存到 {target}。");
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
@@ -300,6 +329,35 @@ public sealed class PortablePostgresHost : IAsyncDisposable
         }
 
         return target;
+    }
+
+    /// <summary>
+    /// 缺少 pg0 时的报错文案。
+    ///
+    /// <para>
+    /// 这里必须写出「当前平台 + 应该放哪个文件 + 去哪里下载」，
+    /// 否则跨平台发布的包一旦漏了二进制，用户只会看到
+    /// “找不到便携数据库程序”，完全不知道要补什么。
+    /// </para>
+    /// </summary>
+    private static string BuildMissingExecutableMessage(string contentRoot, PortablePostgresOptions options)
+    {
+        var candidates = PlatformRuntime.ToolCandidates(Pg0ToolFolder, Pg0BaseName, PlatformRuntime.Pg0VendorFileName)
+            .Select(relative => "  - " + PlatformRuntime.ToAbsolute(contentRoot, relative));
+
+        var configured = string.IsNullOrWhiteSpace(options.ExecutablePath)
+            ? "（未配置，按当前平台自动定位）"
+            : $"（配置值：{options.ExecutablePath}）";
+
+        var vendorHint = PlatformRuntime.Pg0VendorFileName is { } vendorName
+            ? $"下载 {vendorName} 后直接放到 {Pg0ToolFolder}/{PlatformRuntime.RuntimeIdentifier}/ （不用改名）"
+            : $"上游暂无 {PlatformRuntime.RuntimeIdentifier} 的发行包，请改用外部 PostgreSQL";
+
+        return
+            $"找不到便携数据库程序：当前平台 {PlatformRuntime.Describe()}（RID {PlatformRuntime.RuntimeIdentifier}）。"
+            + "已尝试：" + Environment.NewLine + string.Join(Environment.NewLine, candidates) + Environment.NewLine
+            + $"请从 {PlatformRuntime.Pg0ReleasesUrl} {vendorHint}{configured}；"
+            + "也可以用 ConnectionStrings__KnowledgeBase 指向已有 PostgreSQL（容器部署推荐这种方式）。";
     }
 
     private static void CopyWithRetry(string source, string target, Action<string>? log)

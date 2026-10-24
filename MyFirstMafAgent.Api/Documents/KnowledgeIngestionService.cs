@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using DocumentFormat.OpenXml.Packaging;
 using Microsoft.Extensions.Options;
 using MyFirstMafAgent.Api.Application.Knowledge;
+using MyFirstMafAgent.Api.Infrastructure;
 using MyFirstMafAgent.Api.Models;
 using MyFirstMafAgent.Api.Options;
 using MyFirstMafAgent.Api.Persistence;
@@ -50,6 +51,62 @@ public sealed class KnowledgeIngestionService(
         return new DocumentUploadResponse(stored.Id.ToString(), stored.FileName, stored.Extension, stored.SizeBytes, "Queued");
     }
 
+    /// <summary>
+    /// 用新内容替换已有资料的源文件并重新排队解析。
+    ///
+    /// <para>
+    /// 复用既有链路：Worker 重新解析后由 <c>PublishChunksAsync</c> 生成新的内容版本，
+    /// 旧版本标记为 Superseded，索引生命周期据此增量更新。资料 ID 保持不变，
+    /// 因此外部的 <c>externalId → documentId</c> 映射不会断。
+    /// </para>
+    ///
+    /// <para>返回 false 表示资料正在排队/处理中，调用方应稍后重试而不是覆盖。</para>
+    /// </summary>
+    public async Task<bool> ReplaceAsync(
+        Guid documentId,
+        IFormFile file,
+        Guid knowledgeBaseId,
+        CancellationToken cancellationToken)
+    {
+        if (await knowledgeBase.GetDocumentKnowledgeBaseIdAsync(documentId, cancellationToken) is not { } existingKnowledgeBase)
+            throw new ArgumentException($"Document '{documentId}' does not exist.", nameof(documentId));
+
+        if (existingKnowledgeBase != knowledgeBaseId)
+            throw new ArgumentException(
+                $"Document '{documentId}' belongs to knowledge base '{existingKnowledgeBase}', not '{knowledgeBaseId}'.",
+                nameof(knowledgeBaseId));
+
+        var previousPath = await knowledgeBase.GetDocumentStoragePathAsync(documentId, cancellationToken);
+        var stored = await documentStore.SaveAsync(file, knowledgeBaseId, cancellationToken);
+
+        var replaced = await knowledgeBase.ReplaceDocumentSourceAsync(
+            documentId,
+            stored.Path,
+            stored.FileName,
+            stored.ContentType,
+            stored.SizeBytes,
+            cancellationToken);
+
+        if (!replaced)
+        {
+            // 资料正在处理中：丢弃刚写入的新文件，让下次同步重试。
+            documentStore.DeleteStoredFile(stored.Path);
+            return false;
+        }
+
+        if (!string.IsNullOrWhiteSpace(previousPath)
+            && !string.Equals(previousPath, stored.Path, StringComparison.OrdinalIgnoreCase))
+        {
+            documentStore.DeleteStoredFile(previousPath);
+        }
+
+        logger.LogInformation(
+            "Replaced source of document {DocumentId} in knowledge base {KnowledgeBaseId}, {FileName}, {FileSizeBytes} bytes",
+            documentId, knowledgeBaseId, stored.FileName, stored.SizeBytes);
+
+        return true;
+    }
+
     public async Task ProcessAsync(QueuedDocument file, CancellationToken cancellationToken)
     {
         try
@@ -68,9 +125,23 @@ public sealed class KnowledgeIngestionService(
                     throw new InvalidOperationException("视频中没有可用于总结的语音或关键画面内容。");
 
                 await knowledgeBase.UpdateDocumentProgressAsync(file.Id, 65, "生成视频摘要", cancellationToken);
-                var summary = await SummarizeVideoAsync(summarySource, cancellationToken);
-                await knowledgeBase.SetDocumentSummaryAsync(file.Id, summary, cancellationToken);
-                text = $"视频摘要：\n{summary}\n\n{summarySource}";
+                // 摘要是"锦上添花"：它需要聊天模型，离线环境配不到。
+                // 之前这里任其抛出，结果明明已经转写成功的字幕被一起丢掉，整篇资料变成 Failed。
+                var summary = string.Empty;
+                try
+                {
+                    summary = await SummarizeVideoAsync(summarySource, cancellationToken);
+                    await knowledgeBase.SetDocumentSummaryAsync(file.Id, summary, cancellationToken);
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    logger.LogWarning(exception,
+                        "Video summary skipped for {DocumentId}; publishing transcript only", file.Id);
+                }
+
+                text = string.IsNullOrWhiteSpace(summary)
+                    ? $"视频转写：\n{summarySource}"
+                    : $"视频摘要：\n{summary}\n\n{summarySource}";
             }
             else
             {
@@ -218,11 +289,31 @@ public sealed class KnowledgeIngestionService(
         return $"{totalSeconds / 3600:00}:{totalSeconds % 3600 / 60:00}:{totalSeconds % 60:00}";
     }
 
+    /// <summary>
+    /// 定位 ffmpeg。
+    ///
+    /// <para>
+    /// 优先用配置的路径；配置为空或文件不存在时按当前平台自动找
+    /// （<c>ExternalTools/ffmpeg/{rid}/ffmpeg[.exe]</c> 等）；
+    /// 最后回落到裸命令 <c>ffmpeg</c> 交给 PATH —— 容器镜像里 ffmpeg 通常由包管理器安装，
+    /// 没必要再随包分发一份 100 MB 的副本。
+    /// </para>
+    /// </summary>
     private string GetFfmpegPath(string ffmpegPath)
     {
-        if (!Path.IsPathRooted(ffmpegPath) && (ffmpegPath.Contains('/') || ffmpegPath.Contains('\\')))
-            return Path.GetFullPath(Path.Combine(environment.ContentRootPath, ffmpegPath));
-        return ffmpegPath;
+        var resolved = PlatformRuntime.ResolveTool(
+            environment.ContentRootPath, ffmpegPath, "ExternalTools/ffmpeg", "ffmpeg");
+        if (resolved is not null) return resolved;
+
+        // 明确配置了一个不存在的绝对/相对路径时按原值返回，让真正的启动失败带上原始配置，
+        // 而不是被静默改成 PATH 查找。
+        if (!string.IsNullOrWhiteSpace(ffmpegPath)
+            && (Path.IsPathRooted(ffmpegPath) || ffmpegPath.Contains('/') || ffmpegPath.Contains('\\')))
+        {
+            return PlatformRuntime.ToAbsolute(environment.ContentRootPath, ffmpegPath);
+        }
+
+        return PlatformRuntime.WithSuffix("ffmpeg");
     }
 
     private static async Task RunProcessAsync(string executable, IReadOnlyList<string> arguments, CancellationToken cancellationToken)

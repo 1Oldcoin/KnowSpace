@@ -1,0 +1,60 @@
+{
+  "schemaVersion": "1.0",
+  "id": "com.example.sample-platform",
+  "name": "示例平台连接器",
+  "version": "1.0.0",
+  "publisher": "MyFirstMafAgent Samples",
+  "description": "用于验证插件协议的假平台：提供一个平台同步能力和一个 Agent 工具。",
+  "entry": {
+    "command": "MyFirstMafAgent.Plugin.SamplePlatform.exe",
+    "arguments": []
+  },
+  "runtime": "dotnet",
+  "protocol": {
+    "minVersion": "1.0.0",
+    "maxVersion": "1.0.999"
+  },
+  "capabilities": [
+    {
+      "id": "platform.notes.sync",
+      "kind": "platform-connector",
+      "name": "同步示例笔记",
+      "description": "返回两条假平台笔记，用于验证摄取链路。",
+      "permissions": ["network"],
+      "sideEffect": "read"
+    },
+    {
+      "id": "notes.search",
+      "kind": "agent-tool",
+      "name": "示例笔记搜索",
+      "description": "在假平台笔记中按关键词检索标题。",
+      "parameters": "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"关键词\"},\"maxResults\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":20,\"default\":5}},\"required\":[\"query\"],\"additionalProperties\":false}",
+      "permissions": ["network"],
+      "sideEffect": "read"
+    },
+    {
+      "id": "notes.slow-echo",
+      "kind": "agent-tool",
+      "name": "慢回显（升级排空验证用）",
+      "description": "等一会儿再返回，用于验证升级时的排空行为。",
+      "parameters": "{\"type\":\"object\",\"properties\":{\"delayMs\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":10000,\"default\":2000}},\"required\":[],\"additionalProperties\":false}",
+      "permissions": [],
+      "sideEffect": "read"
+    }
+  ],
+  "config": {
+    "schema": "{\"type\":\"object\",\"properties\":{\"workspace\":{\"type\":\"string\",\"description\":\"平台工作区名称\"},\"contentVersion\":{\"type\":\"string\",\"description\":\"模拟平台内容版本，改它即表示笔记被编辑\"},\"retractNote\":{\"type\":\"string\",\"description\":\"要模拟撤回的 externalId\"},\"syncIntervalSeconds\":{\"type\":\"integer\",\"description\":\"告诉核心多久后再同步（秒），0 表示不自动同步\"}},\"required\":[],\"additionalProperties\":false}",
+    "required": []
+  },
+  "healthCheck": {
+    "intervalSeconds": 30,
+    "timeoutMs": 5000
+  },
+  "limits": {
+    "maxMemoryMb": 256,
+    "maxConcurrentInvocations": 2,
+    "invocationTimeoutMs": 15000,
+    "maxRequestBytes": 262144,
+    "maxRetries": 0
+  }
+}

@@ -1,0 +1,64 @@
+# electron-builder 打包配置（阶段 10）。
+#
+# 分工：
+#   1. scripts/Publish-Portable.ps1 -Target desktop  → publish/desktop（.NET API 本体）
+#   2. 本文件                                        → publish/releases（NSIS 安装包）
+#
+# 壳只打包 main.js / preload.js / package.json；后端整份目录通过 extraResources
+# 原样放到 <安装目录>\resources\api，由 main.js 的 process.resourcesPath/api 拉起，
+# 因此后端文件不会被塞进 asar（asar 里的 exe 无法直接启动）。
+appId: com.myfirstmafagent.desktop
+productName: MyFirstMafAgent
+copyright: Copyright © 2026 MyFirstMafAgent
+
+directories:
+  output: ../publish/releases
+  buildResources: build
+
+files:
+  - main.js
+  - preload.js
+  - updater.js
+  - package.json
+
+extraResources:
+  - from: ../publish/desktop
+    to: api
+
+asar: true
+
+# 自动更新发布源（P0-3）。
+#
+# 这里写的是一个**占位地址**，作用是让 electron-builder 生成 latest.yml
+# 并在 resources/app-update.yml 里写入 provider 信息。
+# 运行时优先级（见 updater.js）：
+#   1. 环境变量 MAF_UPDATE_URL
+#   2. 用户数据目录 update-feed.json 里的 { "url": "..." }
+#   3. 本文件里的默认值
+# 因此同一个安装包可以指向 GitHub Releases、自建静态目录或内网发布点。
+publish:
+  provider: generic
+  url: https://updates.invalid/myfirstmafagent
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: ../assets/app.ico
+  artifactName: ${productName}-${version}-${arch}-setup.${ext}
+
+nsis:
+  # 交互式安装向导（不用 oneClick）：用户可改安装目录、能看到进度。
+  oneClick: false
+  perMachine: false
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: 知间
+  # 卸载/升级前先停便携数据库，否则 postgres.exe 会锁住安装目录。
+  include: build/installer.nsh
+  # 用户数据在 %LOCALAPPDATA%\MyFirstMafAgentData，绝不能随卸载删除。
+  deleteAppDataOnUninstall: false
+  artifactName: ${productName}-${version}-setup.${ext}

@@ -9,7 +9,7 @@
 
 | 项目 | 事实 | 验证方式 |
 | --- | --- | --- |
-| 组合根 | `ApiHost.BuildAsync` 统一承载 API、静态文件、后台服务、MCP 与便携 PostgreSQL；控制台与 Photino 桌面共用 | 阅读 `MyFirstMafAgent.Api/ApiHost.cs` 与 `Hosting/` |
+| 组合根 | `ApiHost.BuildAsync` 统一承载 API、静态文件、后台服务、MCP 与便携 PostgreSQL；控制台与 Electron sidecar 共用 | 阅读 `MyFirstMafAgent.Api/ApiHost.cs` 与 `Hosting/` |
 | Worker 隔离 | `BackgroundLoop.RunIsolatedAsync` 是 SqlSugar AsyncLocal 连接不共享的前提 | 真实宿主运行，检索日志中 `NpgsqlOperationInProgressException` 为 0 |
 | 向量检索 | 查询为 `ORDER BY embedding <=> ...`（`PgVectorSql.BuildIndexSearchSql`），仓库代码**没有** HNSW/IVFFlat 索引声明 | `scripts/Measure-VectorIndex.ps1` |
 | 向量维度 | `kb_index_vectors.embedding` 是无维度 `vector`，允许不同规格共存；ANN 索引要求固定维度 | 探针中的 `vector_dims` 分组结果 |
@@ -89,7 +89,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Measure-VectorIndex.
 | `ElectronNET.Core` | `0.6.0`（预览重写版） | 不作为基线：版本过早期，缺少可验证的 .NET 10 打包路径 |
 | `ElectronNET.API` | `23.6.2` | 不作为基线：绑定 Electron 23，与本机 Node/Electron 基线差距过大 |
 
-**决定：启用 sidecar 备选方案**（`desktop-electron/`）。API 保持进程内 Kestrel 随机回环端口，Electron 主进程只负责窗口与子进程生命周期；控制台与 Photino 入口继续可启动，作为回滚路径。
+**决定：启用 sidecar 备选方案**（`desktop-electron/`）。API 保持进程内 Kestrel 随机回环端口，Electron 主进程只负责窗口与子进程生命周期；控制台入口保留为调试/无界面入口。
 
 ### 4.2 验证清单
 
@@ -99,14 +99,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Measure-VectorIndex.
 - [x] ready 文件契约只含 `url`/`pid`，且为原子替换写入。
 - [x] 退出顺序：`POST /api/desktop/shutdown` → 等待 API 退出 → 由 `ApplicationStopping` 停止本次启动的 pg0；外部 PostgreSQL 不受影响。
 - [x] Renderer：`contextIsolation=true`、`nodeIntegration=false`、`sandbox=true`、严格 CSP 响应头；外链与 `window.open` 受限。
-- [x] 回滚路径保留：控制台入口与 Photino 桌面仍可启动。
-- [ ] 真实 Windows 安装环境下的窗口显示、覆盖升级、卸载保留数据（需要安装包验证）。
-- [ ] ONNX / Whisper / FFmpeg 原生依赖在 Electron 打包产物中加载（依赖 4.3 的打包验证）。
+- [x] 回滚路径保留：控制台入口可独立启动（**变更**：Photino 桌面壳与 Velopack 打包已按阶段 9 要求整工程删除，桌面端只保留 Electron）。
+- [x] 真实 Windows 安装环境下的窗口显示与卸载保留数据（阶段 10：NSIS 安装包静默安装 → 启动 → 强杀进程留下 pg0 → 静默卸载，安装目录清空、`postgres.exe` 归零、`%LOCALAPPDATA%\MyFirstMafAgentData` 完整保留）。
+- [ ] 覆盖升级（依赖 electron-updater，见 `docs/ROADMAP.md` P0-3）。
+- [x] ONNX / Whisper / FFmpeg 原生依赖在 Electron 打包产物中加载（阶段 10 实测：安装后跑资料导入 → `Ready` + 4 个分块，日志有 `Creating embedding generator ... onnx-local/bge-small-zh-v1.5`；用包内 `ExternalTools\ffmpeg\ffmpeg.exe` 生成视频并上传，转写阶段跑通。详见 `docs/ROADMAP.md` P0-4）。
 
 ### 4.3 仍需在真实安装环境验证
 
 1. `npm install && npm start`（`desktop-electron/`）后窗口正常渲染、无控制台 CSP 报错。
-2. 安装 → 覆盖升级 → 卸载：`%LOCALAPPDATA%\MyFirstMafAgentData` 中的数据、模型、上传文件保持不变。
+2. 安装 → 覆盖升级 → 卸载：`%LOCALAPPDATA%\MyFirstMafAgentData` 中的数据、模型、上传文件保持不变（安装/卸载已验，覆盖升级待 P0-3）。
 3. 升级期间旧版本 API 进程能被正确排空（当前实现为 shutdown + 20s 超时后强制结束）。
 
 自动化契约检查（不需要 Electron）：

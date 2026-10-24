@@ -20,6 +20,7 @@ public static class DocumentsChatsModule
         services.AddSingleton<ChatHistoryParser>();
         services.AddSingleton<LocalDocumentStore>();
         services.AddSingleton<ResumableUploadService>();
+        services.AddSingleton<WhisperModelManager>();
         services.AddSingleton<WhisperTranscriptionService>();
 
         services.AddScoped<KnowledgeChatService>();

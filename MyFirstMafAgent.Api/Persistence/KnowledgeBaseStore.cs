@@ -140,6 +140,57 @@ public sealed class KnowledgeBaseStore(SqlSugarScope database) : IDocumentIndexS
         return paths.Count == 0 ? null : paths[0];
     }
 
+    /// <summary>读取资料所属知识库；不存在返回 null。用于"按知识库范围授权"的判定。</summary>
+    public async Task<Guid?> GetDocumentKnowledgeBaseIdAsync(Guid id, CancellationToken cancellationToken)
+    {
+        var rows = await database.Queryable<KnowledgeDocumentSchemaEntity>()
+            .Where(document => document.Id == id)
+            .Select(document => document.KnowledgeBaseId)
+            .Take(1)
+            .ToListAsync(cancellationToken);
+        return rows.Count == 0 ? null : rows[0];
+    }
+
+    /// <summary>
+    /// 替换资料的源文件并重新排队解析。
+    ///
+    /// <para>
+    /// 只接受 Ready/Failed 状态的资料：正在 Queued/Processing 时替换源文件，
+    /// 会让 Worker 手上的旧路径失效（文件已被删除），导致处理失败。
+    /// 返回 false 表示"稍后再试"，由调用方保留旧哈希，下次同步重新判定。
+    /// </para>
+    /// </summary>
+    public async Task<bool> ReplaceDocumentSourceAsync(
+        Guid id,
+        string storagePath,
+        string fileName,
+        string contentType,
+        long sizeBytes,
+        CancellationToken cancellationToken)
+    {
+        var updated = await database.Updateable<KnowledgeDocumentSchemaEntity>()
+            .SetColumns(document => new KnowledgeDocumentSchemaEntity
+            {
+                StoragePath = storagePath,
+                FileName = fileName,
+                ContentType = contentType,
+                SizeBytes = sizeBytes,
+                Status = QueuedStatus,
+                Progress = 0,
+                ProcessingStage = QueuedStage,
+                Error = null,
+                // 旧摘要已过期；Worker 重新解析后会重新生成。
+                Summary = null,
+                UpdatedAt = SqlFunc.GetDate()
+            })
+            .Where(document => document.Id == id
+                && document.Status != QueuedStatus
+                && document.Status != ProcessingStatus)
+            .ExecuteCommandAsync(cancellationToken);
+
+        return updated > 0;
+    }
+
     public async Task<string?> DeleteDocumentAsync(Guid id, CancellationToken cancellationToken)
     {
         await database.Ado.BeginTranAsync();
@@ -335,6 +386,72 @@ public sealed class KnowledgeBaseStore(SqlSugarScope database) : IDocumentIndexS
 
         return new QueuedDocument(candidate.Id, candidate.KnowledgeBaseId, candidate.FileName, candidate.Extension,
             candidate.ContentType, candidate.SizeBytes, candidate.StoragePath);
+    }
+
+    /// <summary>
+    /// 按 ID 抢占指定资料（<c>Queued → Processing</c>）。
+    ///
+    /// <para>
+    /// 与 <see cref="TryClaimQueuedDocumentAsync"/> 的区别是"指定目标"而不是"随便一篇"：
+    /// 任务系统是按资料 ID 派活的，抢占失败必须明确返回 null，让任务可以判定为
+    /// 「已在别处处理」而不是「随便捡了另一篇」。
+    /// </para>
+    /// </summary>
+    public async Task<QueuedDocument?> TryClaimDocumentAsync(Guid documentId, CancellationToken cancellationToken)
+    {
+        var candidate = await database.Queryable<KnowledgeDocumentSchemaEntity>()
+            .Where(document => document.Id == documentId && document.Status == QueuedStatus)
+            .FirstAsync(cancellationToken);
+        if (candidate is null) return null;
+
+        var claimed = await database.Updateable<KnowledgeDocumentSchemaEntity>()
+            .SetColumns(document => new KnowledgeDocumentSchemaEntity
+            {
+                Status = ProcessingStatus,
+                Progress = 1,
+                ProcessingStage = StartingStage,
+                Error = null,
+                UpdatedAt = SqlFunc.GetDate()
+            })
+            .Where(document => document.Id == documentId && document.Status == QueuedStatus)
+            .ExecuteCommandAsync(cancellationToken);
+        if (claimed == 0) return null;
+
+        return new QueuedDocument(candidate.Id, candidate.KnowledgeBaseId, candidate.FileName, candidate.Extension,
+            candidate.ContentType, candidate.SizeBytes, candidate.StoragePath);
+    }
+
+    /// <summary>
+    /// 把资料放回排队状态，供失败重试使用。
+    /// 不清空内容版本：重新解析成功后会发布新版本，旧版本按 Superseded 清理。
+    /// </summary>
+    public async Task ResetDocumentToQueuedAsync(Guid documentId, CancellationToken cancellationToken)
+    {
+        await database.Updateable<KnowledgeDocumentSchemaEntity>()
+            .SetColumns(document => new KnowledgeDocumentSchemaEntity
+            {
+                Status = QueuedStatus,
+                Progress = 0,
+                ProcessingStage = WaitingStage,
+                Error = null,
+                UpdatedAt = SqlFunc.GetDate()
+            })
+            .Where(document => document.Id == documentId)
+            .ExecuteCommandAsync(cancellationToken);
+    }
+
+    /// <summary>列出仍处于排队状态的资料，供任务系统补投（带上 UpdatedAt，用于判断“是用户重新排的队”）。</summary>
+    public async Task<IReadOnlyList<QueuedDocumentEntry>> ListQueuedDocumentIdsAsync(
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        var rows = await database.Queryable<KnowledgeDocumentSchemaEntity>()
+            .Where(document => document.Status == QueuedStatus)
+            .OrderBy(document => document.CreatedAt, OrderByType.Asc)
+            .Take(Math.Clamp(limit, 1, 500))
+            .ToListAsync(cancellationToken);
+
+        return rows.Select(row => new QueuedDocumentEntry(row.Id, row.KnowledgeBaseId, row.UpdatedAt)).ToList();
     }
 
     public async Task<IReadOnlyList<KnowledgeBaseInfo>> ListKnowledgeBasesAsync(CancellationToken cancellationToken)
@@ -877,6 +994,9 @@ public sealed record UploadSession(Guid Id, Guid KnowledgeBaseId, string FileNam
     long SizeBytes, long UploadedBytes, string StagingPath, string Status, Guid? DocumentId);
 public sealed record QueuedDocument(Guid Id, Guid KnowledgeBaseId, string FileName, string Extension, string ContentType,
     long SizeBytes, string StoragePath);
+
+/// <summary>排队资料的补投信息：<c>UpdatedAt</c> 用来判断它是不是“任务结束之后又被重新排队”的。</summary>
+public sealed record QueuedDocumentEntry(Guid DocumentId, Guid KnowledgeBaseId, DateTimeOffset UpdatedAt);
 public sealed record DocumentListItem(Guid Id, string FileName, string Extension, string ContentType, long SizeBytes,
     string Status, string? Error, DateTimeOffset CreatedAt, long ChunkCount, string? Summary, int Progress, string? ProcessingStage,
     Guid? TopicId = null);

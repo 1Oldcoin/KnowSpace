@@ -1,0 +1,380 @@
+# 插件生命周期与安全（阶段 4–5 口径）
+
+本文只写**已经实现并验证**的行为。未实现的项集中在最后一节，避免按未实现的行为开发。
+
+## 1. 两层状态
+
+| 层 | 内容 | 存放位置 | 重启后 |
+| --- | --- | --- | --- |
+| 用户意图 | 是否启用、配置、已授予权限 | 数据库 `plugin_installations` | 保留 |
+| 文件布局 | 已安装哪些版本、当前生效版本 | `plugins/{id}/versions/*` + `active.json` | 保留 |
+| 运行时 | 进程、健康、最后错误 | 内存 | 重新发现 |
+
+"装了什么"由目录决定，"希望它怎样"由数据库决定，二者不再混在一起。
+
+## 2. 目录布局
+
+```
+plugins/
+  com.example.notes/
+    active.json                 {"version":"1.0.1","previous":"1.0.0"}
+    versions/
+      1.0.1/                    manifest.json + 入口文件（一个完整包）
+      1.0.0/
+  .data/com.example.notes/      插件唯一可写目录（MYFIRSTMAFAGENT_PLUGIN_DATA）
+  .staging/                     安装临时目录，成功/失败都会清理
+```
+
+- 升级与回滚都是"改 `active.json` + 重启进程"，不原地覆盖文件——Windows 上运行中的 exe 删不掉。
+- 阶段 3 的扁平布局（`plugins/{id}/manifest.json` 直接放包内容）仍然可读，`ActiveVersion` 为 `null`，`InstalledVersions` 为空。
+- `Plugins:KeepVersions`（默认 3）控制保留的历史版本数，当前生效版本永不删除。
+
+## 3. 启动四道闸门
+
+`PluginManager.StartSafelyAsync` 顺序固定，任一不满足都不会拉起进程：
+
+| 顺序 | 闸门 | 不满足时的状态 |
+| --- | --- | --- |
+| 1 | 用户启用（`enabled` 且不在 `Plugins:EnabledPluginIds` 之外） | `Disabled` |
+| 2 | 完整性：摘要/签名符合 `Plugins:IntegrityPolicy` | `Failed`（并记 `integrity-rejected` 审计） |
+| 3 | manifest `config.required` 中的字段都已填写 | `NeedsConfiguration` |
+| 4 | manifest 声明的权限都已授予（或 `AutoGrantPermissions=true`） | `PermissionRequired` |
+
+启动成功后握手并下发 `plugin/configure`；插件拒绝配置视为启动失败——半个配置的插件比不启动更危险。
+
+## 4. 完整性校验
+
+策略 `Plugins:IntegrityPolicy`：
+
+| 值 | 行为 |
+| --- | --- |
+| `off` | 完全不校验（不计算摘要） |
+| `warn`（默认） | 有问题只写警告，仍允许启动/安装 |
+| `enforce` | 必须提供 `sha256` 与 `signature`，任一不符即拒绝 |
+
+**摘要算法（插件作者必须照做）**：
+
+1. 取包目录下所有普通文件，**排除** `manifest.json`、`active.json` 与任何以 `.` 开头的目录（`.data`、`.staging`）。
+2. 按相对路径（`/` 分隔、大小写敏感、Ordinal 排序）排序。
+3. 依次写入：UTF-8 相对路径、`\0`、UTF-8 十进制字节数、`\0`、文件内容。
+4. 取 SHA-256，小写十六进制。
+
+`manifest.json` 不参与摘要（摘要写在它里面，包含它会自引用）；manifest 本身的身份由签名与运行期握手校验（id/version/能力）共同保证。
+
+**签名**：`integrity.signature` 是对上述十六进制**字符串的 UTF-8 字节**做 SHA-256 签名，Base64 编码。支持：
+
+- `ecdsa-p256`（P1363 与 DER 两种编码都接受，openssl 默认 DER）
+- `rsa`（PKCS#1 v1.5）
+
+受信任公钥来自配置：
+
+```json
+"Plugins": {
+  "IntegrityPolicy": "enforce",
+  "TrustedPublisherKeys": [
+    { "PluginId": "com.example", "Algorithm": "ecdsa-p256", "PublicKeyPem": "-----BEGIN PUBLIC KEY-----\n..." }
+  ]
+}
+```
+
+`PluginId` 按域名段匹配：`com.example` 覆盖 `com.example.notes`，但不覆盖 `com.exampleevil.notes`；多个匹配取最长前缀。
+
+## 5. 权限
+
+- manifest 的 `capabilities[].permissions` 是**声明**；实际可用集合是"声明 ∩ 已授予"。
+- 默认 `AutoGrantPermissions=false`：声明了 `network`/`file-read`/`file-write`/`clipboard`/`process` 的插件会停在 `PermissionRequired`，必须显式授权。
+- 授权只能授予插件声明过的权限；授予未声明的权限会被拒绝（防止后续升级偷偷提权）。
+- 权限是**声明与授权**机制，不是内核级强制；真正的强制隔离需要受限令牌/容器（未实现）。
+
+## 6. 副作用与确认
+
+| sideEffect | 需要确认 | 是否桥接给模型 |
+| --- | --- | --- |
+| `read` | 否 | 是 |
+| `write-local` | 否 | 是 |
+| `write-external` | 是 | **否** |
+| `destructive` | 是 | **否** |
+
+`Plugins:RequireConfirmationForSideEffects=true`（默认）时：
+- 需要确认的能力不会出现在 `/api/agent/tools` 里——模型无法提供确认信息，暴露它等于绕过确认。
+- 直接调用必须带 `"confirm": true`，否则返回 403。
+
+`platform-connector` 永远不桥接给模型，只能经 `/api/plugins/{id}/sync` 使用；`/sync` 是用户主动触发的管理动作，因此按「已确认」处理，但摄取结果仍然必须走核心摄取用例。
+
+## 7. 端点
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/plugins` | 全部插件：状态、版本、健康、已授予/缺失权限、完整性、是否已配置 |
+| GET | `/api/plugins/{id}` | 单个插件（含 manifest 声明的能力详情） |
+| POST | `/api/plugins/{id}/health` | 主动健康检查 |
+| POST | `/api/plugins/{id}/invoke` | `{ capabilityId, arguments, confirm? }` |
+| POST | `/api/plugins/{id}/sync` | `{ capabilityId, knowledgeBaseId?, cursor? }`；未传 `cursor` 时用持久化游标 |
+| GET | `/api/plugins/{id}/items?knowledgeBaseId=&limit=` | 平台条目映射（含墓碑状态与对应资料 ID） |
+| GET | `/api/plugins/{id}/sync-state` | 每个 `插件×能力×知识库` 的游标与上次同步结果 |
+| POST | `/api/plugins/{id}/enabled` | `{ enabled }`，停用会停进程，启用会重走四道闸门 |
+| PUT | `/api/plugins/{id}/config` | `{ config: {...} }`，按 manifest 的 JSON Schema 校验后重启；缺 `config` 字段返回 400 |
+| PUT | `/api/plugins/{id}/permissions` | `{ permissions: ["network"] }`，完整集合而非增量 |
+| PUT | `/api/plugins/{id}/scope` | `{ allowedKnowledgeBaseIds: [], maxDocuments: 0 }`，空数组=不限制，0=跟随全局默认 |
+| POST | `/api/plugins/{id}/restart` | 手动重启 |
+| POST | `/api/plugins/install` | `multipart/form-data` 上传 ZIP，安装后立刻尝试启动 |
+| POST | `/api/plugins/{id}/rollback` | 切回 `active.json` 的 `previous`，启动失败自动切回 |
+| DELETE | `/api/plugins/{id}` | 卸载：停进程、删版本与数据目录、删安装记录 |
+| GET | `/api/plugins/{id}/audit?limit=` | 单个插件审计（时间倒序） |
+| GET | `/api/plugins/audit?pluginId=&limit=` | 全局审计 |
+
+## 8. 审计
+
+表 `plugin_audit_events`，动作：`install`、`uninstall`、`rollback`、`enable`、`disable`、`start`、`stop`、`configure`、`grant`、`scope`、`invoke`、`sync`、`health`、`integrity-rejected`。
+
+- 记录：时间、插件、动作、能力、发起者（`api` / `agent` / `system`）、结果（`success` / `failure` / `denied` / `cancelled`）、耗时、说明。
+- 入参摘要会自动**脱敏**（键名含 key/token/secret/password/credential/authorization/cookie 一律替换为 `***`），并截断到 2000 字符。
+- 审计写入失败只写日志，**不**阻断业务调用；卸载不会删除历史审计（审计是追加式记录）。
+
+## 9. 配置项
+
+```json
+"Plugins": {
+  "Enabled": true,
+  "RootPath": "App_Data/plugins",
+  "EnabledPluginIds": [],
+  "StartupTimeoutSeconds": 30,
+  "MaxInvocationTimeoutMs": 120000,
+  "HealthIntervalSeconds": 30,
+  "EnableToolBridge": true,
+  "RestartOnCrash": true,
+  "MaxRestartBackoffSeconds": 60,
+  "MaxIngestionItemsPerBatch": 200,
+  "DefaultMaxDocumentsPerPlugin": 5000,
+  "IntegrityPolicy": "warn",
+  "TrustedPublisherKeys": [],
+  "AutoGrantPermissions": false,
+  "RequireConfirmationForSideEffects": true,
+  "KeepVersions": 3,
+  "MaxPackageBytes": 268435456
+}
+```
+
+## 10. 验证
+
+```powershell
+# 单元测试（391 项）
+dotnet test MyFirstMafAgent.Api.Tests\MyFirstMafAgent.Api.Tests.csproj -p:UseAppHost=false -p:OutputPath=C:\Temp\maftests\
+
+# 协议契约（真实子进程，18 项）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Test-PluginContract.ps1
+```
+
+手工端到端（已实测通过）：
+
+```powershell
+$b='http://127.0.0.1:5056'
+# 1. 安装 → PermissionRequired（示例插件声明了 network）
+curl.exe -s -F "file=@C:\Temp\pluginpkg\sample-1.0.0.zip" "$b/api/plugins/install"
+# 2. 授权 → Running
+curl.exe -s -X PUT -H "Content-Type: application/json" -d '{\"permissions\":[\"network\"]}' "$b/api/plugins/com.example.sample-platform/permissions"
+# 3. 配置校验：类型错误 / 未知字段都会被 400 拒绝
+curl.exe -s -X PUT -H "Content-Type: application/json" -d '{\"config\":{\"workspace\":123}}' "$b/api/plugins/com.example.sample-platform/config"
+# 4. 升级 → active 切换，previous 保留
+curl.exe -s -F "file=@C:\Temp\pluginpkg\sample-1.0.1.zip" "$b/api/plugins/install"
+# 5. 回滚 → 1.0.1 → 1.0.0
+curl.exe -s -X POST "$b/api/plugins/com.example.sample-platform/rollback"
+# 6. 停用 → invoke 返回 403；启用 → 配置自动重放
+curl.exe -s -X POST -H "Content-Type: application/json" -d '{\"enabled\":false}' "$b/api/plugins/com.example.sample-platform/enabled"
+# 7. 审计
+curl.exe -s "$b/api/plugins/com.example.sample-platform/audit?limit=10"
+# 8. 卸载
+curl.exe -s -X DELETE "$b/api/plugins/com.example.sample-platform"
+```
+
+阶段 5 手工端到端（已实测通过，数据库真实落盘）：
+
+```powershell
+$b='http://127.0.0.1:5056'
+$kbA='<知识库 A 的 GUID>'; $kbB='<知识库 B 的 GUID>'
+# 1. 首次同步：2 条平台笔记 → 2 篇资料（created=2，nextCursor=done）
+curl.exe -s -X POST -H "Content-Type: application/json" -d "{\"capabilityId\":\"platform.notes.sync\",\"knowledgeBaseId\":\"$kbA\"}" "$b/api/plugins/com.example.sample-platform/sync"
+# 2. 再同步一次：游标复用，0 条（cursorApplied=done，nextCursor=null）
+curl.exe -s -X POST -H "Content-Type: application/json" -d "{\"capabilityId\":\"platform.notes.sync\",\"knowledgeBaseId\":\"$kbA\",\"cursor\":\"restart\"}" "$b/api/plugins/com.example.sample-platform/sync"
+# 3. 全量重放：内容未变 → skipped=2，资料数仍是 2（幂等）
+# 4. 改配置 contentVersion=2 → 插件重启 → 全量重放 updated=2，资料 ID 不变
+curl.exe -s -X PUT -H "Content-Type: application/json" -d "{\"config\":{\"workspace\":\"team-alpha\",\"contentVersion\":\"2\"}}" "$b/api/plugins/com.example.sample-platform/config"
+# 5. 撤回 note-1002 → retracted=1、skipped=1，资料被真删，映射留墓碑
+curl.exe -s -X PUT -H "Content-Type: application/json" -d "{\"config\":{\"workspace\":\"team-alpha\",\"contentVersion\":\"2\",\"retractNote\":\"note-1002\"}}" "$b/api/plugins/com.example.sample-platform/config"
+curl.exe -s "$b/api/plugins/com.example.sample-platform/items"
+curl.exe -s "$b/api/plugins/com.example.sample-platform/sync-state"
+# 6. 越界写入：作用域只允许 B，却同步到 A → 403 且 code=-32003
+curl.exe -s -X PUT -H "Content-Type: application/json" -d "{\"allowedKnowledgeBaseIds\":[\"$kbB\"],\"maxDocuments\":0}" "$b/api/plugins/com.example.sample-platform/scope"
+# 7. 配额：maxDocuments=1 → created=1、quotaRejected=1、status=partial
+curl.exe -s -X PUT -H "Content-Type: application/json" -d "{\"allowedKnowledgeBaseIds\":[\"$kbB\"],\"maxDocuments\":1}" "$b/api/plugins/com.example.sample-platform/scope"
+```
+
+## 11. 平台条目映射与作用域（阶段 5）
+
+### 11.1 幂等：靠映射表，不靠插件自觉
+
+表 `plugin_platform_items`，键 = **`plugin_id + source + external_id + knowledge_base_id`**。
+
+- 键里带知识库：同一条平台内容镜像到两个知识库时，两边的映射、配额与撤回互不影响。若键不带知识库，B 库的撤回会把 A 库的资料一起删掉。
+- 判定表（纯函数 `PlatformItemDecision.Decide`，可脱离数据库穷举）：
+
+| 本地映射 | 本次条目 | 动作 |
+| --- | --- | --- |
+| 无 | 正常 | `Create` |
+| 无 | 已撤回 | `Tombstone`（只记墓碑） |
+| active + 同哈希 | 正常 | `Skip` |
+| active + 异哈希 | 正常 | `Update`（替换源文件，资料 ID 不变） |
+| active | 已撤回 | `Retract`（删资料 + 置墓碑） |
+| 墓碑 | 已撤回 | `Skip` |
+| 墓碑 | 正常 | `Create`（视为平台重新发布） |
+
+- 哈希：平台给了就用平台值（统一小写、去首尾空白），没给就按内容算 SHA-256。
+- 资料被用户手工删除时，`Update` 会退化为「重新落库」，仍记为 `updated`，且**同样受配额约束**。
+
+### 11.2 撤回是删除，墓碑防复活
+
+撤回不删除映射行，而是 `state=retracted` + `document_id=null`：
+
+- 资料是真删（`DeleteAsync`），不是软删，索引与切片由核心摄取用例清理。
+- 墓碑让**迟到的旧批次**无法把已删除内容复活：旧批次里的同一条目会命中 `墓碑 + 正常 → Create` 才会复活，若旧批次本身仍是撤回态则 `Skip`。
+- 平台从未给过、却收到撤回的条目记 `Tombstone`，只写一行墓碑，不产生资料。
+
+### 11.3 同步游标：增量真的增量
+
+表 `plugin_sync_states`，主键 `scope_key = pluginId|capabilityId|knowledgeBaseId`。
+
+- 请求不传 `cursor` → 用持久化游标；传了就以此为准（`cursorApplied` 回显）。
+- `nextCursor` 落库；`nextSyncAfterSeconds` 供调度方退避。
+- 结果状态：`success`（无失败）、`partial`（有拒绝/无效）、`failed`（能力调用本身失败，**保留旧游标**）。
+- 批量上限 `MaxIngestionItemsPerBatch`，防止一次同步把库撑爆。
+
+### 11.4 知识库作用域（双端）
+
+- **插件端**：`PluginRegistration.AllowedKnowledgeBaseIds`，空数组 = 不限制。`PluginScopePolicy` 校验：拒绝 `Guid.Empty`、拒绝不存在的知识库、自动去重、拒绝负数配额。
+- 越界写入返回 403 + `-32003`，文案带「允许的知识库」清单；失败也会记入 `sync-state`（`lastStatus=failed`），旧游标不丢。
+- **Agent 端**：`AgentKnowledgeScope` 让被限定在某个知识库的对话不能读写其他库——`list_knowledge_bases` 只列可见库，`list_documents` / `search_knowledge_base` / `read_document_content` 越界时返回可读的拒绝说明而不是静默空结果。
+
+### 11.5 配额
+
+- 每条映射占 1 个名额，**按知识库**统计（`CountActiveAsync`）。
+- 插件级 `maxDocuments` 优先；为 0 时跟随全局 `DefaultMaxDocumentsPerPlugin`（0 = 不限制）。
+- 超额条目计入 `quotaRejected` 并给诊断文案，不影响同批次其他条目；有条目被拒时同步状态为 `partial`。
+
+### 11.6 新增文件
+
+| 文件 | 职责 |
+| --- | --- |
+| `Plugins/PlatformItemDecision.cs` | 判定矩阵 + 哈希规范化（纯函数） |
+| `Plugins/IPluginContentStore.cs`、`Plugins/KnowledgePluginContentStore.cs` | 摄取端口与其核心适配器（创建/替换/删除） |
+| `Application/Plugins/IPluginItemMap.cs` | 映射、游标端口与状态常量 |
+| `Application/Plugins/PluginScopePolicy.cs` | 作用域参数校验 |
+| `Agents/Tooling/AgentKnowledgeScope.cs` | 对话级知识库作用域 |
+| `Persistence/PluginMappingSchemaEntities.cs` | 映射表与游标表实体 |
+
+## 12. 排空升级、定时同步与受信任公钥（阶段 8）
+
+### 12.1 升级：先排空，再换进程
+
+插件是独立 exe，Windows 上运行中的文件删不掉，所以升级必然要停旧进程。直接杀进程会让正在跑的同步/工具调用对调用方变成一次无解释的"连接已断开"，因此升级顺序固定为：
+
+```
+Stage（只读校验，失败则插件继续正常服务）
+  → 同 ID 已加载？→ StopHostAsync（排空 + 停进程）
+  → InstallFromDirectoryAsync（落盘 + 切 active.json）
+  → ReloadAndStartAsync（起新进程）
+```
+
+- **排空语义**：`PluginProcessHost.BeginDrain()` 把状态置为 `Draining`，此后 `InvokeAsync` 立即抛 `ErrorUnhealthy`（HTTP 503）而不是排队——排队会让调用方先卡住、再收到断开。
+- **排空态不允许被“随手重启”**：`PluginManager.EnsureStartedAsync` 对 `Draining` 直接报 503。否则一次排空中的调用会谎报“重启”，把刚腾出来的进程又拉回来（文件被占用，升级必失败），排空也就变成了“排空了但还能调用”。
+- **目录被占用要容忍**：刚被杀掉的子进程在 Windows 上会短暂占着版本目录里的 dll（Move 报 Access denied、Copy 报 being used by another process）。安装器对移动重试 4 次（≈840ms）、对复制重试 3 次（≈1.2s），仍挪不动则退化为“原地覆盖 + 警告”，宁可留下多余文件，也不要让“从 v1.0.1 装回 v1.0.0”永远失败。
+- **在途调用等它做完**：`DrainAsync(timeout)` 轮询 `InFlightInvocations`，最多等 `Plugins:DrainTimeoutSeconds`（默认 15 秒）。超时打印警告并继续强停：一次卡死的调用不该让插件永远升不了级，结果写进审计（`outcome=failure`）。
+- **两段式安装的收益**：坏包（manifest 错、入口缺失、摘要不符）在 `Stage` 阶段就失败，此时**插件仍在正常服务**；只有校验通过才可能走到"停进程"。
+- **手工软下线**：`POST /api/plugins/{id}/drain` 返回 `{ drained, inFlight }`，可用于运维脚本"先摘流量、等调用结束、再替换"。
+- 审计：升级那条 install 记录带 `(drain upgrade)` 后缀，便于与首装区分。
+
+### 12.2 定时同步：插件说"过一会儿再来"，核心负责兑现
+
+插件在批次里返回 `nextSyncAfterSeconds` 表示希望下次同步的时间。核心把它写进 `plugin_sync_states.next_sync_after_seconds`，由 `PluginSyncJobFeeder` 按间隔入队 `plugin.sync` 任务（不阻塞任何请求）。
+
+| 规则 | 行为 |
+| --- | --- |
+| 幂等键 | `plugin.sync:{pluginId}\|{capabilityId}\|{knowledgeBaseId}`，同一作用域同时只有一个任务 |
+| 间隔夹最小值 | `max(30, Plugins:MinScheduledSyncIntervalSeconds)`，插件写错单位（返回 1）不会把队列刷爆 |
+| 终态重新武装 | 任务结束后**再过了一个间隔**才 `RetryAsync`，失败的插件只按自己声明的节奏重试 |
+| 停用即跳过 | `IsScheduledSyncEligible` 只对"已启动且未被用户停用"的插件返回 true |
+| 总开关 | `Plugins:ScheduledSyncEnabled=false` 时既不写间隔也不入队，同步只能手动触发 |
+
+三个入口共用 `PluginSyncService` 一份逻辑：`POST /{id}/sync`（阻塞返回结果）、`POST /{id}/sync-async`（进任务中心，可看进度/取消）、补投器（定时）。**失败不动游标**：一次瞬时故障不能让整库重放；**部分条目失败仍推进游标**：失败项的内容哈希没变，下次同步会重新判定，否则一片坏数据会让同步永久停摆。
+
+### 12.3 受信任公钥：谁的签名算数
+
+签名只有在"公钥可信"时才有意义，而公钥的来源必须能在运行期变更（桌面应用的 `appsettings` 改不了就要重启）。
+
+| 来源 | KeyId | 优先级 | 可否经接口删除 |
+| --- | --- | --- | --- |
+| `Plugins:TrustedPublisherKeys` | `config:{pluginId}` | **高**（运维可压过临时授权） | 否（400，请改配置文件） |
+| `plugin_trusted_keys` 表 | 任意字符串 | 低 | 是（`DELETE` → 204/404） |
+
+- `PUT /api/plugins/trusted-keys/{keyId}` 写入后**立即 `ReloadAsync`**，新发布者的签名马上生效，无需重启。
+- 写入校验：`algorithm` 只能是 `ecdsa`/`rsa`；PEM 必须能被 `ImportFromPem` 解析；**含 `PRIVATE KEY` 的一律拒绝**——谁能写库谁就能自签，签名就失去意义。
+- 匹配规则：按域名段前缀，取最长匹配（`com.example` 覆盖 `com.example.notes`，不覆盖 `com.example2`）；大小写不敏感。
+- 指纹 = `SHA-256(规范化 PEM)` 前 16 位十六进制，用于人工核对，**不是**安全边界。
+- 数据库不可用时降级为"只用配置项"，不会把已经信任的发布者一起作废。
+
+### 12.4 新增文件
+
+| 文件 | 职责 |
+| --- | --- |
+| `Plugins/IPluginRuntime.cs` | 同步用例需要的最小运行时端口（调用能力 + 是否参与定时同步） |
+| `Plugins/PluginSyncService.cs` | 同步用例（三个入口共用） |
+| `Plugins/PluginSyncJobHandler.cs` | `plugin.sync` 处理器 + 补投器 |
+| `Plugins/PluginTrustedKeyRegistry.cs` | 配置 + 库合并视图，最长前缀匹配 |
+| `Application/Plugins/IPluginTrustedKeyStore.cs` | 公钥持久化端口 + `PluginTrustedKeys` 纯函数 |
+| `Infrastructure/Persistence/SqlSugarPluginTrustedKeyStore.cs` | 表实现 |
+| `Persistence/PluginTrustedKeySchemaEntity.cs` | `plugin_trusted_keys` 表结构 |
+
+## 13. 界面（阶段 10 末补齐）
+
+`FrontEnd/myfist-agent/src/components/PluginsView.vue` 是插件的唯一运维入口，覆盖了 §7 里除 `POST /{id}/invoke` 之外的全部端点。
+
+| 页签 | 对应端点 | 说明 |
+| --- | --- | --- |
+| 卡片列表 | `GET /api/plugins` | 状态、版本、发布者、能力数、`missingPermissions`、`lastError`、`enabled` |
+| 安装 | `POST /api/plugins/install`（multipart） | 只接受 `.zip`；`warnings` 会单独弹一条提示（未签名的包会在这里告知） |
+| 概览 | `GET /api/plugins/{id}` | 健康、在途调用、排空、版本、目录、完整性、并发上限、能力清单；操作按钮：`restart`/`health`/`drain`/`rollback`/`DELETE` |
+| 配置 | `PUT /{id}/config` | 按 manifest 的 `config.schema` 渲染表单（string/integer/number/boolean/enum/string-array），schema 不可解析时退回原始 JSON；「清空配置」发 `{"config": null}` |
+| 授权 | `PUT /{id}/permissions` | 五个权限逐条勾选；未授权时插件停在 `PermissionRequired`，不会启动 |
+| 作用域 | `PUT /{id}/scope` | 知识库多选（全不选 = 不限制）+ `maxDocuments`（0 = 跟随全局） |
+| 同步 | `POST /{id}/sync-async` + `GET /{id}/sync-state` | 选 `platform-connector` 能力与目标知识库；同步进任务队列，进度去「任务中心」看；下方表格展示每个 `(能力, 知识库)` 的游标与上次结果 |
+| 审计 | `GET /{id}/audit` | 时间线（安装/授权/配置/启动/同步/调用/回滚/卸载） |
+| 受信任公钥 | `GET/PUT/DELETE /api/plugins/trusted-keys` | 粘贴 PEM 新增（后端拒绝私钥）；`config:` 前缀的行不给删，提示去改 appsettings |
+
+**`GET /api/plugins/{id}` 为界面补的字段**（原来只有 `status`，不足以渲染配置/作用域）：
+
+| 字段 | 来源 | 为什么需要 |
+| --- | --- | --- |
+| `config` | 注册表 `ConfigJson` | 不给当前值，用户每次改配置都要从零重填 |
+| `configSchema` / `configRequired` | `manifest.config` | 前端只做渲染，不猜字段 |
+| `declaredPermissions` | 能力 `permissions` 并集 | 授权页需要完整可勾选集合，而不只是 `missingPermissions` |
+| `allowedKnowledgeBaseIds` / `maxDocuments` | 注册表 | 作用域页的回显 |
+| `limits` | `manifest.limits` | 只读展示并发/超时/内存上限 |
+
+**踩过的坑**：
+
+- 同步下拉必须提交能力的 `id`（`platform.notes.sync`），不是 `name`——两者都在 `declaredCapabilities` 里，用错会 404/400。
+- `<input type="number">` 上的 `v-model` 会把值转成 `number`，任何 `(value ?? '').trim()` 都会抛 `trim is not a function`。
+- `integrity` 是**状态字符串**（`verified`/`not-provided`/`skipped`/`digest-mismatch`/`signature-invalid`/`untrusted-publisher`），不是布尔；`not-provided` 不能显示成绿色「已校验签名」。
+- 卸载后详情面板要立刻关掉：10 秒定时刷新会拿已删除的 id 去 `GET`，否则每 10 秒弹一次 404。
+
+## 14. 仍未实现
+
+| 能力 | 说明 |
+| --- | --- |
+| 受限令牌 / AppContainer / 容器隔离 | 当前子进程与核心同用户同权限，权限闸门只是准入控制 |
+| 跨机器/分布式执行 | 一个 API 进程内的子进程，没有远程插件主机 |
+| 插件市场 / 远程源 | 只支持上传本地 ZIP |
+| 插件级并发配额 | 只有全局 `Plugins:MaxConcurrentJobs` 之外的进程内 `maxConcurrentInvocations` |
+| 手动作 invoke | 界面不提供裸调用调试入口；工具桥（`PluginToolBridge`）按 `agent-tool` 能力自动暴露给 Agent |
+| 签名工作流工具链 | 界面能粘公钥，但没有「生成密钥 → 算摘要 → 签包」的脚本（见 ROADMAP P1-6） |
+
+这些项的排期、依赖与验收标准见 **`docs/ROADMAP.md`**（P1-4、P1-6、P3 各节）。

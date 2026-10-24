@@ -20,6 +20,7 @@
 
   <ItemGroup>
 	<ProjectReference Include="..\MyFirstMafAgent.Api\MyFirstMafAgent.Api.csproj" />
+	<ProjectReference Include="..\MyFirstMafAgent.Plugins.Sdk\MyFirstMafAgent.Plugins.Sdk.csproj" />
   </ItemGroup>
 
   <ItemGroup>

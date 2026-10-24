@@ -1,3 +1,4 @@
+using MyFirstMafAgent.Api.Application.Jobs;
 using MyFirstMafAgent.Api.Application.Knowledge;
 using MyFirstMafAgent.Api.Application.Settings;
 using MyFirstMafAgent.Api.Infrastructure.Persistence;
@@ -25,6 +26,12 @@ public static class DatabaseInitializer
             await app.Services.GetRequiredService<SqlSugarNoteRepository>().InitializeAsync(cancellationToken);
             await app.Services.GetRequiredService<SqlSugarStudyRepository>().InitializeAsync(cancellationToken);
             await app.Services.GetRequiredService<SqlSugarAvatarRepository>().InitializeAsync(cancellationToken);
+
+            // 外部智能体客户端与 MCP 调用审计。
+            await app.Services.GetRequiredService<SqlSugarAgentClientStore>().InitializeAsync(cancellationToken);
+
+            // 长任务表：必须在使用之前建好，否则调度器第一轮会报表不存在。
+            await app.Services.GetRequiredService<IJobQueue>().InitializeAsync(cancellationToken);
 
             // 用户在设置页面保存的模型配置优先于 appsettings.json。
             var settingsRepository = app.Services.GetRequiredService<SqlSugarSettingsRepository>();

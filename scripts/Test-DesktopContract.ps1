@@ -163,8 +163,10 @@ try {
     $authorized = Invoke-Probe "$baseUrl/api/health" -tokenValue $token
     Add-Result 'api-with-token-200' ($authorized.Status -eq 200) ("status=" + $authorized.Status)
 
+    # /mcp 不再受桌面令牌保护，而是要求客户端密钥：外部 Agent 拿不到一次性令牌，
+    # 只有可长期保存的客户端密钥才能让它们接入。
     $mcpUnauthorized = Invoke-Probe "$baseUrl/mcp"
-    Add-Result 'mcp-without-token-401' ($mcpUnauthorized.Status -eq 401) ("status=" + $mcpUnauthorized.Status)
+    Add-Result 'mcp-without-client-key-401' ($mcpUnauthorized.Status -eq 401) ("status=" + $mcpUnauthorized.Status)
 
     $document = Invoke-Probe "$baseUrl/"
     $csp = $document.Headers['Content-Security-Policy']

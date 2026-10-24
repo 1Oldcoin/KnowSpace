@@ -62,7 +62,7 @@
 - 知识库支持 TXT、MD、DOCX、PDF、HTML/HTM；图片通过所选聊天模型生成描述，视频通过 FFmpeg 抽取音轨并由 Whisper.net 在 API 进程内转写，之后走现有文本切片和向量化流程。
     
   HTML/HTM 在 API 进程内抽取正文（标题层级、列表、表格单元格），不执行脚本、不加载外部资源；非 UTF-8 页面按文件 BOM 与 `<meta charset>` 声明解码（含 GBK/GB18030）。
-- 图片能力要求所选模型支持视觉输入；视频处理需要随 API 部署的 FFmpeg 可执行文件。Whisper.net 使用 .NET NuGet 包和 CPU 原生运行时，不需要 Python/Whisper CLI；模型文件首次转写时自动下载并缓存。
+- 图片能力要求所选模型支持视觉输入；视频处理需要随 API 部署的 FFmpeg 可执行文件。Whisper.net 使用 .NET NuGet 包和 CPU 原生运行时，不需要 Python/Whisper CLI；模型文件首次转写时自动下载并缓存，也可从设置页导入本地 ggml 模型（离线部署）。
 - Companion 首版支持 UTF-8 通用 JSON/TXT 导出，不直接读取微信/QQ 私有或加密数据库。JSON 接受顶层数组或 `messages` / `records` 数组；TXT 接受 `[时间] 发言者: 消息` 行，未匹配的续行合并到上一条消息。
 - Companion 数据写入 PostgreSQL：人物档案、原始消息、画像、会话与消息；聊天会从目标人物的历史消息中做关键词检索。当前不是向量检索，平台官方格式需按脱敏样例开发适配器。
 - 知识库支持多库创建与切换；专题按知识库隔离，资料可归入单一专题。笔记仍是前端示例数据。
@@ -200,6 +200,8 @@ MyFirstMafAgent.Api/
 
 MVP 不应一开始就承担关键帧 VLM、复杂消息队列或多用户权限等非必要复杂度。先跑通“导入文档 → 检索 → 有来源的回答 → 保存笔记”。
 
+> 阶段 0–8 已落地；当前仍未完成的事项（Electron 打包/自动更新、插件与任务中心界面、混合检索、多用户认证、插件隔离等）统一收集在 **`docs/ROADMAP.md`**，按 P0–P3 排序，每项附现状与验收标准。
+
 ## 9. 当前 MVP 启动配置
 
 API 启动时通过 SqlSugar CodeFirst 实体幂等创建知识库、资料、分块、上传、问答历史和 AI 伴侣表及普通索引；PostgreSQL 的 `vector` 扩展、外键/CHECK 约束、`lower(name)` 表达式唯一索引和旧表数据回填仍使用必要的 PostgreSQL SQL。
@@ -215,11 +217,11 @@ dotnet run --project MyFirstMafAgent.Api/MyFirstMafAgent.Api.csproj
 
 聊天模型通过 OpenAI-compatible 接口配置。`Llm:UseCloudApi=true` 选择 `Llm:Online`，`false` 选择 `Llm:Local`。Embedding 使用 API 内的 ONNX Runtime；`Embedding:ModelDirectory` 指向包含 `model.onnx` 和 `tokenizer.json` 的目录，当前 BGE 配置为 512 维。更换模型或维度后不要混用旧向量，需重新导入/向量化已有资料。
 
-PDF 和 DOCX 在 API 进程内提取文字；图片描述走当前选择的聊天模型，因此所选模型必须支持图片输入。视频由 `Media:FfmpegPath` 指定 FFmpeg（默认使用随 API 发布的 `ExternalTools/ffmpeg/ffmpeg.exe`），Whisper.net 使用 `Media:WhisperModel` 指定模型类型，并将模型缓存到 `Media:WhisperModelPath`。模型首次使用时需要网络下载；离线部署需提前准备模型文件。API 上传请求会等待音频转写、切片和向量化完成。工具缺失或模型不支持图片时，原文件仍会保留，资料状态显示为 Failed 并附带处理错误。
+PDF 和 DOCX 在 API 进程内提取文字；图片描述走当前选择的聊天模型，因此所选模型必须支持图片输入。视频由 `Media:FfmpegPath` 指定 FFmpeg（默认使用随 API 发布的 `ExternalTools/ffmpeg/ffmpeg.exe`），Whisper.net 使用 `Media:WhisperModel` 指定模型类型，并将模型缓存到 `Media:WhisperModelPath`。模型文件由 `WhisperModelManager` 单独管理：设置页可看状态、导入本地 ggml 文件（`/api/media/whisper/import-raw`）或按需后台下载（`/api/media/whisper/download`）；`Media:AutoDownloadWhisperModel=false` 时缺模型会直接报"去设置页导入"，适合离线部署。导入/替换后推理对象按文件指纹自动重建，不需要重启。工具缺失或模型不支持图片时，原文件仍会保留，资料状态显示为 Failed 并附带处理错误；视频摘要需要聊天模型，失败时只丢摘要、转写内容照常发布。
 
 前端使用 `cd FrontEnd/myfist-agent; npm run dev` 启动；API 默认地址为 `http://127.0.0.1:5056`。前端默认使用同源请求，Vite 通过 `server.proxy` 把 `/api`、`/mcp` 转发到 5056，因此不再需要设置 `VITE_API_BASE_URL`。先启动并确认 `/api/health` 返回数据库已连接，再上传资料。API 路由按领域定义在 `MyFirstMafAgent.Api/Endpoints/`；`/api/search` 提供显式相似度检索，`/api/chat` 会自动检索并返回引用。知识库问答历史支持会话重命名、单条/批量删除和 Markdown 导出，具体路由见前端 README。
 
-发布形态有两种：`MyFirstMafAgent.Api`（控制台 + 自动打开浏览器）与 `MyFirstMafAgent.Desktop`（Photino 原生窗口，进程内 Kestrel + WebView2）。前端 `vite.config.ts` 使用 `base: './'`，构建产物由 `ApiHost` 通过 `wwwroot` 托管；`scripts/Publish-Portable.ps1` 负责构建前端、`dotnet publish`（self-contained win-x64，非 AOT）、复制 `wwwroot` 并校验 pg0/Embedding 模型。`MyFirstMafAgent.Desktop` 另用 Velopack 打成安装包，`VelopackApp.Build().Run()` 必须是 `Main` 的第一句，且 `Main` 必须全同步 + `[STAThread]`，窗口才在 STA 线程上创建（否则 WebView2 静默失败、窗口空白）。便携数据库统一从 `%LOCALAPPDATA%\MyFirstMafAgentData\tools` 运行、工作目录设在 `pgsql` 下，避免 `postgres.exe` 锁住安装目录导致升级失败。
+发布形态有两种：`MyFirstMafAgent.Api`（控制台 + 自动打开浏览器）与 Electron 桌面壳（`desktop-electron/`，把同一份 API 当作 sidecar 子进程拉起）。前端 `vite.config.ts` 使用 `base: './'`，构建产物由 `ApiHost` 通过 `wwwroot` 托管；`scripts/Publish-Portable.ps1` 负责构建前端、`dotnet publish`（self-contained win-x64，非 AOT）、复制 `wwwroot` 并校验 pg0/Embedding 模型——`-Target desktop` 发布的就是 **API 本体**，放到 `publish/desktop`，Electron 从那里拉起 sidecar。安装包由 electron-builder（NSIS）生成：壳只打 `main.js`/`preload.js`，后端通过 `extraResources` 整体放到 `resources/api`；`scripts/Build-ElectronInstaller.ps1` 一把梭（发布 + 打包），产物在 `publish/releases`。便携数据库统一从 `%LOCALAPPDATA%\MyFirstMafAgentData\tools` 运行、工作目录设在 `pgsql` 下，避免 `postgres.exe` 锁住安装目录导致升级失败。
 
 发布目录**不能放在桌面/文档/下载**：Windows「受控文件夹访问」会阻止从这些位置启动的未签名程序写入用户目录，便携数据库会启动失败。应用目录本身可以含中文，`PortablePostgresHost` 会把 pg0 复制到 `%LOCALAPPDATA%\MyFirstMafAgent\tools` 后运行（pg0 要求可执行路径与数据目录均为纯 ASCII）。
 
@@ -238,10 +240,11 @@ PDF 和 DOCX 在 API 进程内提取文字；图片描述走当前选择的聊�
 | `AgentModule.cs` | 模型客户端、运行期设置/偏好、工具来源与 `ToolCallingAgent` |
 | `McpModule.cs` | MCP 服务端（Streamable HTTP）与外部 MCP 客户端注册表 |
 | `WorkerModule.cs` | 资料处理、索引生命周期、分身摄取三个后台 Worker |
+| `PluginModule.cs` | 插件 manifest 加载、进程宿主与生命周期、工具桥接、平台摄取下沉 |
 | `HostPipeline.cs` | 请求日志、异常处理、静态前端、REST/MCP/OpenAPI 映射与 SPA 回退 |
 | `DatabaseInitializer.cs` | 建表/补列、恢复中断资料、加载设置、注册向量规格、准备默认索引 |
 
-新增宿主（Electron.NET 或原生 Electron sidecar）**必须复用 `ApiHost.BuildAsync`**，不得复制服务注册或中间件；宿主差异只体现在监听地址、窗口生命周期和用户数据目录参数上。控制台入口与 Photino 桌面入口保留为回滚路径，直到 Electron 桌面壳在真实 Windows 安装环境中验证通过。
+新增宿主（Electron sidecar 或新的渲染壳）**必须复用 `ApiHost.BuildAsync`**，不得复制服务注册或中间件；宿主差异只体现在监听地址、窗口生命周期和用户数据目录参数上。桌面壳现在只有 Electron 一种实现；进程内嵌 Kestrel 的 `MyFirstMafAgent.Desktop`（Photino + Velopack）已整工程删除，不要再把它当作可用入口。
 
 依赖方向为 `Endpoints/Adapters → Application → Domain`，`Infrastructure` 实现应用与领域端口。可用以下命令持续检查（Domain 不得引用 SqlSugar/ASP.NET Core/Application，Application 不得引用 SqlSugar/Infrastructure，Endpoints 不得直接使用 SqlSugar）：
 
@@ -253,7 +256,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Check-Architecture.p
 
 ### 9.2 桌面宿主：Electron sidecar（阶段 2）
 
-Electron.NET 现阶段不能作为基线：`ElectronNET.Core` 最新为 `0.6.0`（预览重写版），`ElectronNET.API` 停留在 Electron 23。按方案启用既定备选方案——**原生 Electron 主进程 + .NET API sidecar**，REST/MCP 契约完全不变，控制台与 Photino 入口保留为回滚路径。
+Electron.NET 现阶段不能作为基线：`ElectronNET.Core` 最新为 `0.6.0`（预览重写版），`ElectronNET.API` 停留在 Electron 23。按方案启用既定备选方案——**原生 Electron 主进程 + .NET API sidecar**，REST/MCP 契约完全不变。控制台入口保留为无界面/调试入口，桌面端只保留这一条路径（旧的 Photino 壳与 Velopack 打包已删除）。
 
 | 组件 | 位置 | 说明 |
 | --- | --- | --- |
@@ -276,7 +279,206 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Test-DesktopContract
 
 AI 伴侣导入端点为 `POST /api/companions/import`（multipart 字段：`name`、`targetSender`、`platform`、`file`），格式为 UTF-8 JSON/TXT，最大 20 MB。`targetSender` 必须匹配导出中的发言者名称。生成画像、开启会话及对话需调用当前选择的聊天模型；云端模式会将提示、相关历史片段及本轮对话发送给配置的 API 服务商。该功能用于生成 AI 模拟，不应被呈现为逝者本人；导入前应确认有权处理聊天记录。
 
+### 9.3 插件运行时（阶段 3）
+
+插件以**独立子进程**运行，通过版本化 JSON-RPC 2.0 over stdio 与核心通信。不使用 `AssemblyLoadContext` 做第三方隔离——它的卸载是协作式的，无法提供强制卸载或安全边界。
+
+| 组件 | 位置 | 职责 |
+| --- | --- | --- |
+| 协议与 SDK | `MyFirstMafAgent.Plugins.Sdk` | manifest 模型与校验、SemVer、JSON-RPC 分帧、`PluginServer` 插件侧宿主。**不引用 ASP.NET/SqlSugar** |
+| manifest 加载 | `Plugins/PluginManifestLoader.cs` | 扫描插件目录、schema 校验、入口可执行文件解析 |
+| 进程宿主 | `Plugins/PluginProcessHost.cs` | 启动子进程、握手校验、健康检查、带超时/取消的调用、崩溃标记 |
+| 生命周期 | `Plugins/PluginManager.cs` | 发现→启动→退避重启→停止；单个插件失败不影响核心启动 |
+| 工具桥接 | `Plugins/PluginToolSource.cs` | `agent-tool` → `IAgentToolSource`，命名 `plugin__{plugin}__{capability}` |
+| 摄取下沉 | `Plugins/PluginIngestionSink.cs` | `platform-connector` 结果包装成一次普通上传，复用版本/Outbox/索引生命周期 |
+| 端点 | `Endpoints/PluginEndpoints.cs` | `/api/plugins` 状态、健康、调用、平台同步 |
+
+**协议**：`plugin/initialize`、`plugin/configure`、`plugin/health`、`plugin/capabilities/list`、`plugin/capabilities/invoke`、`plugin/shutdown`，通知 `plugin/cancel`、`plugin/log`。一行一个 JSON（NDJSON），单行 ≤ 8 MiB；握手时校验 `pluginId`/`pluginVersion` 与 manifest 一致，且不允许插件报告未声明的能力。
+
+**两类能力**：`agent-tool` 暴露给模型；`platform-connector` 只能经同步端点使用，返回统一摄取结构（`source`/`externalId`/`title`/`type`/`content`/`updatedAt`/`contentHash`/`retracted`/`metadata`），由核心调用既有摄取用例，插件无法直接写表。
+
+**安全边界**：同一 OS 用户下的子进程**不是**恶意代码沙箱，只提供故障隔离（崩溃、死循环、协议错误不波及核心）。插件写目录被限制在 `plugins/.data/{pluginId}`；跨进程不继承连接串等机密。签名与摘要校验见 §9.4（`IntegrityPolicy=enforce` 可强制），受限令牌与容器化仍未实现。
+
+**验证**：`scripts/Test-PluginContract.ps1` 以真实子进程跑完握手、能力发现、健康、两类调用、结构化错误与关闭（18 项检查）。插件作者文档：`docs/PLUGIN-AUTHOR-GUIDE.md`。
+
+### 9.4 插件生命周期与安全（阶段 4）
+
+状态分两层：**用户意图**（是否启用、配置、已授予权限）落库到 `plugin_installations`；**文件布局**（已安装版本、当前生效版本）落在 `plugins/{id}/versions/*` + `active.json`；进程与健康只在内存，重启后重新发现。
+
+| 组件 | 位置 | 职责 |
+| --- | --- | --- |
+| 注册表端口 | `Application/Plugins/IPluginRegistry.cs` | 安装态与审计的持久化抽象，含 `PluginRegistration` / `PluginAuditRecord` |
+| 注册表实现 | `Infrastructure/Persistence/SqlSugarPluginRegistry.cs` | `plugin_installations`、`plugin_audit_events` 两张表 |
+| 权限策略 | `Application/Plugins/PluginAccessPolicy.cs` | 启动闸门（声明∩授予）、授权校验、副作用确认判定，纯函数 |
+| 完整性 | `Plugins/PluginIntegrity.cs` | 规范化包摘要（SHA-256）+ ECDSA/RSA 签名校验，`off/warn/enforce` 三档策略 |
+| 目录布局 | `Plugins/PluginPaths.cs` | `versions/{v}` + `active.json` + `.data` + `.staging` 的唯一计算入口 |
+| 安装器 | `Plugins/PluginInstaller.cs` | ZIP 安装（拒绝路径穿越）、激活、回滚、卸载、旧版本修剪 |
+| 审计 | `Plugins/PluginAuditWriter.cs` | 写入审计，入参自动脱敏与截断，失败不阻断业务 |
+| 配置校验 | `MyFirstMafAgent.Plugins.Sdk/JsonSchemaLite.cs` | JSON Schema 子集校验（type/properties/required/enum/pattern/范围/组合） |
+
+**启动四道闸门**（顺序固定，任一不满足不拉起进程）：启用 → 完整性 → 必填配置 → 权限。对应状态分别为 `Disabled`、`Failed`、`NeedsConfiguration`、`PermissionRequired`。
+
+**升级与回滚**：每个版本是完整目录，升级写 `active.json` 并重启，`previous` 字段记住上一版；回滚是反向换指针，回滚后启动失败会自动切回原版本。不原地覆盖文件——Windows 上运行中的 exe 无法替换。
+
+**副作用闸门**：`write-external` / `destructive` 能力在 `RequireConfirmationForSideEffects=true` 时**不桥接给模型**（模型无法提供确认），直接调用必须带 `confirm=true`，否则 403。
+
+**审计**：`install/uninstall/rollback/enable/disable/start/configure/grant/invoke/sync/health/integrity-rejected`，记录发起者（api/agent/system）、结果、耗时与脱敏后的入参；卸载不删除历史审计。
+
+**边界澄清**：权限闸门是准入控制，不是内核级强制；真正的隔离（受限令牌、AppContainer、容器）与在途请求排空式升级仍未实现。详见 `docs/PLUGIN-LIFECYCLE.md`。
+
+### 9.5 平台条目映射与作用域（阶段 5）
+
+插件把外部平台内容送进知识库时，真正难的不是"写进去"，而是**不重复写、能撤回、不越界**。这三件事由一张映射表 + 一张游标表 + 两个策略类兜住，插件本身不参与去重决策。
+
+| 组件 | 位置 | 职责 |
+| --- | --- | --- |
+| 判定矩阵 | `Plugins/PlatformItemDecision.cs` | 纯函数：`(本次条目, 既有映射) → Create/Update/Skip/Retract/Tombstone/Reject`，并做哈希规范化 |
+| 摄取端口 | `Application`→`Plugins/IPluginContentStore.cs` + `KnowledgePluginContentStore.cs` | 适配核心摄取用例（`KnowledgeIngestionService` / `KnowledgeBaseStore` / `LocalDocumentStore`），插件永不直接写表 |
+| 映射与游标端口 | `Application/Plugins/IPluginItemMap.cs` | `IPluginItemMap` + `IPluginSyncStateStore`，含 `PlatformItemLink`、`PluginSyncState` |
+| 映射与游标实现 | `Infrastructure/Persistence/SqlSugarPluginRegistry.cs` | `plugin_platform_items`、`plugin_sync_states` |
+| 摄取编排 | `Plugins/PluginIngestionSink.cs` | 查映射 → 判定 → 调内容端口 → 写回映射/墓碑；配额与作用域在这里执行 |
+| 作用域策略 | `Application/Plugins/PluginScopePolicy.cs` | 校验 `allowedKnowledgeBaseIds` / `maxDocuments`（拒绝 `Guid.Empty`、不存在的库、负数配额，自动去重） |
+| 对话作用域 | `Agents/Tooling/AgentKnowledgeScope.cs` | 把同一个限制下推到 Agent 工具层，越界返回可读拒绝而非空结果 |
+
+**映射键带知识库**：`plugin_id + source + external_id + knowledge_base_id`。同一条平台内容镜像到两个知识库时，两边的映射、配额、撤回互不影响；如果键里不带知识库，B 库的撤回会把 A 库的资料一并删掉。
+
+**撤回即删除 + 墓碑**：撤回时删掉资料并把映射置为 `retracted`、`document_id` 置空，映射行保留。这样迟到的旧批次无法让已删除内容复活（墓碑 + 撤回 → `Skip`），既保证"删干净"又保证"不复活"。`document_id` 为空还顺带覆盖了"资料被用户手工删除"的场景：下一次同步退化为重新落库，且同样受配额约束。
+
+**游标作用域**：`scope_key = pluginId|capabilityId|knowledgeBaseId`。请求不传 `cursor` 就用持久化游标；能力调用失败保留旧游标，避免一次瞬时故障导致整库重放。
+
+**配额按知识库计**：插件级 `maxDocuments` 优先，0 表示跟随全局 `DefaultMaxDocumentsPerPlugin`（0 = 不限制）。超额条目计入 `quotaRejected` 并给诊断，同批次其他条目照常处理，同步状态降级为 `partial`。
+
+**Write-ahead 顺序**：先落资料、再写映射。反过来的话，映射指向不存在的资料会让条目永久卡住；现在这条路径会退化为重新落库。审计与 `sync-state` 记录每次同步的计数与失败原因，便于对账。
+
 Embedding 使用 `Microsoft.ML.OnnxRuntime` 和 `Microsoft.ML.Tokenizers` NuGet 包在 API 内运行本地 BGE-small-zh-v1.5，不需要独立 Embedding 服务；模型目录随构建和发布输出部署。视频处理使用 `Whisper.net` 与其 CPU runtime NuGet 包，不需要 Python 或 Whisper CLI；Whisper 模型文件首次转写时下载并缓存。FFmpeg 仍是原生可执行工具，项目会将其复制到构建和发布目录；重新分发时需遵守 FFmpeg 对应构建的许可要求。
+
+### 9.6 长任务并发与任务中心（阶段 7）
+
+阶段 0–6 的所有长任务都跑在"一个后台循环里排队做"的模式上：`DocumentProcessingWorker` 每 1.5 秒捞一篇 `Queued` 资料解析，做完再捞下一篇。这在单用户演示里看不出问题，但它是**并发度为 1**：一次导入 20 篇资料，第 20 篇要等前 19 篇全部解析完；期间没有进度、不能取消、进程一崩就停在"处理中"。
+
+阶段 7 把这套机制换成"库里的任务 + N 个并发槽位"，并顺带交付了任务中心（查看 / 取消 / 重跑 / 实时进度）。
+
+| 组件 | 位置 | 职责 |
+| --- | --- | --- |
+| 任务模型 | `Domain/Jobs/JobModels.cs`、`JobRecord.cs` | 状态机（`Queued/Running/Succeeded/Failed/Cancelled`）、优先级、重试策略、租约判定 |
+| 队列端口 | `Application/Jobs/IJobQueue.cs`、`IJobHandler.cs` | 入队/领取/心跳/进度/完成/失败/取消/重跑/回收/清理；处理器契约与类型索引 |
+| 调度器 | `Application/Jobs/JobScheduler.cs` | N 个并发槽位，各自循环"回收 → 补投 → 清理 → 领取 → 执行" |
+| 队列实现 | `Infrastructure/Persistence/SqlSugarJobQueue.cs` | `jobs` 表 + 乐观 CAS 领取 + 租约续期 + 失败退避 |
+| 资料解析任务 | `Documents/DocumentIngestJobHandler.cs` | 处理器（`document.ingest`）+ 补投器（从 `kb_documents.status` 推导任务） |
+| 任务中心 API | `Endpoints/JobEndpoints.cs` | 列表/计数/类型/详情/取消/重跑 + SSE 实时流 |
+| 配置 | `Application/Jobs/JobOptions.cs` | 并发度、轮询、租约、重试、保留期、排队上限、补投间隔 |
+
+**为什么是固定槽位而不是"来一个任务起一个线程"**：并发度直接等于同时占用的数据库连接数与 CPU，无限并发会把库和内存一起打满，最后连健康检查都超时。`MaxConcurrentJobs` 是运维按机器能力定的上限（默认 4）。
+
+**每个槽位必须独立 ExecutionContext**：槽位通过 `Application/BackgroundLoop.RunIsolatedAsync` 启动。SqlSugar 把 `SqlSugarClient`/连接缓存在 `AsyncLocal` 里，而 hostsed service 与请求处理共享同一个 ExecutionContext——不隔离就会在并发时抛 `A command is already in progress`。这是阶段 0 起就存在的硬约束，任务系统只是把它从"一个循环"扩到"N 个循环"。
+
+**领取用乐观 CAS 而不是 `SKIP LOCKED`**：项目约定业务 SQL 只写在 `PgVectorSql.cs`（向量相关），其余一律用 SqlSugar 表达式，所以领取动作是"先按优先级取一批候选，再逐条 `UPDATE jobs SET status='Running', worker_id=?, lease_until=? WHERE id=? AND status='Queued'`"。抢到（影响行数=1）才算领取成功，抢不到换下一条。多进程并存时同样不会重复执行。
+
+**租约 + 心跳 + 僵尸回收**：领取时写入 `lease_until = now + LeaseSeconds`，执行期间续租（处理器上报进度时会顺带续租，所以长文档不需要额外心跳）。进程被杀后没人续租，租约到期即被 `RecoverStaleAsync` 放回队列——这就是"崩溃不丢任务"的实现方式，重启后任务自动重跑，不需要人工干预。心跳间隔取 `clamp(LeaseSeconds/3, 1s, 5s)`：上限 5 秒是刻意的，因为**取消请求是靠心跳读回来的**，如果按租约/3 算，默认 120 秒租约要等 40 秒才响应取消。
+
+**重试与退避**：可重试失败回到 `Queued` 并设置 `next_run_at = now + base * 2^(attempts-1)`（有上限），超过 `MaxAttempts` 才真正 `Failed`。`JobExecutionException(fatal: true)`（如"资料不存在"）不重试。**停机不算失败**：`Cancelled` 只由用户取消产生，进程退出时任务保持 `Running`，等租约过期回收。
+
+**任务由业务状态推导，而不是接口里顺手入队**：`document.ingest` 任务的唯一来源是补投器——它扫 `kb_documents.status = 'Queued'`，为每篇资料入队一条任务，幂等键 `document.ingest:{documentId}`。好处是双写不可能不一致：上传接口漏了、进程崩了、插件直接写库了，下一轮补投都会补齐；重复投递被唯一索引挡住。补投器已结束的任务是否重新武装，用"资料 `updated_at` 是否晚于任务 `completed_at`"判定：晚于说明是用户主动"重新解析"，重新武装；否则若是 `Cancelled`，就让资料进入 `Failed` 而不是复活任务（否则取消等于没取消）。
+
+**取消的语义**：`Queued` 任务取消直接终态；`Running` 任务取消通过心跳回传 `CancelRequested`，调度器取消处理器的 `CancellationToken`，处理器负责把资料落到一个**不会自动复活**的状态（`Failed`，可手动重试）。重复点击取消是幂等的（已结束返回 409）。取消是**协作式**的：请求最多 5 秒经心跳抵达，之后还要处理器真的检查令牌；如果工作恰好在取消抵达前完成，任务会是 `Succeeded`——这也算诚实的结论，而不是骗一个 `Cancelled`。
+
+**SSE 而不是轮询**：`GET /api/jobs/stream` 先推一帧 `snapshot`（当前计数），之后每次状态变化推 `job` 帧，15 秒一次 `: ping` 保活。每个订阅者一个容量 64 的有界通道（`DropOldest`），慢客户端只丢自己的旧事件，既不阻塞任务也不影响其他订阅者。响应显式 `DisableBuffering` 并带 `X-Accel-Buffering: no`，否则反向代理会把 SSE 攒成"一次性响应"。
+
+**配置**（`Jobs` 节）：`Enabled`、`MaxConcurrentJobs`、`PollIntervalMs`、`LeaseSeconds`、`MaxAttempts`、`RetryBaseSeconds`、`RetryMaxSeconds`、`RetentionHours`、`MaxQueuedJobs`、`FeederIntervalSeconds`、`PurgeIntervalMinutes`。`MaxQueuedJobs` 是补投的硬闸门：积压超过它就不再入队，避免异常循环把库撑爆。
+
+**这一步删掉了什么**：`Documents/DocumentProcessingWorker.cs`（单线程循环）已删除。资料解析现在完全由任务系统驱动，`WorkerModule` 只保留索引生命周期与分身两条后台循环。
+
+### 9.7 插件打磨：排空升级、定时同步与受信任公钥（阶段 8）
+
+阶段 7 解决了"谁来做长任务"，但插件的三个现实问题还没答案：**升级时正在跑的调用怎么办**、**插件说"过一会儿再来同步"由谁兑现**、**谁的签名算数**。阶段 8 把这三件事补齐，并顺手把插件的安装改成两段式。
+
+| 组件 | 位置 | 职责 |
+| --- | --- | --- |
+| 排空与在途计数 | `Plugins/PluginProcessHost.cs` | `BeginDrain/EndDrain/DrainAsync`、`InFlightInvocations`、排空期拒绝新调用 |
+| 两段式安装 | `Plugins/PluginInstaller.cs` | `StageAsync`（只读校验）→ `InstallFromDirectoryAsync`（落盘切换） |
+| 生命周期编排 | `Plugins/PluginManager.cs` | 升级＝排空 → 停旧进程 → 落盘 → 启动；`DrainAsync` 对外暴露 |
+| 同步用例 | `Plugins/PluginSyncService.cs` | 调插件 → 校验批次 → 幂等摄取 → 写游标 → 记审计（三个入口共用一份逻辑） |
+| 同步任务 | `Plugins/PluginSyncJobHandler.cs` | `plugin.sync` 处理器 + 补投器（读 `plugin_sync_states`） |
+| 受信任公钥 | `Application/Plugins/IPluginTrustedKeyStore.cs`、`Infrastructure/Persistence/SqlSugarPluginTrustedKeyStore.cs`、`Plugins/PluginTrustedKeyRegistry.cs` | 公钥持久化端口、SqlSugar 实现、配置+库合并视图 |
+| 公钥校验 | `PluginTrustedKeys`（同端口文件） | `TryNormalize`（拒绝私钥/坏算法/坏 PEM）、指纹、前缀匹配 |
+
+**升级必然是"换进程"，所以必须先排空**。Windows 上运行中的 exe 删不掉，插件升级只能停旧进程再换文件。但如果直接 `Kill`，正在跑的那次同步/工具调用对调用方就是一次无解释的"连接已断开"。排空的语义是：**不再接受新调用（立即 503），已经在跑的调用等它自己做完**。因此 `PluginProcessHost` 里维护 `_inFlight` 计数器，`InvokeAsync` 只在拿到并发令牌后自增、`finally` 自减；排空态下新调用直接抛 `ErrorUnhealthy`——**快速失败而不是排队**，否则调用方会先卡住、再收到断开。
+
+**超时不允许把升级永久堵死**。`DrainAsync` 最多等 `Plugins:DrainTimeoutSeconds`（默认 15 秒），超时就记警告并按原计划强停：一次卡死的调用不应该让插件永远升不了级。返回值 `false` 被写入审计，运维能看到"这次升级是强停完成的"。
+
+**排空状态必须能挡住"顺手重启"**。管理器的 `EnsureStartedAsync` 在调用前会把"没在跑"的插件拉起来（崩溃自愈），而 `Draining` 恰好属于"没在跑"——如果不特判，一次排空期间到达的调用会触发重启，把刚腾出来的进程又拉回来：文件重新被占用，升级必然失败，排空也就名存实亡。因此 `Draining` 在这里直接返回 503。
+
+**文件占用要容忍**。子进程刚退出时 Windows 仍会短暂占用版本目录里的 dll，直接 `Directory.Move` 会 `Access denied`、直接 `File.Copy` 会 `being used by another process`。安装器对移动重试 4 次、对复制重试 3 次；仍挪不动就退化为"原地覆盖"并记一条警告——宁可多留几个旧文件，也不要让一次版本切换永久失败。
+
+**安装改成两段式，是为了"坏包不能把好插件停掉"**。`StageAsync` 只做解压 + manifest/入口校验，落在 `.staging/` 下，不碰任何生效目录；校验通过后才知道要不要走升级路径。顺序因此变成：`Stage`（可能失败，此时插件仍在正常服务）→ 若同 ID 已加载 → `StopHostAsync`（排空 + 停进程）→ `InstallFromDirectoryAsync`（落盘 + 切 `active.json` 指针）→ `ReloadAndStartAsync`。审计里这条 install 记录带 `(drain upgrade)` 后缀，便于区分首装与升级。
+
+**定时同步的唯一来源是游标表**。插件在批次里返回 `nextSyncAfterSeconds` 表示"过一会儿再来"。核心把这个值写进 `plugin_sync_states.next_sync_after_seconds`，`PluginSyncJobFeeder` 每轮扫描"有自动同步间隔"的行，到点了才入队，幂等键 `plugin.sync:{pluginId}|{capabilityId}|{knowledgeBaseId}`。三条规则让它不会失控：
+
+- **间隔夹最小值**：插件写错单位（返回 1）会被夹到 `max(30, Plugins:MinScheduledSyncIntervalSeconds)`，否则队列会被瞬间刷爆。
+- **终态任务按间隔重新武装**：任务结束后必须再过了一个间隔才会被 `RetryAsync` 复活；一直失败的插件只按它自己声明的节奏重试。
+- **停用的插件不参与**：`IPluginRuntime.IsScheduledSyncEligible` 只对"已启动且未被用户停用"的插件返回 true。
+
+**为什么抽了 `IPluginRuntime`**：同步用例需要"调插件"与"这插件该不该定时同步"两件事，而 `PluginManager` 带着进程、生命周期门、安装器一堆依赖。抽一个两方法的端口出来，同步用例就能在单测里用假实现跑完所有分支（批次超限、结果不是批次、权限拒绝 vs 进程不健康），这也是本阶段新增 38 个单测几乎不需要真实进程的原因。
+
+**同步失败不动游标**。游标只有在"批次被接受并写入"后才前进；失败时写 `last_status = failed` 并保留旧游标。否则一次瞬时故障会让整库重放。反过来，**部分条目失败仍然推进游标**：失败项的内容哈希没被更新，下次同步会重新判定；卡住不动的话，一片坏数据会让整条同步永久停摆。
+
+**受信任公钥放数据库，配置文件优先**。`appsettings` 在桌面应用里改不了（要重启且用户看不到），所以"运行期信任一个新发布者"必须落库：`plugin_trusted_keys` 表 + `PUT /api/plugins/trusted-keys/{keyId}`。两边在 `PluginTrustedKeyRegistry` 里合并，**配置项优先**（运维用配置文件可以压过库里的临时授权），库里这一行用 `config:` 前缀的 KeyId 表示不可删除。写入时严格校验：只接受 `ecdsa`/`rsa`，必须能被 `ImportFromPem` 解析，**含 `PRIVATE KEY` 的 PEM 直接拒绝**——谁能写库谁就能自签，签名就失去意义了。落库后立刻 `ReloadAsync`，新信任的发布者马上生效，不需要重启。
+
+**指纹不是安全边界**：`指纹 = SHA-256(规范化 PEM) 前 16 位`，只是给人核对"库里这条和发布者公布的是不是同一把钥匙"用的。
+
+**新增端点**：`POST /api/plugins/{id}/drain`、`POST /api/plugins/{id}/sync-async`、`GET|PUT|DELETE /api/plugins/trusted-keys[/{keyId}]`；`GET /api/plugins/{id}` 增加 `inFlightInvocations`、`draining`、`trustedKey`。
+
+**新增配置**（`Plugins` 节）：`DrainTimeoutSeconds`（0–600）、`ScheduledSyncEnabled`、`MinScheduledSyncIntervalSeconds`（30–86400）。
+
+### 9.8 桌面交付：Electron 安装包（阶段 10）
+
+阶段 9 删掉了 Photino 壳与 Velopack。桌面端从"能跑"到"能交付"只差打包，本阶段补上：
+
+**打包只做一件事：把已发布的 API 原样塞进安装包**。`electron-builder.yml` 里 `files` 只含 `main.js`/`preload.js`/`package.json`，后端通过 `extraResources` 从 `../publish/desktop` 映射到 `resources\api`——**不能打进 asar**，asar 内的 exe 无法作为子进程启动。`main.js` 本来就按 `process.resourcesPath/api` 找 exe，所以代码零改动。产物 `MyFirstMafAgent-<version>-setup.exe` 约 310 MB，大头是自包含 .NET 运行时与 pg0；NSIS 再用 LZMA 压到同一体积量级，因此首次安装需要十几秒。
+
+**卸载钩子曾经是"有实现、没调用方"的死代码**。`PortablePostgresHost.TryStopForUninstall` 从 Velopack 时代就存在，删工程时唯一的调用点（`OnBeforeUninstallFastCallback`）一起没了，于是变成"文档说要接、代码没人调"。本阶段的接法刻意做得极薄：给 API 加一个一次性参数 `--stop-portable-postgres`，在 `Program.cs` **构建 Host 之前**处理（只调 `TryStopForUninstall(AppContext.BaseDirectory)` 然后 `return 0`），NSIS 的 `customUnInstall` 用 `nsExec::ExecToLog` 调它。这样安装器不需要知道 pg0 的实例名/数据目录/连接串，**这些全部仍由 appsettings 决定**，避免两处配置漂移；用 `nsExec` 而不是 `ExecWait`，是为了卸载向导里不闪控制台窗口。
+
+**顺序很重要**：`customUnInstall` 在 electron-builder 的 `un.install` 段里排在"删除已安装文件"之前（`uninstaller.nsh` 的 `!insertmacro customUnInstall` 紧跟 `setLinkVars`）。electron-updater 的升级也是先静默跑旧版卸载器，所以升级路径自动覆盖。实测：强杀 API 与 Electron 留下 10 个 `postgres.exe`，静默卸载后归零、安装目录删干净、`%LOCALAPPDATA%\MyFirstMafAgentData` 完好。
+
+**"装不上"的两个环境坑（都不是安装包的问题）**：
+
+- Windows「受控文件夹访问」会把 `桌面`/`文档`/`下载` 里的未签名程序拦下。NSIS 只回一个退出码 2、没有任何输出，`electron-builder` 的报错也只是 "process failed 2"。现象很迷惑：同样的安装包放到 `C:\Temp` 就能装。
+- NSIS 阶段要**执行**一个临时安装器来生成卸载器；所以构建目录同样不能在受保护目录。`scripts\Build-ElectronInstaller.ps1` 检测到这种情况就改在 `%TEMP%\maf-electron-build` 构建，再把 `*-setup.exe` 复制回 `publish\releases`（复制不受限制）。
+
+**用户数据路径刻意保持不变**：`productName` 只写在 `electron-builder.yml` 里，没有写进 `package.json`，因此渲染进程的 `app.getPath('userData')` 仍是 `%APPDATA%\myfirstmafagent-desktop`，日志与 `api-ready.json` 的位置不会因为打包而漂移。真正的业务数据本来就在 `%LOCALAPPDATA%\MyFirstMafAgentData`，安装器用 `deleteAppDataOnUninstall: false` 显式固定不删。
+
+### 9.9 平台抽象与多形态交付（阶段 11）
+
+后端真正与平台绑定的只有**三处原生依赖**，其余（Kestrel、SqlSugar/Npgsql、ONNX、Whisper 托管层）本来就是跨平台的（.NET 原生库在 `runtimes/` 下按 RID 分发）：
+
+| 绑定 | 旧写法 | 现写法 |
+| --- | --- | --- |
+| 便携 PostgreSQL | `ExternalTools/pgSQL/pg0-windows-x86_64.exe` 写死 | `PlatformRuntime.ResolveTool` 按 RID 解析，`Pg0VendorFileName` 直接映射上游文件名 |
+| FFmpeg | `Media:FfmpegPath` 默认 `ffmpeg.exe` | 默认空 → 按 RID 找，最后回落 PATH |
+| 插件入口 | 以 `.exe` 后缀判定"原生程序 vs 宿主命令" | `PluginEntryCommand.IsHostCommand`：不含路径分隔符、不是已知脚本扩展名、包内无同名文件 → 宿主命令 |
+
+`Infrastructure/PlatformRuntime.cs` 是这套抽象的**唯一入口**，只做四件事：算 RID、列出候选路径、解析、补可执行位。
+
+- **查找顺序（先命中先用）**：`<tool>/<rid>/<上游原名>` → `<tool>/<rid>/<工具名><后缀>` → `<tool>/<上游原名>` → `<tool>/<工具名>-<rid><后缀>` → `<tool>/<工具名><后缀>`。前两级是"多平台共存"，后三级是**向历史布局兼容**（老用户把 `ffmpeg.exe` 直接放根下，不能因为升级就找不到）。
+- **"配置即覆盖，而不是配置即唯一"**：`PortablePostgres:ExecutablePath` / `Media:FfmpegPath` 显式填写且文件存在 → 用它；填写但不存在 → **回落自动定位并记日志**，不抛异常。这条规则的动机来自一个很具体的场景：把 Windows 的 appsettings 同步到 Linux 服务器后，写死的 `pg0-windows-x86_64.exe` 会让服务直接起不来，而实际上 `linux-x64/` 下就有可用的二进制。
+- **可执行位**：`cp`/`unzip` 会丢 `+x`，而 `Process.Start` 在 Linux 上会直接 `Permission denied`。`EnsureExecutable` 在 Unix 上 `chmod 0755`，且**永不抛**（只读挂载时不至于让启动崩掉）。
+- **失败要可操作**：找不到 pg0 时，错误信息列出平台、**全部 5 条候选路径**、上游文件该放哪里、下载地址，以及"改用外部数据库"的替代方案——而不是一句"找不到文件"。
+
+**容器口径**：Electron 不进镜像（容器里没有渲染需求），API 以框架依赖方式跑（运行镜像已有 .NET 运行时），ffmpeg 用 `apt` 装而**不随镜像塞副本**——正好由"回落 PATH"这条规则支撑。容器里必须用命令行 `--urls http://0.0.0.0:5056`，因为 `appsettings.json` 的 `Urls` 优先级高于 `ASPNETCORE_URLS`，环境变量压不住。
+
+**发布脚本的两个默认行为**（都被真实需求逼出来的）：默认 `-SelfContained $true`（目标机不装 .NET）；默认删掉**其它平台**的原生二进制（`-KeepForeignRids` 可关闭），否则一个 Linux 包会白白带着 Windows 的 exe。
+
+### 9.10 自动更新（阶段 11）
+
+`electron-updater` + `desktop-electron/updater.js`，其中 `createUpdater` 是一个**可注入依赖**的工厂（`app` / `autoUpdater` 都可从参数传入），这样才能在没有 Electron 的 Node 环境里断言安装顺序。
+
+三处设计是刻意的：
+
+1. **关掉 `autoInstallOnAppQuit`**。本应用的 `before-quit` 会 `preventDefault()` 再 `app.exit(0)`，那条退出路径**不会**执行安装器；留着自动安装只会造成"下载好了但永远不生效"。
+2. **安装顺序固定为 `stopApi → markQuitting → quitAndInstall`**。安装器要覆盖 `resources/api`，而便携 `postgres.exe` 会锁住目录（§9.8 的卸载钩子解决的是同一个问题的另一面）。顺序在测试里被显式断言，且 `beforeInstall` 抛错时**绝不会**调到安装器。
+3. **更新源三级覆盖**：`MAF_UPDATE_URL` → 用户数据目录 `update-feed.json` → 包内 `app-update.yml`。同一份安装包因此能服务 GitHub Releases、自建静态目录和离线内网发布点。
+
+状态机（`idle/checking/available/downloading/downloaded/up-to-date/error/disabled`）通过 `desktop:update-status` 广播到渲染进程；`autoDownload=false` + 手动 `downloadUpdate()`，让"下载"和"安装"分成两个用户可见的动作。
 
 ## 10. Function Calling 与 MCP
 
@@ -315,8 +517,32 @@ Embedding 使用 `Microsoft.ML.OnnxRuntime` 和 `Microsoft.ML.Tokenizers` NuGet 
 
 ### MCP 双向互操作
 
-- **服务端**：`ModelContextProtocol.AspNetCore` 以 Streamable HTTP（`Stateless = true`）在 `Mcp:ServerPath`（默认 `/mcp`）暴露 `KnowledgeMcpTools`，其他大模型或智能体可以通过 MCP 读取本机知识库、摘要与工作目录文件。工具包括 `list_knowledge_bases`、`list_documents`、`search_knowledge_base`、`get_document_content`、`get_document_summary`、`workspace_list_files`、`workspace_read_file`、`workspace_write_file`。
+- **服务端**：`ModelContextProtocol.AspNetCore` 以 Streamable HTTP（`Stateless = true`）在 `Mcp:ServerPath`（默认 `/mcp`）暴露 `KnowledgeMcpTools`，其他大模型或智能体可以通过 MCP 读取本机知识库、摘要与工作目录文件。工具包括 `list_knowledge_bases`、`list_documents`、`search_knowledge_base`、`get_document_content`、`get_document_summary`、`get_document_status`、`upload_document`、`workspace_list_files`、`workspace_read_file`、`workspace_write_file`。
 - **客户端**：`McpClientRegistry` 按 `Mcp:Servers` 惰性连接外部服务器（`http` 或 `stdio`），工具列表缓存 30 秒，连接失败只记录状态并暴露在 `GET /api/mcp/status`。
+
+### 对外开放：客户端密钥、能力与作用域（阶段 6）
+
+把本项目当作"所有 Agent 工具的核心存储层"之后，`/mcp` 就是对外数据面。这里有一条必须澄清的边界：**监听回环地址不等于鉴权**，同机任何进程都能访问回环端口。因此原始设计（`/mcp` 与 `/api` 共用桌面一次性令牌）既挡不住本机进程，又因为令牌按设计不下发、不落盘，导致外部 Agent **永远无法接入**。
+
+阶段 6 把数据面拆成两条独立的信任路径：
+
+| 面 | 使用者 | 凭据 | 生命周期 |
+| --- | --- | --- | --- |
+| `/api` | 桌面窗口内的前端 | 桌面一次性令牌（`X-Api-Token`） | 每次启动重新生成，进程退出即失效 |
+| `/mcp` | 外部智能体（Cursor、Claude Desktop、自研 Agent） | 客户端密钥（`Authorization: Bearer` 或 `X-Api-Key`） | 长期有效，可轮换、可停用、可删除 |
+
+**闸门顺序固定**：认证（401）→ 启停（403）→ 限流（429 + `Retry-After`）→ 工具准入（200 + JSON-RPC 错误）→ 审计（旁路写入）。
+
+- **能力词表**：`knowledge:read`、`knowledge:write`、`workspace:read|write`、`files:read|write`、`avatar:read|write`，外加通配 `*` 与按作用域通配（`knowledge:*`）。用「能力:读/写」而不是单一"是否只读"布尔：外部 Agent 常常只需要知识库，没有任何理由读本机任意授权目录。
+- **工具清单即权限边界**：`McpToolCatalog` 把每个工具映射到「所需能力 + 是否写操作 + 是否作用于知识库」，**清单之外的工具默认拒绝**。新增工具忘记登记时是"不可用"，而不是"对所有人开放"。
+- **作用域三级收窄**：能力（能做什么）→ 工具白名单（能做哪些具体工具）→ 知识库白名单（能动哪些数据）。省略 `knowledgeBaseId` 时按默认知识库判定，因此"不传参数"不会绕过范围；`get_document_content` 只带资料 ID，必须回查资料所属知识库再判定。
+- **拒绝用 200 + JSON-RPC 错误**（`-32003`）：工具级拒绝要让模型看到可读原因并自行改道，而不是变成传输层错误。
+- **密钥只存摘要**：256 位随机值的 SHA-256 摘要 + 12 字符展示前缀；明文只在创建/轮换的响应里出现一次。轮换立即让旧密钥失效，更新作用域不会让已接入的客户端掉线。
+- **限流是令牌桶而非固定窗口**：额度存在数据库、可随时改，桶在额度变化时重新装满；能给出准确的 `Retry-After`。计数只放内存——限流是保护手段，不是计费依据。
+- **审计表 `agent_client_calls`**：记录"谁、调了什么工具、打到哪个知识库、结果、耗时"，**不含请求正文**（避免把用户资料复制进审计表）。删除客户端不删历史。
+- **写能力只有一条落地路径**：`upload_document` 把文本包成一次普通上传，复用解析/分块/内容版本/Outbox/索引生命周期，与插件摄取完全同源。
+
+**仍未实现**：OAuth 授权码流（当前是长期密钥）、按客户端的内容级 ACL（只有知识库级）、MCP 删除工具、调用配额与计费。
 
 ### 配置与端点
 

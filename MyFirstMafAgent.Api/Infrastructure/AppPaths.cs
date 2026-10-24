@@ -6,8 +6,8 @@ namespace MyFirstMafAgent.Api.Infrastructure;
 public static class AppPaths
 {
     /// <summary>
-    /// Velopack 安装目录名（%LOCALAPPDATA%\MyFirstMafAgent）。
-    /// 该目录由安装器管理，卸载时会被整体删除，因此不能存放用户数据。
+    /// 安装目录名（%LOCALAPPDATA%\MyFirstMafAgent）。
+    /// 该目录由打包器/安装器管理，升级或卸载时会被整体删除，因此不能存放用户数据。
     /// </summary>
     public const string ProductFolderName = "MyFirstMafAgent";
 

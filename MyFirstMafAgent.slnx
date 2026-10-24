@@ -1,5 +1,8 @@
 <Solution>
   <Project Path="MyFirstMafAgent.Api/MyFirstMafAgent.Api.csproj" />
   <Project Path="MyFirstMafAgent.Api.Tests/MyFirstMafAgent.Api.Tests.csproj" />
-  <Project Path="MyFirstMafAgent.Desktop/MyFirstMafAgent.Desktop.csproj" />
+  <Project Path="MyFirstMafAgent.Plugins.Sdk/MyFirstMafAgent.Plugins.Sdk.csproj" />
+  <Folder Name="/samples/">
+    <Project Path="samples/MyFirstMafAgent.Plugin.SamplePlatform/MyFirstMafAgent.Plugin.SamplePlatform.csproj" />
+  </Folder>
 </Solution>

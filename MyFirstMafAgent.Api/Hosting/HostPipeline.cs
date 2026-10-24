@@ -12,7 +12,10 @@ namespace MyFirstMafAgent.Api.Hosting;
 public static class HostPipeline
 {
     /// <summary>注册中间件与静态文件，返回前端是否已发布。</summary>
-    public static bool Configure(WebApplication app, DesktopSecurityOptions desktopSecurity)
+    public static bool Configure(
+        WebApplication app,
+        DesktopSecurityOptions desktopSecurity,
+        McpServerRegistration mcp)
     {
         var requestLogger = app.Services.GetRequiredService<ILoggerFactory>()
             .CreateLogger("MyFirstMafAgent.Api.Requests");
@@ -58,8 +61,11 @@ public static class HostPipeline
         }));
         app.UseCors("Vue");
 
-        // 桌面模式：本机令牌校验（仅数据面）与严格 CSP。控制台模式为无操作。
+        // 桌面模式：本机令牌校验（仅 /api）与严格 CSP。控制台模式为无操作。
         app.UseDesktopSecurity(desktopSecurity);
+
+        // MCP 数据面：客户端密钥、启停、限流、工具准入与调用审计。
+        app.UseAgentClientGate(mcp);
 
         // 托管 Vue 构建产物：开发时不存在 wwwroot 也不影响 API；发布脚本会把 dist 复制进来。
         var hasStaticFrontend = HasStaticFrontend(app);

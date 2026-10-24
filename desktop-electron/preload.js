@@ -11,5 +11,24 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('desktopHost', {
   platform: process.platform,
-  openExternal: (url) => ipcRenderer.invoke('desktop:open-external', url)
+  openExternal: (url) => ipcRenderer.invoke('desktop:open-external', url),
+
+  /** 版本信息（设置页「关于」用）。 */
+  getAppInfo: () => ipcRenderer.invoke('desktop:app-info'),
+
+  /** 自动更新：查询状态 / 手动检查 / 手动下载 / 立即安装并重启。 */
+  getUpdateState: () => ipcRenderer.invoke('desktop:update-state'),
+  checkForUpdates: () => ipcRenderer.invoke('desktop:update-check'),
+  downloadUpdate: () => ipcRenderer.invoke('desktop:update-download'),
+  installUpdate: () => ipcRenderer.invoke('desktop:update-install'),
+
+  /**
+   * 订阅更新状态推送。返回取消订阅函数，组件卸载时务必调用，
+   * 否则每次重新挂载都会多一个监听器。
+   */
+  onUpdateStatus: (callback) => {
+    const listener = (_event, state) => callback(state);
+    ipcRenderer.on('desktop:update-status', listener);
+    return () => ipcRenderer.removeListener('desktop:update-status', listener);
+  }
 });

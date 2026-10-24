@@ -50,7 +50,7 @@ npm run dev
 - 视频最大 `5 GiB`（配置为 `5 × 1024³` 字节），普通文件最大 `50 MiB`；分块默认 `16 MiB`。前端使用分块上传，网络中断后重新选择同一文件可从服务器已接收的位置继续。
 - 上传完成后会返回资料记录并进入后台队列；可在资料列表查看排队、处理进度、摘要或失败原因，失败项可重试。视频处理提取音轨、由 Whisper 转写、调用配置的 LLM 汇总，再把摘要和带时间戳的文本切分并写入向量索引供检索/问答使用。
 - FFmpeg 使用 `MyFirstMafAgent.Api/ExternalTools/ffmpeg/ffmpeg.exe`；仓库当前已有该文件。Embedding 使用 `MyFirstMafAgent.Api/ExternalTools/Embedding/bge-small-zh-v1.5/model.onnx` 和 `tokenizer.json`；仓库当前已有这两个文件，无需另建 Embedding 服务。
-- Whisper 默认使用 `Base` 模型，首次处理视频时尝试自动下载到 `MyFirstMafAgent.Api/App_Data/models/ggml-base.bin`。当前工作区尚无此模型文件；首次下载需要网络。如果 API 所在环境不能访问下载源，请手动获取 Whisper.net 对应的 GGML `base` 模型并保存到该路径，或在 `Media:WhisperModel` 与 `Media:WhisperModelPath` 中改为已准备的模型及路径。不要把 `.dll` 运行时文件当作模型文件。
+- Whisper 默认使用 `Base` 模型，模型文件默认缓存在 `MyFirstMafAgent.Api/App_Data/models/ggml-base.bin`（桌面版为 `%LOCALAPPDATA%\MyFirstMafAgentData\models`）。获取方式有两种：在「设置 → 语音转写（Whisper）」里**导入本地 ggml 模型文件**（离线环境用这个），或点「联网下载」让服务端后台下载。要换其它模型，改 `Media:WhisperModel` 与 `Media:WhisperModelPath`。不要把 `.dll` 运行时文件当作模型文件：ggml 文件前四字节是 `6C 6D 67 67`，导入时会校验。
 - 仅转写和摘要无需视觉模型。视频关键帧分析默认关闭（`Media:EnableVideoFrameAnalysis=false`）；启用后还需配置支持图像输入的 OpenAI-compatible 模型端点，当前默认的 `deepseek-chat` 端点不保证支持视觉输入。关键帧采样间隔和上限可用 `Media:FrameSampleIntervalSeconds`、`Media:MaxVideoFrames` 配置。
 - 大视频的实际处理耗时取决于视频时长、机器性能和 LLM 服务。API、PostgreSQL 与本地上传目录必须保持可用且有足够磁盘空间；此功能不是 5 GiB 单次 HTTP 请求。
 

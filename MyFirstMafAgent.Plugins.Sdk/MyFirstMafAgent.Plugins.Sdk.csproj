@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>true</IsPackable>
+    <PackageId>MyFirstMafAgent.Plugins.Sdk</PackageId>
+    <Description>MyFirstMafAgent 插件 SDK：manifest、JSON-RPC over stdio 协议与插件宿主骨架。</Description>
+    <!-- 插件 SDK 不能依赖 ASP.NET / SqlSugar：插件进程与核心进程只通过协议通信，不共享实现。 -->
+  </PropertyGroup>
+
+</Project>

@@ -1,18 +1,21 @@
-using Microsoft.Extensions.Options;
 using MyFirstMafAgent.Api.Options;
 using Whisper.net;
-using Whisper.net.Ggml;
 
 namespace MyFirstMafAgent.Api.Documents;
 
 public sealed class WhisperTranscriptionService(
-    IOptions<MediaOptions> mediaOptions,
-    IWebHostEnvironment environment) : IAsyncDisposable
+    WhisperModelManager modelManager) : IAsyncDisposable
 {
     private readonly SemaphoreSlim initializationLock = new(1, 1);
     private readonly SemaphoreSlim transcriptionLock = new(1, 1);
     private WhisperFactory? factory;
     private WhisperProcessor? processor;
+
+    /// <summary>
+    /// 当前推理对象绑定的模型文件指纹。导入/下载会替换文件，
+    /// 指纹变了就必须重建，否则会一直用旧模型（或用一个已被删除的文件句柄）。
+    /// </summary>
+    private (string Path, long Length, DateTime ModifiedAt)? loadedIdentity;
 
     public async Task<IReadOnlyList<WhisperTranscriptionSegment>> TranscribeAsync(string audioPath, CancellationToken cancellationToken)
     {
@@ -38,41 +41,19 @@ public sealed class WhisperTranscriptionService(
 
     private async Task EnsureInitializedAsync(CancellationToken cancellationToken)
     {
-        if (processor is not null) return;
+        // 先问管理器要路径：缺模型时它要么下载、要么抛出带处置建议的异常。
+        var modelPath = await modelManager.EnsureAvailableAsync(cancellationToken);
+        var info = new FileInfo(modelPath);
+        var identity = (modelPath, info.Length, info.LastWriteTimeUtc);
+        if (processor is not null && loadedIdentity == identity) return;
 
         await initializationLock.WaitAsync(cancellationToken);
         try
         {
-            if (processor is not null) return;
+            if (processor is not null && loadedIdentity == identity) return;
 
-            var options = mediaOptions.Value;
-            if (!Enum.TryParse<GgmlType>(options.WhisperModel, true, out var modelType))
-                throw new InvalidOperationException($"Unsupported Whisper model '{options.WhisperModel}'.");
-
-            var modelPath = Path.GetFullPath(Path.IsPathRooted(options.WhisperModelPath)
-                ? options.WhisperModelPath
-                : Path.Combine(environment.ContentRootPath, options.WhisperModelPath));
-            Directory.CreateDirectory(Path.GetDirectoryName(modelPath)!);
-
-            if (!File.Exists(modelPath))
-            {
-                var temporaryPath = $"{modelPath}.{Guid.NewGuid():N}.download";
-                try
-                {
-                    await using var modelStream = await WhisperGgmlDownloader.Default.GetGgmlModelAsync(
-                        modelType, cancellationToken: cancellationToken);
-                    await using (var fileStream = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write,
-                        FileShare.None, 81920, useAsync: true))
-                    {
-                        await modelStream.CopyToAsync(fileStream, cancellationToken);
-                    }
-                    File.Move(temporaryPath, modelPath);
-                }
-                finally
-                {
-                    if (File.Exists(temporaryPath)) File.Delete(temporaryPath);
-                }
-            }
+            // 模型被换掉了：先释放旧对象，再懒加载新文件。
+            await ReleaseProcessorAsync();
 
             var whisperFactory = WhisperFactory.FromPath(modelPath);
             try
@@ -80,6 +61,7 @@ public sealed class WhisperTranscriptionService(
                 var whisperProcessor = whisperFactory.CreateBuilder().WithLanguageDetection().Build();
                 factory = whisperFactory;
                 processor = whisperProcessor;
+                loadedIdentity = identity;
             }
             catch
             {
@@ -87,17 +69,27 @@ public sealed class WhisperTranscriptionService(
                 throw;
             }
         }
-
         finally
         {
             initializationLock.Release();
         }
     }
 
+    private async Task ReleaseProcessorAsync()
+    {
+        if (processor is not null)
+        {
+            await processor.DisposeAsync();
+            processor = null;
+        }
+        factory?.Dispose();
+        factory = null;
+        loadedIdentity = null;
+    }
+
     public async ValueTask DisposeAsync()
     {
-        if (processor is not null) await processor.DisposeAsync();
-        factory?.Dispose();
+        await ReleaseProcessorAsync();
         initializationLock.Dispose();
         transcriptionLock.Dispose();
     }

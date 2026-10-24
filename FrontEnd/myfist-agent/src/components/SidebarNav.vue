@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { BookOpen, Command, FileText, Fingerprint, FolderOpen, Heart, House, MessageSquareText, NotebookPen, Plus, Settings2, Sparkles } from 'lucide-vue-next'
+import { BookOpen, Command, FileText, Fingerprint, FolderOpen, Heart, House, ListChecks, MessageSquareText, NotebookPen, Plug, Plus, Settings2, Sparkles } from 'lucide-vue-next'
 import type { KnowledgeBase, Topic } from '../services/api'
 import type { ViewName } from '../types'
 
@@ -12,6 +12,7 @@ const props = defineProps<{
   activeTopicId: string
   materialCount: number
   noteCount: number
+  pendingJobCount: number
   displayName: string
 }>()
 const emit = defineEmits<{
@@ -61,6 +62,13 @@ const topicColorClass = (color: string) => ['lavender', 'mint', 'peach', 'blue',
       </button>
       <button class="nav-item" :class="{ active: activeView === 'avatar' }" @click="emit('navigate', 'avatar')">
         <Fingerprint :size="18" :stroke-width="1.8" /><span>我的分身</span>
+      </button>
+      <button class="nav-item" :class="{ active: activeView === 'jobs' }" @click="emit('navigate', 'jobs')">
+        <ListChecks :size="18" :stroke-width="1.8" /><span>任务中心</span>
+        <span v-if="pendingJobCount > 0" class="nav-count nav-count-live">{{ pendingJobCount }}</span>
+      </button>
+      <button class="nav-item" :class="{ active: activeView === 'plugins' }" @click="emit('navigate', 'plugins')">
+        <Plug :size="18" :stroke-width="1.8" /><span>插件</span>
       </button>
     </nav>
 

@@ -1,0 +1,65 @@
+# 知间（MyFirstMafAgent）容器部署
+#
+#   docker compose up -d --build
+#   浏览器打开 http://localhost:5056
+#
+# 组成：
+#   db  — 外部 PostgreSQL + pgvector（容器内**不**启动便携数据库）
+#   api — ASP.NET Core 后端 + 前端静态文件（wwwroot），不含 Electron
+#
+# 注意：
+#   - 密码只是本地开发的默认值，对外暴露前务必改掉。
+#   - Whisper 模型（141 MB ~ 3 GB）不随镜像分发：首次使用会按需下载到
+#     maf-data 卷里；离线环境把 Media__AutoDownloadWhisperModel 设为 false，
+#     再从「设置 → 语音转写」导入本地 ggml 文件。
+
+services:
+  db:
+    # pgvector 官方镜像。若该 tag 在你的环境里不存在，换成 pg17 / pg16 亦可
+    # （知识库只依赖 vector 扩展，不依赖 PG 18 特性）。
+    image: pgvector/pgvector:pg18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: myfirstmafagent
+    volumes:
+      - maf-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d myfirstmafagent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    # 默认不对外暴露数据库端口；需要本机用 psql 连的时候再放开。
+    # ports:
+    #   - "55432:5432"
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "5056:5056"
+    environment:
+      # 关键：填了连接串就不会启动便携 PostgreSQL。
+      ConnectionStrings__KnowledgeBase: "Host=db;Port=5432;Database=myfirstmafagent;Username=postgres;Password=postgres"
+      PortablePostgres__Enabled: "false"
+      Desktop__OpenBrowser: "false"
+      # 聊天模型（OpenAI 兼容）。也可以在「设置」页里改。
+      Llm__UseCloudApi: "true"
+      Llm__Online__Endpoint: "${LLM_ENDPOINT:-https://api.deepseek.com/v1}"
+      Llm__Online__Model: "${LLM_MODEL:-deepseek-chat}"
+      Llm__Online__ApiKey: "${LLM_API_KEY:-}"
+      # 离线部署：设为 false，然后从设置页导入 ggml 模型。
+      Media__AutoDownloadWhisperModel: "${AUTO_DOWNLOAD_WHISPER:-true}"
+    volumes:
+      # 上传的资料、日志、Whisper 模型、插件安装目录都在这里。
+      - maf-data:/app/App_Data
+
+volumes:
+  maf-pgdata:
+  maf-data:

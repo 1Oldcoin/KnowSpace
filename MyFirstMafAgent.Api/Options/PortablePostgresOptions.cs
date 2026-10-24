@@ -17,8 +17,23 @@ public sealed class PortablePostgresOptions
     /// </summary>
     public bool RespectExternalConnectionString { get; set; } = true;
 
-    /// <summary>pg0 可执行文件路径，相对路径基于应用内容根目录。</summary>
-    public string ExecutablePath { get; set; } = "ExternalTools/pgSQL/pg0-windows-x86_64.exe";
+    /// <summary>
+    /// pg0 可执行文件路径，相对路径基于应用内容根目录。
+    ///
+    /// <para>
+    /// 留空（推荐）= 按当前平台自动定位：
+    /// <c>ExternalTools/pgSQL/{rid}/pg0[.exe]</c> → <c>ExternalTools/pgSQL/pg0-{rid}[.exe]</c>
+    /// → <c>ExternalTools/pgSQL/pg0[.exe]</c>。
+    /// 这样同一份 appsettings.json 能在 Windows / Linux / macOS 上通用，
+    /// 也避免「把 Windows 包里的配置带到 Linux 后启动失败」。
+    /// </para>
+    ///
+    /// <para>
+    /// 配了具体路径但文件不存在时，仍会回落到自动定位；两者都找不到才报错。
+    /// 二进制可从 <see cref="MyFirstMafAgent.Api.Infrastructure.PlatformRuntime.Pg0ReleasesUrl"/> 下载。
+    /// </para>
+    /// </summary>
+    public string ExecutablePath { get; set; } = "";
 
     /// <summary>pg0 实例名，同时用于默认数据目录。</summary>
     public string InstanceName { get; set; } = "myfirstmafagent";

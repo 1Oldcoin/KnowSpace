@@ -5,7 +5,7 @@ namespace MyFirstMafAgent.Api.Hosting;
 /// <summary>
 /// 桌面宿主与 API 进程之间的启动契约（命令行参数 + 环境变量）。
 /// 只有 API 可执行文件被宿主当作子进程拉起时才会用到这些参数；
-/// 控制台与 Photino 模式下全部为空，行为不变。
+/// 控制台模式下全部为空，行为不变。
 /// </summary>
 public sealed record DesktopHostArguments(string? ReadyFilePath, string? DataRoot)
 {

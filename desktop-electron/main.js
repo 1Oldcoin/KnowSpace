@@ -4,7 +4,8 @@
  * Electron 主进程（原生 Electron + .NET API sidecar）。
  *
  * 职责边界：
- *  - 管理窗口、菜单、应用退出与更新（更新由 Velopack 负责，见 scripts/Publish-Portable.ps1）；
+ *  - 管理窗口、菜单与应用退出（安装包由 electron-builder 生成，见 electron-builder.yml；
+ *    自动更新尚未接，见 docs/ROADMAP.md）；
  *  - 生成一次性本机 API 令牌，通过环境变量交给 API 进程，自己持有并注入请求头；
  *  - 拉起 / 等待 / 停止 .NET API（不重复实现任何业务逻辑）。
  *
@@ -16,6 +17,7 @@ const { spawn } = require('node:child_process');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const { createUpdater } = require('./updater');
 
 const TOKEN_HEADER = 'X-Api-Token';
 const READY_TIMEOUT_MS = 180_000;
@@ -28,6 +30,7 @@ let apiBaseUrl = null;
 let apiToken = null;
 let isQuitting = false;
 let apiLogTail = [];
+let updater = null;
 
 function userDataRoot() {
   return process.env.MAF_DATA_ROOT
@@ -217,8 +220,65 @@ function openExternal(url) {
 }
 
 function installMenu() {
-  if (process.platform !== 'win32') return;
-  Menu.setApplicationMenu(null);
+  // Windows 上不再把菜单整块去掉：「检查更新」需要一个入口，
+  // 否则用户只能靠启动时的自动检查，发现问题也无从手动重试。
+  const template = [];
+
+  if (process.platform === 'darwin') {
+    template.push({ role: 'appMenu' });
+  }
+
+  template.push(
+    {
+      label: '文件',
+      submenu: [
+        process.platform === 'darwin' ? { role: 'close', label: '关闭窗口' } : { role: 'quit', label: '退出' }
+      ]
+    },
+    {
+      label: '帮助',
+      submenu: [
+        {
+          label: '检查更新',
+          click: () => {
+            if (!updater) return;
+            updater.check({ manual: true }).then((state) => {
+              // 手动检查必须给反馈，否则用户会以为按钮没生效。
+              if (state.phase === 'up-to-date') {
+                dialog.showMessageBox(mainWindow, {
+                  type: 'info',
+                  title: '检查更新',
+                  message: '当前已是最新版本。',
+                  detail: `版本 ${app.getVersion()}`
+                });
+              } else if (state.phase === 'error' || state.phase === 'disabled') {
+                dialog.showMessageBox(mainWindow, {
+                  type: 'warning',
+                  title: '检查更新',
+                  message: state.error || '暂时无法检查更新。',
+                  detail: '可以设置环境变量 MAF_UPDATE_URL，或在用户数据目录写 update-feed.json。'
+                });
+              }
+            });
+          }
+        },
+        { type: 'separator' },
+        {
+          label: '关于',
+          click: () => {
+            dialog.showMessageBox(mainWindow, {
+              type: 'info',
+              title: '关于知间',
+              message: `知间 ${app.getVersion()}`,
+              detail: `Electron ${process.versions.electron} · Chromium ${process.versions.chrome}\n数据目录：${userDataRoot()}`
+            });
+          }
+        }
+      ]
+    }
+  );
+
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
 async function stopApi() {
@@ -271,6 +331,23 @@ async function bootstrap() {
     if (typeof url === 'string') openExternal(url);
   });
 
+  ipcMain.handle('desktop:app-info', () => ({
+    version: app.getVersion(),
+    electron: process.versions.electron,
+    platform: process.platform,
+    packaged: app.isPackaged
+  }));
+
+  ipcMain.handle('desktop:update-state', () => (updater ? updater.getState() : null));
+  ipcMain.handle('desktop:update-check', () => (updater ? updater.check({ manual: true }) : null));
+  ipcMain.handle('desktop:update-download', () => (updater ? updater.download() : null));
+
+  // 安装前会把 API / 便携数据库停掉再退出，这里只负责把结果回传给界面。
+  ipcMain.handle('desktop:update-install', async () => {
+    if (!updater) return { ok: false, error: '更新组件未加载。' };
+    return await updater.installNow();
+  });
+
   const exePath = resolveApiExecutable();
   if (!exePath) {
     dialog.showErrorBox('缺少后端服务',
@@ -295,6 +372,15 @@ async function bootstrap() {
     installTokenHeader(apiBaseUrl);
     createWindow(apiBaseUrl);
     log(`API ready at ${apiBaseUrl}`);
+
+    // 自动更新：窗口就绪后再启用，避免和首屏抢资源。
+    updater = createUpdater({
+      log,
+      getWindow: () => mainWindow,
+      beforeInstall: stopApi,
+      markQuitting: () => { isQuitting = true; }
+    });
+    updater.startPeriodicChecks();
   } catch (error) {
     log(`startup failed: ${error.message}`);
     dialog.showErrorBox('启动失败', error.message);
@@ -308,6 +394,7 @@ async function bootstrap() {
     if (isQuitting) return;
     event.preventDefault();
     isQuitting = true;
+    updater?.dispose();
     await stopApi();
     app.exit(0);
   });

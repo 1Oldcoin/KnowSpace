@@ -400,7 +400,7 @@ public sealed class ToolCallingAgentTests
     /// <summary>记录每次请求体，并按顺序返回预设响应。</summary>
     private sealed class RecordingHttpHandler : HttpMessageHandler
     {
-        private readonly Queue<Func<string, CancellationToken, HttpResponseMessage>> _responses;
+        private readonly Queue<Func<string, CancellationToken, HttpResponseMessage>> _responses = new();
         private readonly Func<string, CancellationToken, HttpResponseMessage>? _factory;
 
         public RecordingHttpHandler(params string[] payloads)

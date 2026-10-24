@@ -6,7 +6,7 @@ using Microsoft.Extensions.Primitives;
 namespace MyFirstMafAgent.Api.Hosting;
 
 /// <summary>
-/// 桌面宿主（Electron / Photino）的本机 API 安全设置。
+/// 桌面宿主（Electron 壳）的本机 API 安全设置。
 ///
 /// <para>
 /// 监听 127.0.0.1 不等同于鉴权：同一台机器上的其它进程同样可以访问回环端口。
@@ -61,12 +61,18 @@ public sealed record DesktopSecurityOptions(bool Enabled, string? Token, bool St
 }
 
 /// <summary>
-/// 本机 API 令牌校验。只有数据面（<c>/api</c>、<c>/mcp</c>）需要令牌；
+/// 本机 API 令牌校验。只有 REST 数据面（<c>/api</c>）需要令牌；
 /// 静态资源与 SPA 文档本身不需要，避免窗口加载首页时依赖自定义请求头。
+///
+/// <para>
+/// <c>/mcp</c> <b>不在</b>此列：它是给外部智能体用的长期接口，
+/// 而桌面令牌按设计不下发、不落盘，外部客户端根本拿不到。
+/// MCP 的鉴权改由客户端密钥完成，见 <see cref="AgentClientGate"/>。
+/// </para>
 /// </summary>
 public static class LocalApiTokenValidator
 {
-    private static readonly string[] ProtectedPrefixes = ["/api", "/mcp"];
+    private static readonly string[] ProtectedPrefixes = ["/api"];
 
     /// <summary>该请求路径是否属于必须鉴权的数据面。</summary>
     public static bool RequiresToken(PathString path)

@@ -1,0 +1,23 @@
+# 构建上下文裁剪：镜像里只需要源码，不需要本地产物与用户数据。
+**/bin/
+**/obj/
+**/node_modules/
+**/dist/
+publish/
+App_Data/
+docs/
+desktop-electron/
+MyFirstMafAgent.Desktop/
+MyFirstMafAgent.Api.Tests/
+*.slnx
+*.user
+.git/
+.github/
+.vs/
+.vscode/
+**/*.log
+probe-out*.txt
+rowdump.txt
+
+# 注意：不要把 assets/ 排除掉 —— MyFirstMafAgent.Api.csproj 里
+# <ApplicationIcon>..\assets\app.ico</ApplicationIcon> 依赖它，缺了会构建失败。

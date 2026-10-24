@@ -17,19 +17,29 @@ public sealed class KnowledgeToolSource(
     public Task<IReadOnlyList<AgentToolDefinition>> GetToolsAsync(AgentToolContext context, CancellationToken cancellationToken)
     {
         var knowledgeBaseId = context.KnowledgeBaseId ?? KnowledgeBaseStore.DefaultKnowledgeBaseId;
+        // 对话绑定知识库时，模型只能看这个库；未绑定则维持跨库检索。
+        var scope = context.KnowledgeBaseId;
 
         IReadOnlyList<AgentToolDefinition> tools =
         [
             new AgentToolDefinition(
                 "list_knowledge_bases",
-                "列出用户本地的全部知识库（id 与名称）。",
+                scope is null
+                    ? "列出用户本地的全部知识库（id 与名称）。"
+                    : "列出本次对话可访问的知识库（已按对话范围限定）。",
                 """
                 {"type":"object","properties":{},"required":[]}
                 """,
                 async (_, token) =>
                 {
                     var items = await store.ListKnowledgeBasesAsync(token);
-                    return JsonSerializer.Serialize(items.Select(item => new { id = item.Id, name = item.Name }), JsonOptions);
+                    var visible = AgentKnowledgeScope.VisibleKnowledgeBaseIds(scope, items.Select(item => item.Id));
+                    var filtered = items.Where(item => visible.Contains(item.Id));
+                    return JsonSerializer.Serialize(new
+                    {
+                        scoped = scope is not null,
+                        items = filtered.Select(item => new { id = item.Id, name = item.Name })
+                    }, JsonOptions);
                 },
                 "knowledge"),
 
@@ -42,6 +52,8 @@ public sealed class KnowledgeToolSource(
                 async (arguments, token) =>
                 {
                     var target = ParseGuid(arguments, "knowledgeBaseId") ?? knowledgeBaseId;
+                    EnsureScope(scope, target);
+
                     var documents = await store.ListDocumentsAsync(target, token);
                     return JsonSerializer.Serialize(documents.Select(item => new
                     {
@@ -66,6 +78,8 @@ public sealed class KnowledgeToolSource(
                     var query = GetRequiredString(arguments, "query");
                     var limit = GetInt(arguments, "limit") ?? 5;
                     var target = ParseGuid(arguments, "knowledgeBaseId") ?? knowledgeBaseId;
+                    EnsureScope(scope, target);
+
                     var outcome = await search.SearchWithDiagnosticsAsync(query, target, limit, token);
                     return JsonSerializer.Serialize(new
                     {
@@ -93,6 +107,18 @@ public sealed class KnowledgeToolSource(
                 {
                     var documentId = ParseGuid(arguments, "documentId")
                         ?? throw new ArgumentException("缺少必填参数 documentId。");
+
+                    // 资料 ID 也能猜到：按资料所属知识库再校验一次作用域。
+                    if (scope is not null)
+                    {
+                        var documentKnowledgeBase = await store.GetDocumentKnowledgeBaseIdAsync(documentId, token);
+                        if (documentKnowledgeBase is { } owner
+                            && AgentKnowledgeScope.Check(scope, owner) is { } denied)
+                        {
+                            throw new InvalidOperationException(denied);
+                        }
+                    }
+
                     var page = await content.GetPageAsync(
                         documentId,
                         GetInt(arguments, "offset") ?? 0,
@@ -112,6 +138,13 @@ public sealed class KnowledgeToolSource(
         ];
 
         return Task.FromResult(tools);
+    }
+
+    /// <summary>越权访问直接报错，让模型看到原因并向用户说明，而不是静默返回空结果。</summary>
+    private static void EnsureScope(Guid? scope, Guid target)
+    {
+        if (AgentKnowledgeScope.Check(scope, target) is { } denied)
+            throw new InvalidOperationException(denied);
     }
 
     private static string? GetString(JsonElement arguments, string name) =>

@@ -1,5 +1,13 @@
 namespace MyFirstMafAgent.Api.Options;
 
+/// <summary>
+/// MCP 配置：既包含"把本机能力暴露出去"的服务端设置，也包含"调用外部 MCP 服务器"的客户端设置。
+///
+/// <para>
+/// 服务端默认<b>要求客户端密钥</b>：监听回环地址并不等于鉴权，同机的其它进程同样能访问；
+/// 把本项目当作"核心存储层"之后，未鉴权的读取面等于把整个知识库交出去。
+/// </para>
+/// </summary>
 public sealed class McpOptions
 {
     public const string SectionName = "Mcp";
@@ -15,6 +23,21 @@ public sealed class McpOptions
 
     /// <summary>外部 MCP 服务器列表。</summary>
     public List<McpRemoteServerOptions> Servers { get; set; } = [];
+
+    /// <summary>是否要求 <c>/mcp</c> 携带客户端密钥。关闭仅供本机调试。</summary>
+    public bool RequireClientKey { get; set; } = true;
+
+    /// <summary>新客户端默认的每分钟请求上限（0 = 不限制）。</summary>
+    public int DefaultRequestsPerMinute { get; set; } = 120;
+
+    /// <summary>客户端数量上限，防止无限注册。</summary>
+    public int MaxAgentClients { get; set; } = 50;
+
+    /// <summary>是否记录每次 MCP 调用的审计。</summary>
+    public bool EnableCallAudit { get; set; } = true;
+
+    /// <summary>网关允许读取的最大请求体字节数（需要读取工具参数才能做权限判定）。</summary>
+    public int MaxRequestBodyBytes { get; set; } = 8 * 1024 * 1024;
 }
 
 public sealed class McpRemoteServerOptions

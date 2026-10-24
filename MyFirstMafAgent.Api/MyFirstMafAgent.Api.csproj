@@ -28,6 +28,15 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\MyFirstMafAgent.Plugins.Sdk\MyFirstMafAgent.Plugins.Sdk.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 插件工具命名/清理等内部规则需要被契约测试直接验证。 -->
+    <InternalsVisibleTo Include="MyFirstMafAgent.Api.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Update="ExternalTools\ffmpeg\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Update="ExternalTools\Embedding\bge-small-zh-v1.5\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Update="ExternalTools\pgSQL\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />

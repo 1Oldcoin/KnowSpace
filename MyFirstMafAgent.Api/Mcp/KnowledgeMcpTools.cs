@@ -1,8 +1,12 @@
 using System.ComponentModel;
+using System.Text;
 using System.Text.Json;
+using Microsoft.AspNetCore.Http;
 using ModelContextProtocol.Server;
 using MyFirstMafAgent.Api.Agents.Tooling;
 using MyFirstMafAgent.Api.Application.Knowledge;
+using MyFirstMafAgent.Api.Documents;
+using MyFirstMafAgent.Api.Hosting;
 using MyFirstMafAgent.Api.Persistence;
 
 namespace MyFirstMafAgent.Api.Mcp;
@@ -16,15 +20,23 @@ public sealed class KnowledgeMcpTools(
     KnowledgeSearchService search,
     DocumentContentService content,
     SummaryService summaries,
+    KnowledgeIngestionService ingestion,
+    IHttpContextAccessor httpContext,
     AgentWorkspace workspace)
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     [McpServerTool(Name = "list_knowledge_bases")]
-    [Description("列出本机全部知识库的 ID 与名称。")]
+    [Description("列出本机知识库的 ID 与名称。受限客户端只能看到自己授权范围内的库。")]
     public async Task<string> ListKnowledgeBasesAsync(CancellationToken cancellationToken)
     {
         var items = await store.ListKnowledgeBasesAsync(cancellationToken);
+
+        // 受限客户端不应该通过列表接口看到范围之外的知识库名字（元数据也是信息）。
+        var client = AgentClientGate.GetClient(httpContext.HttpContext);
+        if (client is { IsKnowledgeBaseRestricted: true })
+            items = items.Where(item => client.CanAccessKnowledgeBase(item.Id)).ToList();
+
         return JsonSerializer.Serialize(items.Select(item => new { id = item.Id, name = item.Name }), JsonOptions);
     }
 
@@ -114,6 +126,71 @@ public sealed class KnowledgeMcpTools(
             : summary.Summary;
     }
 
+    [McpServerTool(Name = "get_document_status")]
+    [Description("查询资料的解析/分块/索引状态与进度。上传后用它确认是否可用。")]
+    public async Task<string> GetDocumentStatusAsync(
+        [Description("资料 ID")] string documentId,
+        CancellationToken cancellationToken)
+    {
+        if (!Guid.TryParse(documentId, out var id))
+            return "[错误] documentId 不是有效的 GUID。";
+
+        var document = await store.GetDocumentAsync(id, cancellationToken);
+        if (document is null) return $"[错误] 资料不存在：{id:D}";
+
+        return JsonSerializer.Serialize(new
+        {
+            documentId = document.Id,
+            fileName = document.FileName,
+            status = document.Status,
+            progress = document.Progress,
+            processingStage = document.ProcessingStage,
+            chunkCount = document.ChunkCount,
+            error = document.Error,
+            createdAt = document.CreatedAt
+        }, JsonOptions);
+    }
+
+    [McpServerTool(Name = "upload_document")]
+    [Description("把一段文本作为新资料写入指定知识库（写操作）。写入后会排队解析、分块并建立索引，可用 get_document_status 跟踪进度。")]
+    public async Task<string> UploadDocumentAsync(
+        [Description("资料标题")] string title,
+        [Description("资料正文（Markdown 或纯文本）")] string content,
+        [Description("文件名，可留空；留空时由标题生成 .md 文件名")] string? fileName = null,
+        [Description("目标知识库 ID，可留空（默认知识库）")] string? knowledgeBaseId = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(title)) return "[错误] title 不能为空。";
+        if (string.IsNullOrWhiteSpace(content)) return "[错误] content 不能为空。";
+
+        var id = ParseKnowledgeBaseId(knowledgeBaseId);
+        if (await store.GetKnowledgeBaseAsync(id, cancellationToken) is null)
+            return $"[错误] 知识库不存在：{id:D}";
+
+        var name = BuildDocumentFileName(title, fileName);
+        var contentType = name.EndsWith(".md", StringComparison.OrdinalIgnoreCase)
+            ? "text/markdown; charset=utf-8"
+            : "text/plain; charset=utf-8";
+
+        using var stream = new MemoryStream(Encoding.UTF8.GetBytes(content), writable: false);
+        var upload = new FormFile(stream, 0, stream.Length, "file", name)
+        {
+            Headers = new HeaderDictionary(),
+            ContentType = contentType
+        };
+
+        var response = await ingestion.UploadAsync(upload, id, cancellationToken);
+
+        return JsonSerializer.Serialize(new
+        {
+            documentId = response.Id,
+            fileName = response.FileName,
+            status = response.Status,
+            knowledgeBaseId = id,
+            hint = "解析在后台进行，可用 get_document_status 查询进度。"
+        }, JsonOptions);
+    }
+
     [McpServerTool(Name = "workspace_list_files")]
     [Description("列出智能体本地工作目录中的文件。")]
     public Task<string> ListWorkspaceFilesAsync(
@@ -154,4 +231,34 @@ public sealed class KnowledgeMcpTools(
 
     private static Guid ParseKnowledgeBaseId(string? value) =>
         Guid.TryParse(value, out var id) ? id : KnowledgeBaseStore.DefaultKnowledgeBaseId;
+
+    /// <summary>
+    /// 生成安全的文件名：外部客户端传入的文件名一律当作不可信输入，
+    /// 去掉目录成分与非法字符，并强制限定为文本扩展名。
+    /// </summary>
+    private static string BuildDocumentFileName(string title, string? fileName)
+    {
+        var candidate = string.IsNullOrWhiteSpace(fileName) ? title : fileName!;
+        candidate = Path.GetFileName(candidate.Replace('\\', '/')).Trim();
+
+        var extension = Path.GetExtension(candidate);
+        if (!extension.Equals(".md", StringComparison.OrdinalIgnoreCase)
+            && !extension.Equals(".txt", StringComparison.OrdinalIgnoreCase))
+        {
+            extension = ".md";
+        }
+
+        var stem = Path.GetFileNameWithoutExtension(candidate);
+        var safe = new StringBuilder(stem.Length);
+        foreach (var character in stem)
+        {
+            if (char.IsLetterOrDigit(character) || character is '-' or '_' or ' ') safe.Append(character);
+        }
+
+        var trimmed = safe.ToString().Trim();
+        if (trimmed.Length == 0) trimmed = "document";
+        if (trimmed.Length > 80) trimmed = trimmed[..80];
+
+        return trimmed + extension.ToLowerInvariant();
+    }
 }

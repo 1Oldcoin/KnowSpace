@@ -13,7 +13,11 @@ public static class ApiEndpointMappings
         endpoints.MapSettingsEndpoints();
         endpoints.MapStudyEndpoints();
         endpoints.MapDocumentContentEndpoints();
+        endpoints.MapMediaEndpoints();
         endpoints.MapAgentEndpoints();
         endpoints.MapAvatarEndpoints();
+        endpoints.MapPluginEndpoints();
+        endpoints.MapAgentClientEndpoints();
+        endpoints.MapJobEndpoints();
     }
 }

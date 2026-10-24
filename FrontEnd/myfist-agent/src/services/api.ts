@@ -791,6 +791,49 @@ export async function probeEmbeddingSpec(specId: string): Promise<{ dimensions: 
   return await response.json() as { dimensions: number; elapsedMilliseconds: number }
 }
 
+export interface WhisperModelStatus {
+  model: string
+  path: string
+  exists: boolean
+  sizeBytes: number
+  modifiedAt: string | null
+  autoDownload: boolean
+  downloading: boolean
+  downloadedBytes: number
+  lastError: string | null
+  ready: boolean
+}
+
+export async function getWhisperModelStatus(): Promise<WhisperModelStatus> {
+  const response = await fetch(`${apiBaseUrl}/api/media/whisper`)
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  return await response.json() as WhisperModelStatus
+}
+
+/** 导入本地 ggml 模型文件（离线环境的正路）。走原始字节流，避免大文件被 multipart 缓冲。 */
+export async function importWhisperModel(file: File): Promise<WhisperModelStatus> {
+  const response = await fetch(`${apiBaseUrl}/api/media/whisper/import-raw?fileName=${encodeURIComponent(file.name)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: file,
+  })
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  return await response.json() as WhisperModelStatus
+}
+
+/** 触发后台下载；返回时通常还在下载中，需要轮询 getWhisperModelStatus。 */
+export async function downloadWhisperModel(): Promise<WhisperModelStatus> {
+  const response = await fetch(`${apiBaseUrl}/api/media/whisper/download`, { method: 'POST' })
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  return await response.json() as WhisperModelStatus
+}
+
+export async function deleteWhisperModel(): Promise<WhisperModelStatus> {
+  const response = await fetch(`${apiBaseUrl}/api/media/whisper`, { method: 'DELETE' })
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  return await response.json() as WhisperModelStatus
+}
+
 export async function getStudySummary(days = 30): Promise<StudySummary> {
   const response = await fetch(`${apiBaseUrl}/api/study/checkins?days=${days}`)
   if (!response.ok) throw new Error(await getErrorMessage(response))
@@ -1331,3 +1374,468 @@ export async function sendAvatarChat(sessionId: string | null, message: string):
   if (!response.ok) throw new Error(await getErrorMessage(response))
   return await response.json() as AvatarChatReply
 }
+
+// ---- 任务中心（长任务队列） ----
+//
+// 契约见 docs/JOBS.md：任务状态只存在库里，前端只是「观察与控制」，
+// 真正的执行永远在后台槽位。因此这里没有"启动任务"之类的概念，
+// 只有列表 / 详情 / 取消 / 重跑 / 实时流。
+
+export type JobStatus = 'Queued' | 'Running' | 'Succeeded' | 'Failed' | 'Cancelled'
+
+export interface JobRecord {
+  id: string
+  type: string
+  status: JobStatus
+  priority: number
+  attempts: number
+  maxAttempts: number
+  payload?: string | null
+  result?: string | null
+  progress: number
+  progressMessage?: string | null
+  lastError?: string | null
+  workerId?: string | null
+  idempotencyKey?: string | null
+  knowledgeBaseId?: string | null
+  subjectId?: string | null
+  cancelRequested: boolean
+  createdAt: string
+  updatedAt: string
+  nextRunAt: string
+  startedAt?: string | null
+  completedAt?: string | null
+  leaseUntil?: string | null
+}
+
+export interface JobCounts {
+  queued: number
+  running: number
+  succeeded: number
+  failed: number
+  cancelled: number
+  oldestQueuedAt?: string | null
+  pending: number
+}
+
+/** SSE 推送的一条任务变化（`kind` 目前有 job/progress/completed/failed）。 */
+export interface JobStreamEvent {
+  kind: string
+  jobId: string
+  type: string
+  status: JobStatus
+  progress: number
+  message?: string | null
+  error?: string | null
+  occurredAt: string
+}
+
+export interface JobQueryOptions {
+  status?: string
+  type?: string
+  subjectId?: string
+  limit?: number
+}
+
+export async function listJobs(options: JobQueryOptions = {}): Promise<JobRecord[]> {
+  const params = new URLSearchParams()
+  if (options.status) params.set('status', options.status)
+  if (options.type) params.set('type', options.type)
+  if (options.subjectId) params.set('subjectId', options.subjectId)
+  params.set('limit', String(options.limit ?? 50))
+
+  const response = await fetch(`${apiBaseUrl}/api/jobs?${params.toString()}`)
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  const body = await response.json() as { jobs: JobRecord[] }
+  return body.jobs
+}
+
+export async function getJobCounts(): Promise<JobCounts> {
+  const response = await fetch(`${apiBaseUrl}/api/jobs/counts`)
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  return await response.json() as JobCounts
+}
+
+/** 已注册的任务类型。界面用它填下拉框，不要硬编码类型名。 */
+export async function listJobTypes(): Promise<string[]> {
+  const response = await fetch(`${apiBaseUrl}/api/jobs/types`)
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  const body = await response.json() as { types: string[] }
+  return body.types
+}
+
+/**
+ * 按类型的并发配额与当前占用。
+ *
+ * `limit === null` 表示该类任务没有单独限流（只受 `maxConcurrentJobs` 约束）。
+ * 计数是「本进程」的，多进程部署时每个进程各自限流。
+ */
+export interface JobTypeQuota {
+  type: string
+  limit: number | null
+  running: number
+}
+
+export interface JobQuotaSnapshot {
+  maxConcurrentJobs: number
+  quotas: JobTypeQuota[]
+}
+
+export async function getJobQuotas(): Promise<JobQuotaSnapshot> {
+  const response = await fetch(`${apiBaseUrl}/api/jobs/quotas`)
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  return await response.json() as JobQuotaSnapshot
+}
+
+export async function getJob(jobId: string): Promise<JobRecord> {
+  const response = await fetch(`${apiBaseUrl}/api/jobs/${encodeURIComponent(jobId)}`)
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  return await response.json() as JobRecord
+}
+
+export async function cancelJob(jobId: string): Promise<JobRecord> {
+  const response = await fetch(`${apiBaseUrl}/api/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' })
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  return await response.json() as JobRecord
+}
+
+export async function retryJob(jobId: string): Promise<JobRecord> {
+  const response = await fetch(`${apiBaseUrl}/api/jobs/${encodeURIComponent(jobId)}/retry`, { method: 'POST' })
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  return await response.json() as JobRecord
+}
+
+export type JobStreamState = 'connecting' | 'live' | 'offline'
+
+export interface JobStreamHandlers {
+  /** 首帧快照（每次重连都会再给一份）。 */
+  onSnapshot?: (snapshot: { counts: JobCounts; jobs: JobRecord[] }) => void
+  onJobEvent?: (event: JobStreamEvent) => void
+  onStateChange?: (state: JobStreamState) => void
+}
+
+/**
+ * 订阅任务变化（SSE）。
+ *
+ * 返回取消函数：组件卸载时必须调用，否则 EventSource 会一直重连。
+ * `EventSource` 自带重连，这里不需要写退避；`onStateChange('offline')`
+ * 只是让界面把"实时"角标改成"重连中/轮询"。
+ */
+export function openJobStream(handlers: JobStreamHandlers): () => void {
+  let source: EventSource
+  try {
+    source = new EventSource(`${apiBaseUrl}/api/jobs/stream`)
+  } catch {
+    handlers.onStateChange?.('offline')
+    return () => {}
+  }
+
+  handlers.onStateChange?.('connecting')
+
+  source.addEventListener('open', () => handlers.onStateChange?.('live'))
+
+  source.addEventListener('snapshot', (event) => {
+    try {
+      const payload = JSON.parse((event as MessageEvent<string>).data) as { counts: JobCounts; jobs: JobRecord[] }
+      handlers.onStateChange?.('live')
+      handlers.onSnapshot?.(payload)
+    } catch {
+      // 半帧/坏帧直接忽略，下一帧会自愈。
+    }
+  })
+
+  // 命名事件必须逐个订阅：onmessage 只收「没有 event: 名」的帧。
+  for (const name of ['job', 'progress', 'completed', 'failed']) {
+    source.addEventListener(name, (event) => {
+      try {
+        handlers.onJobEvent?.(JSON.parse((event as MessageEvent<string>).data) as JobStreamEvent)
+      } catch {
+        // 同上。
+      }
+    })
+  }
+
+  source.addEventListener('error', () => {
+    // readyState=2（CLOSED）表示浏览器放弃了重连；1（CONNECTING）表示仍在自动重连。
+    handlers.onStateChange?.(source.readyState === 2 ? 'offline' : 'connecting')
+  })
+
+  return () => source.close()
+}
+
+// ---- 插件（安装 / 授权 / 配置 / 同步 / 版本） ----
+//
+// 契约见 docs/PLUGIN-LIFECYCLE.md。三条约束直接影响界面设计：
+//  1. 声明了 network/file-read/file-write/clipboard/process 的插件**不会自动启动**，
+//     状态停在 PermissionRequired，必须由用户在这里授权。
+//  2. 升级/回滚/卸载会先排空再换文件，因此这几个按钮可能要等十几秒。
+//  3. 同步是长任务，正确的入口是 sync-async（进任务队列），而不是阻塞的 /sync。
+
+export type PluginState =
+  | 'Discovered' | 'Starting' | 'Running' | 'Degraded' | 'Failed'
+  | 'Stopped' | 'NeedsConfiguration' | 'Disabled' | 'PermissionRequired' | 'Draining'
+
+export const pluginPermissionLabels: Record<string, string> = {
+  network: '联网',
+  'file-read': '读取本地文件',
+  'file-write': '写入本地文件',
+  clipboard: '剪贴板',
+  process: '启动子进程',
+}
+
+export const pluginStateLabels: Record<PluginState, string> = {
+  Discovered: '已发现',
+  Starting: '启动中',
+  Running: '运行中',
+  Degraded: '降级',
+  Failed: '失败',
+  Stopped: '已停止',
+  NeedsConfiguration: '待配置',
+  Disabled: '已停用',
+  PermissionRequired: '待授权',
+  Draining: '排空中',
+}
+
+export interface PluginStatus {
+  id: string
+  name: string
+  version: string
+  publisher: string
+  state: PluginState
+  directory: string
+  capabilities: string[]
+  health: string | null
+  lastError: string | null
+  enabled: boolean
+  activeVersion: string | null
+  installedVersions: string[]
+  grantedPermissions: string[]
+  missingPermissions: string[]
+  integrity: string | null
+  configured: boolean
+  inFlightInvocations: number
+  draining: boolean
+}
+
+export interface PluginCapabilityDeclaration {
+  id: string
+  kind: string
+  name: string
+  description?: string | null
+  parameters?: string | null
+  permissions?: string[]
+  sideEffect?: string
+}
+
+export interface PluginTrustedKeyView {
+  keyId: string
+  pluginId: string
+  algorithm: string
+  fingerprint: string
+  note?: string | null
+  createdAt?: string
+  updatedAt?: string
+}
+
+export interface PluginListResult {
+  enabled: boolean
+  rootPath: string
+  plugins: PluginStatus[]
+}
+
+export interface PluginDetail {
+  status: PluginStatus
+  capabilities: string[]
+  declaredCapabilities: PluginCapabilityDeclaration[]
+  health: string | null
+  lastError: string | null
+  inFlightInvocations: number
+  draining: boolean
+  trustedKey: PluginTrustedKeyView | null
+  config: string | null
+  configSchema: string | null
+  configRequired: string[]
+  declaredPermissions: string[]
+  allowedKnowledgeBaseIds: string[]
+  maxDocuments: number
+  limits: Record<string, number> | null
+}
+
+export interface PluginAuditEntry {
+  id: number
+  occurredAt: string
+  pluginId: string
+  action: string
+  capabilityId?: string | null
+  actor: string
+  outcome: string
+  durationMs: number
+  detail?: string | null
+}
+
+export interface PluginSyncStateView {
+  scopeKey: string
+  pluginId: string
+  capabilityId: string
+  knowledgeBaseId: string
+  cursor?: string | null
+  nextSyncAfterSeconds?: number | null
+  lastSyncedAt?: string | null
+  lastStatus?: string | null
+  lastError?: string | null
+  updatedAt: string
+}
+
+export async function listPlugins(): Promise<PluginListResult> {
+  const response = await fetch(`${apiBaseUrl}/api/plugins`)
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  return await response.json() as PluginListResult
+}
+
+export async function getPlugin(pluginId: string): Promise<PluginDetail> {
+  const response = await fetch(`${apiBaseUrl}/api/plugins/${encodeURIComponent(pluginId)}`)
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  return await response.json() as PluginDetail
+}
+
+/** 安装/升级插件包（ZIP）。后端按 manifest 版本号判断是首装还是升级。 */
+export async function installPlugin(file: File): Promise<{ pluginId: string; version: string; state?: string; warnings?: string[] }> {
+  const form = new FormData()
+  form.append('file', file)
+
+  const response = await fetch(`${apiBaseUrl}/api/plugins/install`, { method: 'POST', body: form })
+  if (!response.ok) {
+    // 安装失败会返回 errors 数组，逐条显示比只显示"安装失败"有用得多。
+    const body = await response.json().catch(() => null) as { message?: string; errors?: string[] } | null
+    const detail = body?.errors?.length ? `${body.message ?? '安装失败'}：${body.errors.join('；')}` : body?.message
+    throw new Error(detail || `安装失败（${response.status}）`)
+  }
+  return await response.json() as { pluginId: string; version: string; state?: string; warnings?: string[] }
+}
+
+async function pluginOperation(pluginId: string, path: string, init?: RequestInit): Promise<void> {
+  const response = await fetch(`${apiBaseUrl}/api/plugins/${encodeURIComponent(pluginId)}${path}`, init)
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { message?: string; errors?: string[] } | null
+    const detail = body?.errors?.length ? `${body.message ?? '操作失败'}：${body.errors.join('；')}` : body?.message
+    throw new Error(detail || `操作失败（${response.status}）`)
+  }
+}
+
+export function setPluginEnabled(pluginId: string, enabled: boolean): Promise<void> {
+  return pluginOperation(pluginId, '/enabled', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  })
+}
+
+/** 保存配置。传 null 表示清空（后端要求显式 config 字段，这里已经包好）。 */
+export function savePluginConfig(pluginId: string, config: unknown): Promise<void> {
+  return pluginOperation(pluginId, '/config', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ config }),
+  })
+}
+
+export function savePluginPermissions(pluginId: string, permissions: string[]): Promise<void> {
+  return pluginOperation(pluginId, '/permissions', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ permissions }),
+  })
+}
+
+/** 作用域：空数组表示不限制知识库；maxDocuments=0 表示跟随全局默认。 */
+export function savePluginScope(pluginId: string, allowedKnowledgeBaseIds: string[], maxDocuments: number): Promise<void> {
+  return pluginOperation(pluginId, '/scope', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ allowedKnowledgeBaseIds, maxDocuments }),
+  })
+}
+
+export function restartPlugin(pluginId: string): Promise<void> {
+  return pluginOperation(pluginId, '/restart', { method: 'POST' })
+}
+
+export function checkPluginHealth(pluginId: string): Promise<{ status?: string; message?: string }> {
+  return fetch(`${apiBaseUrl}/api/plugins/${encodeURIComponent(pluginId)}/health`, { method: 'POST' })
+    .then(async response => {
+      if (!response.ok) throw new Error(await getErrorMessage(response))
+      return await response.json() as { status?: string; message?: string }
+    })
+}
+
+/** 主动排空：不再接受新调用，等在途调用结束（最多 DrainTimeoutSeconds）。 */
+export async function drainPlugin(pluginId: string): Promise<{ drained: boolean; inFlight: number }> {
+  const response = await fetch(`${apiBaseUrl}/api/plugins/${encodeURIComponent(pluginId)}/drain`, { method: 'POST' })
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  return await response.json() as { drained: boolean; inFlight: number }
+}
+
+export function rollbackPlugin(pluginId: string): Promise<void> {
+  return pluginOperation(pluginId, '/rollback', { method: 'POST' })
+}
+
+export async function uninstallPlugin(pluginId: string): Promise<void> {
+  const response = await fetch(`${apiBaseUrl}/api/plugins/${encodeURIComponent(pluginId)}`, { method: 'DELETE' })
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+}
+
+/** 把一次同步排进任务队列，返回可跟踪的任务（在任务中心看进度、可取消）。 */
+export async function syncPluginAsync(pluginId: string, capabilityId: string, knowledgeBaseId: string): Promise<JobRecord> {
+  const response = await fetch(`${apiBaseUrl}/api/plugins/${encodeURIComponent(pluginId)}/sync-async`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ capabilityId, knowledgeBaseId }),
+  })
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  return await response.json() as JobRecord
+}
+
+export async function listPluginSyncStates(pluginId: string): Promise<PluginSyncStateView[]> {
+  const response = await fetch(`${apiBaseUrl}/api/plugins/${encodeURIComponent(pluginId)}/sync-state`)
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  const body = await response.json() as { states: PluginSyncStateView[] }
+  return body.states
+}
+
+export async function listPluginAudit(pluginId: string | null, limit = 50): Promise<PluginAuditEntry[]> {
+  const params = new URLSearchParams({ limit: String(limit) })
+  const path = pluginId ? `/api/plugins/${encodeURIComponent(pluginId)}/audit` : '/api/plugins/audit'
+  const response = await fetch(`${apiBaseUrl}${path}?${params.toString()}`)
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  const body = await response.json() as { entries: PluginAuditEntry[] }
+  return body.entries
+}
+
+export async function listTrustedKeys(): Promise<PluginTrustedKeyView[]> {
+  const response = await fetch(`${apiBaseUrl}/api/plugins/trusted-keys`)
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  const body = await response.json() as { keys: PluginTrustedKeyView[] }
+  return body.keys
+}
+
+export async function saveTrustedKey(keyId: string, pluginId: string, publicKeyPem: string, algorithm: string, note?: string): Promise<PluginTrustedKeyView> {
+  const response = await fetch(`${apiBaseUrl}/api/plugins/trusted-keys/${encodeURIComponent(keyId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pluginId, publicKeyPem, algorithm, note: note ?? null }),
+  })
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { message?: string } | null
+    throw new Error(body?.message || `保存失败（${response.status}）`)
+  }
+  return await response.json() as PluginTrustedKeyView
+}
+
+export async function deleteTrustedKey(keyId: string): Promise<void> {
+  const response = await fetch(`${apiBaseUrl}/api/plugins/trusted-keys/${encodeURIComponent(keyId)}`, { method: 'DELETE' })
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { message?: string } | null
+    throw new Error(body?.message || `删除失败（${response.status}）`)
+  }
+}
+

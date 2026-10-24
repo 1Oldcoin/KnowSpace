@@ -28,7 +28,7 @@
 
 ## 2. 项目组成与目录结构
 
-解决方案 `MyFirstMafAgent.slnx` 包含四个 .NET 项目；Vue 前端是独立的 npm 工程，不在 `.slnx` 项目清单中。
+解决方案 `MyFirstMafAgent.slnx` 包含三个 .NET 项目；Vue 前端与 Electron 壳是独立的 npm 工程，不在 `.slnx` 项目清单中。
 
 ```text
 MyFirstMafAgent/
@@ -46,16 +46,18 @@ MyFirstMafAgent/
 │  ├─ Models/                           # ONNX Embedding 和模型客户端
 │  ├─ Options/                          # 配置项和校验
 │  ├─ Persistence/                      # SqlSugar Store、表结构和检索
-│  ├─ Hosting/                          # 模块化组合根：选项/持久化/知识/分身/工具/MCP/Worker/管线
+│  ├─ Hosting/                          # 模块化组合根：选项/持久化/知识/分身/工具/MCP/插件/Worker/管线
+│  ├─ Plugins/                          # 插件 manifest 发现、子进程宿主、生命周期、工具桥接、摄取下沉
 │  ├─ ExternalTools/                    # FFmpeg、Embedding 模型与 pg0 便携 PostgreSQL
 │  ├─ wwwroot/                          # Vue 构建产物（发布脚本自动写入）
 │  ├─ App_Data/                         # 上传文件、分块暂存及模型缓存
 │  ├─ ApiHost.cs                        # 业务组合根：启动顺序与生命周期
 │  └─ Program.cs                        # 控制台入口：Build → Start → 打开浏览器
-├─ MyFirstMafAgent.Desktop/             # Photino 桌面壳：进程内 Kestrel + WebView2 窗口
+├─ MyFirstMafAgent.Plugins.Sdk/         # 插件 SDK：manifest 校验、SemVer、JSON-RPC 分帧、PluginServer
+├─ samples/                             # 示例插件（com.example.sample-platform）
 ├─ desktop-electron/                    # Electron 桌面壳：主进程 + preload + .NET API sidecar
 ├─ MyFirstMafAgent.Api.Tests/           # xUnit 单元测试
-├─ docs/                                # 阶段 0 基线与执行口径
+├─ docs/                                # 阶段执行口径：基线、插件作者指南、插件生命周期、MCP 接入指南
 ├─ assets/app.ico                       # 应用图标（exe / 窗口 / 安装包 / 快捷方式共用）
 ├─ scripts/                             # 发布、架构检查、基线与桌面契约脚本
 └─ FrontEnd/myfist-agent/               # Vue 3 + TypeScript + Vite 前端
@@ -72,7 +74,44 @@ MyFirstMafAgent/
 | --- | --- |
 | `Program.cs` | 控制台入口：构建并启动 `ApiHost`，按配置自动打开浏览器。 |
 | `ApiHost.cs` | 业务组合根：内容根解析、数据目录重定向、便携数据库启动/停止、构建、初始化与端点映射的顺序；控制台版和桌面版共用。 |
-| `Hosting/` | 模块化注册：`HostBootstrap`、`HostOptionsModule`、`PersistenceModule`、`KnowledgeModule`、`DocumentsChatsModule`、`AvatarModule`、`AgentModule`、`McpModule`、`WorkerModule`、`HostPipeline`、`DatabaseInitializer`。新增宿主只能复用这些模块，不得复制注册。 |
+| `Hosting/` | 模块化注册：`HostBootstrap`、`HostOptionsModule`、`PersistenceModule`、`KnowledgeModule`、`DocumentsChatsModule`、`AvatarModule`、`AgentModule`、`McpModule`、`PluginModule`、`WorkerModule`、`HostPipeline`、`DatabaseInitializer`。新增宿主只能复用这些模块，不得复制注册。 |
+| `Plugins/PluginManifestLoader.cs` | 扫描 `Plugins:RootPath` 下的插件目录，解析 `versions/{v}` + `active.json` 布局（兼容扁平布局），校验 manifest 并解析入口。 |
+| `Plugins/PluginPaths.cs` | 插件目录布局的唯一计算入口：版本目录、激活指针、数据目录、暂存目录。 |
+| `Plugins/PluginInstaller.cs` | 两段式安装：`StageAsync` 只做 ZIP 解压、manifest/入口校验与摘要校验（不碰生效目录），`InstallFromDirectoryAsync` 负责落盘切换；另含激活、回滚、卸载、旧版本修剪。 |
+| `Plugins/PluginIntegrity.cs` | 规范化包摘要（SHA-256）与 ECDSA/RSA 签名校验，`off/warn/enforce` 三档策略。 |
+| `Plugins/PluginAuditWriter.cs` | 插件调用与生命周期审计，入参脱敏、超长截断，写失败不阻断业务。 |
+| `Plugins/PluginProcessHost.cs` | 启动插件子进程、校验握手回执、下发配置、健康检查与带超时/取消的能力调用；维护在途调用计数与排空状态（排空期新调用立即 503）。 |
+| `Plugins/PluginManager.cs` | 插件发现、四道启动闸门（启用/完整性/配置/权限）、退避重启、启停/配置/授权/升级/回滚/卸载；升级＝排空 → 停旧进程 → 落盘 → 启动，另暴露 `DrainAsync` 与 `IsScheduledSyncEligible`。 |
+| `Plugins/IPluginRuntime.cs` | 同步用例需要的最小插件运行时端口（调用能力 + 是否参与定时同步），让 `PluginSyncService` 可脱离进程单测。 |
+| `Plugins/PluginSyncService.cs` | 平台同步用例：调插件 → 解析批次 → 上限校验 → 幂等摄取 → 写游标 → 记审计；手动/定时/重试共用这一份逻辑，失败保留旧游标。 |
+| `Plugins/PluginSyncJobHandler.cs` | `plugin.sync` 任务处理器（参数解析 + 可重试性映射）与补投器（按 `plugin_sync_states` 的间隔入队，幂等键 `plugin.sync:{scopeKey}`）。 |
+| `Plugins/PluginTrustedKeyRegistry.cs` | 受信任发布者公钥的合并视图：配置文件优先、数据库次之，按域名段最长前缀匹配；数据库不可用时降级为配置项。 |
+| `Application/Plugins/IPluginTrustedKeyStore.cs` | 受信任公钥持久化端口 + `PluginTrustedKeys` 纯函数（校验/拒绝私钥/指纹/前缀匹配）。 |
+| `Infrastructure/Persistence/SqlSugarPluginTrustedKeyStore.cs` | `plugin_trusted_keys` 表的 SqlSugar 实现。 |
+| `Persistence/PluginTrustedKeySchemaEntity.cs` | `plugin_trusted_keys` 表结构。 |
+| `Plugins/PluginToolSource.cs` | 把 `agent-tool` 能力桥接为 `plugin__{plugin}__{capability}` 工具；需确认的副作用能力不桥接给模型。 |
+| `Plugins/PluginIngestionSink.cs` | 平台条目摄取编排：查映射 → 判定动作 → 调内容端口 → 写回映射/墓碑；执行知识库作用域与配额。 |
+| `Plugins/PlatformItemDecision.cs` | 幂等判定矩阵（Create/Update/Skip/Retract/Tombstone/Reject）与内容哈希规范化，纯函数。 |
+| `Plugins/IPluginContentStore.cs` | 摄取内容端口：知识库存在性、创建/替换/删除资料，插件不直接写表。 |
+| `Plugins/KnowledgePluginContentStore.cs` | 把内容端口适配到 `KnowledgeIngestionService` / `KnowledgeBaseStore` / `LocalDocumentStore`。 |
+| `Endpoints/PluginEndpoints.cs` | 插件状态、健康、调用、同步（同步/异步）、映射条目、游标、启停、配置、授权、作用域、安装、回滚、卸载、排空、受信任公钥与审计接口。 |
+| `Application/Plugins/IPluginRegistry.cs` | 插件安装态与审计的持久化端口（安装态、授权、审计记录）。 |
+| `Application/Plugins/IPluginItemMap.cs` | 平台条目映射与同步游标的持久化端口（含条目状态常量与游标作用域键）。 |
+| `Application/Plugins/PluginAccessPolicy.cs` | 启动权限闸门、授权请求校验、副作用确认判定（纯函数，穷举测试）。 |
+| `Application/Plugins/PluginScopePolicy.cs` | 知识库作用域与配额参数校验：拒绝 `Guid.Empty`、不存在的库与负数配额，自动去重。 |
+| `Agents/Tooling/AgentKnowledgeScope.cs` | 对话级知识库作用域：越界时返回可读拒绝说明，避免模型静默拿到空结果。 |
+| `Persistence/PluginMappingSchemaEntities.cs` | `plugin_platform_items` / `plugin_sync_states` 表结构。 |
+| `Infrastructure/Persistence/SqlSugarPluginRegistry.cs` | `plugin_installations` / `plugin_audit_events` / `plugin_platform_items` / `plugin_sync_states` 四表的 SqlSugar 实现。 |
+| `Domain/Agents/AgentClient.cs` | 外部智能体客户端的领域模型（能力、工具白名单、知识库范围）与密钥生成/摘要/解析（纯函数）。 |
+| `Domain/Agents/McpToolCatalog.cs` | 能力词表与 MCP 工具清单：每个工具所需能力、是否写操作、是否作用于知识库；清单外的工具默认拒绝。 |
+| `Application/Agents/IAgentClientStore.cs` | 客户端与调用审计的持久化端口（含客户端命令与审计记录模型）。 |
+| `Application/Agents/AgentClientService.cs` | 客户端用例：创建、轮换密钥、改作用域、启停、删除与接入校验（校验能力/工具名/知识库存在性）。 |
+| `Application/Agents/AgentCallGate.cs` | MCP 工具准入矩阵（能力 → 工具白名单 → 知识库范围），纯函数可穷举测试。 |
+| `Application/Agents/AgentRateLimiter.cs` | 按客户端的令牌桶限流，额度可运行期调整，能给出准确的 `Retry-After`。 |
+| `Persistence/AgentClientSchemaEntities.cs` | `agent_clients` / `agent_client_calls` 表结构。 |
+| `Infrastructure/Persistence/SqlSugarAgentClientStore.cs` | 客户端与调用审计的 SqlSugar 实现（损坏 JSON 按最小权限处理）。 |
+| `Hosting/AgentClientGate.cs` | `/mcp` 准入中间件：认证 → 启停 → 限流 → 工具准入 → 审计。 |
+| `Endpoints/AgentClientEndpoints.cs` | 客户端管理、能力/工具清单、密钥轮换与调用审计接口。 |
 | `Infrastructure/PortablePostgres/PortablePostgresHost.cs` | 启动/停止 pg0 子进程，等待数据库就绪、创建数据库并执行 `CREATE EXTENSION IF NOT EXISTS vector`。 |
 | `Infrastructure/PortablePostgres/PortablePostgresOptions.cs` | 便携数据库配置：实例名、端口、数据目录、账号、超时与 pg0 路径。 |
 | `Endpoints/ApiEndpointMappings.cs` | 统一注册业务路由模块。 |
@@ -82,7 +121,18 @@ MyFirstMafAgent/
 | `Documents/LocalDocumentStore.cs` | 校验文件类型和大小，将原始文件安全保存到本地目录。 |
 | `Documents/ResumableUploadService.cs` | 分块上传会话、偏移量校验和断点续传。 |
 | `Documents/KnowledgeIngestionService.cs` | 文档解析、分块、Embedding 和视频摘要处理。 |
-| `Documents/DocumentProcessingWorker.cs` | 从数据库领取待处理资料并执行后台处理。 |
+| `Documents/DocumentIngestJobHandler.cs` | `document.ingest` 任务处理器与补投器：按资料状态推导任务，抢占资料后解析并回写进度/结果。 |
+| `Domain/Jobs/JobModels.cs` | 任务类型、状态、优先级、重试退避与状态迁移规则（纯函数）。 |
+| `Domain/Jobs/JobRecord.cs` | 任务记录、计数、查询条件、入队命令、租约、失败信息与 SSE 事件模型。 |
+| `Application/Jobs/IJobQueue.cs` | 任务队列端口（入队/领取/心跳/进度/完成/失败/取消/重跑/回收/清理）与补投器端口。 |
+| `Application/Jobs/IJobHandler.cs` | 处理器契约、执行上下文与任务类型索引（惰性发现类型，避免把 scoped 处理器锁成单例）。 |
+| `Application/Jobs/JobScheduler.cs` | N 个并发槽位的调度器：回收 → 补投 → 清理 → 领取 → 执行，每个槽位独立 ExecutionContext。 |
+| `Application/Jobs/JobEventStream.cs` | SSE 广播（每订阅者有界通道，慢客户端只丢自己的旧事件）与槽位唤醒信号。 |
+| `Application/Jobs/JobOptions.cs` | 并发度、轮询、租约、重试、保留期、排队上限等配置。 |
+| `Persistence/JobSchemaEntities.cs` | `jobs` 表结构与索引（含幂等键唯一索引）。 |
+| `Infrastructure/Persistence/SqlSugarJobQueue.cs` | 任务队列的 SqlSugar 实现：乐观 CAS 领取、租约续期、退避重试、僵尸回收。 |
+| `Endpoints/JobEndpoints.cs` | 任务中心接口：列表/计数/类型/详情/取消/重跑与 SSE 实时进度。 |
+| `Hosting/JobsModule.cs` | 任务系统的依赖注入组合（调度器、队列、处理器索引、补投器）。 |
 | `Persistence/KnowledgeBaseStore.cs` | 知识库、资料、上传状态、分块和向量检索数据访问。 |
 | `Persistence/KnowledgeChatStore.cs` | 知识库问答会话及消息持久化和历史管理。 |
 | `Persistence/CompanionStore.cs` | 伴侣档案、导入消息和会话数据访问。 |
@@ -115,7 +165,7 @@ ASP.NET Core 10 Minimal API
 
 开发环境映射 OpenAPI JSON 与 Scalar 页面：`/openapi/v1.json`、`/scalar/v1`。两者仅在 Development 环境开启。
 
-前端以 `App.vue` 管理当前页面、知识库选择和问答数据；各视图由独立 Vue 组件实现；`services/api.ts` 统一封装 API 请求。前后端通过 HTTP/JSON 通信，问答接口当前返回完整响应，不使用 SSE 流式传输。
+前端以 `App.vue` 管理当前页面、知识库选择和问答数据；各视图由独立 Vue 组件实现（`components/` 下按页面命名，如 `JobsView.vue`、`PluginsView.vue`、`LibraryView.vue`）；`services/api.ts` 统一封装 API 请求。前后端通过 HTTP/JSON 通信，问答接口当前返回完整响应，不使用 SSE 流式传输；唯一的 SSE 是任务中心的 `/api/jobs/stream`（单向进度推送，断开自动退回轮询）。插件的安装、授权、配置（按 manifest 的 JSON Schema 渲染）、作用域、同步与审计全在 `PluginsView.vue` 里完成，不需要 curl。
 
 ## 4. 核心业务流程
 
@@ -124,13 +174,13 @@ ASP.NET Core 10 Minimal API
 1. 前端将资料提交到 `POST /api/documents`；大文件通过 `POST /api/uploads` 创建会话，使用 `PUT /api/uploads/{uploadId}/chunks?offset={bytes}` 上传分块，再调用 `POST /api/uploads/{uploadId}/complete` 完成归档。
 2. API 校验扩展名、文件大小及知识库是否存在。默认普通文件上限为 50 MiB、视频上限为 5 GiB，分块默认 16 MiB；具体值由 `Storage` 配置控制。
 3. 原文件写入 `App_Data/uploads/{knowledgeBaseId}/` 下的随机文件名路径；数据库保存资料元数据、受控存储路径和处理状态。断点续传期间的数据写入暂存文件。
-4. 资料记录进入 `Queued` 状态。`DocumentProcessingWorker` 在后台轮询数据库队列，领取任务后更新 `Processing` 状态、进度和阶段；API 重启时会将未完成的 `Processing` 项重新排队。
+4. 资料记录进入 `Queued` 状态。调度器（`JobScheduler`）的补投器每秒扫一遍排队资料，按幂等键 `document.ingest:{documentId}` 入队一条 `document.ingest` 任务；多个并发槽位并行领取执行，领取时把资料从 `Queued` 改为 `Processing` 并回写进度与阶段。API 重启时会把未完成的 `Processing` 项重新排队，并靠租约过期回收被中断的任务。
 5. 文本、Markdown 直接读取；HTML/HTM 使用 `HtmlTextExtractor` 抽取正文（标题层级、列表、表格单元格，不执行脚本、不加载外部资源），非 UTF-8 页面按 BOM 与 `<meta charset>` 解码（含 GBK/GB18030）；DOCX 使用 DocumentFormat.OpenXml；PDF 使用 PdfPig；图片由所选聊天模型生成可检索描述。
 6. 视频由 FFmpeg 抽取单声道 16 kHz 音频，Whisper.net 生成带时间段的转写文本。关键帧分析可选，默认关闭；启用后按配置抽帧并调用支持图像输入的模型描述画面。视频摘要与转写内容进入后续索引流程。
 7. 文本按约 1,400 字符切片，并保留约 180 字符重叠；切片边界优先选择换行、句末标点或空格。
 8. 每个切片由本地 ONNX Embedding 模型生成向量，并写入 `kb_chunks`；全部完成后资料状态变为 `Ready`，失败时记录错误信息并标记为 `Failed`。
 
-后台处理队列保存在 PostgreSQL 中，由 API 进程内的 `BackgroundService` 消费；不是独立消息队列服务。
+后台处理队列保存在 PostgreSQL 中，由 API 进程内的 `JobScheduler`（`BackgroundService`，可配置并发槽位数）消费；不是独立消息队列服务。任务的排队、进度、重试次数、取消请求与租约都写在 `jobs` 表里，可通过 `GET /api/jobs` 与 `GET /api/jobs/stream`（SSE）观察与控制，详见 `docs/JOBS.md`。
 
 ### 4.2 知识库问答（RAG）
 
@@ -238,7 +288,7 @@ ASP.NET Core 10 Minimal API
 
 - 用户只有一个输入框：想到什么写什么（日记、吐槽、聊天记录、观点、自我介绍、和谁关系近、说话习惯……），也可以直接导入文件。
 - `POST /api/avatar/feed` / `POST /api/avatar/feed/upload`：原文先落 `avatar_fragments`，同时创建 `avatar_ingestions` 任务并立即返回 `ingestionId`。相同文件用 `source_hash + segment_index + extractor_version` 做幂等，重复导入不会重复建记忆。
-- `AvatarIngestionWorker` 后台轮询任务，失败可重试；长内容按段落分批提取，不会因为单次模型输入长度限制而静默丢内容。整个流水线不修改知识库的 `DocumentProcessingWorker`。
+- `AvatarIngestionWorker` 后台轮询任务，失败可重试；长内容按段落分批提取，不会因为单次模型输入长度限制而静默丢内容。整个流水线不修改知识库的资料处理链路（资料解析由任务系统的 `document.ingest` 处理器负责）。
 - **记忆提取**（`AvatarOrganizer`，契约 `avatar-extractor-v2`）只提取“用户说了什么”：
   - `memory_type`：`fact / value / semantic / episodic / procedural / relationship / expression_style / goal_habit`；
   - `stability`：`stable / phase / situational`；`confidence`：0–100；
@@ -474,8 +524,9 @@ Embedding 与聊天模型采用分离配置：切换本地/云端聊天模型不
 
 | 配置项 | 用途 | 当前默认/要求 |
 | --- | --- | --- |
-| `ConnectionStrings:KnowledgeBase` | PostgreSQL 连接串。 | 可留空：留空时自动启动 `ExternalTools/pgSQL/pg0-windows-x86_64.exe`（内置 PostgreSQL 18 + pgvector），并自动执行 `CREATE EXTENSION IF NOT EXISTS vector`。填写则优先使用外部数据库。 |
-| `PortablePostgres:Enabled` | 是否启用便携 PostgreSQL。 | 默认 `true`。 |
+| `ConnectionStrings:KnowledgeBase` | PostgreSQL 连接串。 | 可留空：留空时自动启动随包的 pg0（内置 PostgreSQL 18 + pgvector），并自动执行 `CREATE EXTENSION IF NOT EXISTS vector`。填写则优先使用外部数据库。 |
+| `PortablePostgres:ExecutablePath` | pg0 可执行文件路径。 | **默认空 = 自动定位**（Windows/Linux/macOS 各自解析，优先 `ExternalTools/pgSQL/<rid>/`）。填了但在当前平台不存在也会回落自动定位，不会因此启动失败。 |
+| `PortablePostgres:Enabled` | 是否启用便携 PostgreSQL。 | 默认 `true`；容器部署建议 `false`（改用外部 PG）。 |
 | `PortablePostgres:RespectExternalConnectionString` | 有外部连接串时是否跳过 pg0。 | 默认 `true`，便于开发机继续使用已有 PostgreSQL。 |
 | `PortablePostgres:Port` | pg0 监听端口。 | 默认 `55432`；端口占用时自动向后寻找可用端口。 |
 | `PortablePostgres:DataDirectory` | pg0 数据目录。 | 留空时使用 `%LOCALAPPDATA%\MyFirstMafAgent\pgsql\{InstanceName}`；该路径必须是纯 ASCII。 |
@@ -491,13 +542,26 @@ Embedding 与聊天模型采用分离配置：切换本地/云端聊天模型不
 | `Storage:MaxFileSizeBytes` | 普通文件上限。 | 默认 50 MiB。 |
 | `Storage:MaxVideoFileSizeBytes` | 视频文件上限。 | 默认 5 GiB。 |
 | `Storage:UploadChunkSizeBytes` | 单个上传分块上限/默认分块大小。 | 默认 16 MiB。 |
-| `Media:FfmpegPath` | FFmpeg 可执行文件路径。 | 默认 `ExternalTools/ffmpeg/ffmpeg.exe`。 |
-| `Media:WhisperModel` / `Media:WhisperModelPath` | Whisper 模型类型和缓存路径。 | 默认 Base；模型缺失时首次转写会尝试下载。 |
+| `Media:FfmpegPath` | FFmpeg 可执行文件路径。 | **默认空 = 自动定位**：先找 `ExternalTools/ffmpeg/<rid>/`，再找旧版扁平布局，最后回落到 PATH 里的 `ffmpeg`（容器里用 apt 安装即可）。 |
+| `Media:WhisperModel` / `Media:WhisperModelPath` | Whisper 模型类型和缓存路径。 | 默认 Base；模型缺失时首次转写会尝试下载，也可在设置页导入本地模型。 |
+| `Media:AutoDownloadWhisperModel` | 缺模型时是否允许自动联网下载。 | 默认 `true`；离线部署设 `false`，缺模型会立刻报"去设置页导入"。 |
+| `Media:MaxWhisperModelBytes` | 导入/下载模型的体积上限。 | 默认 3 GiB（large-v3 量级），同时计入请求体上限。 |
+| `Jobs:MaxConcurrentJobs` | 长任务并发槽位数（每个槽位一条数据库连接）。 | 默认 `4`，合法区间 1–32。 |
+| `Jobs:LeaseSeconds` | 任务租约；执行者崩溃后超过它未续租即被回收重跑。 | 默认 `120`，合法区间 30–3600（启动时校验，填小会直接启动失败）。 |
+| `Jobs:RetryBaseSeconds` / `RetryMaxSeconds` | 失败退避的基数与上限（指数增长）。 | 默认 `10` / `600`。 |
+| `Jobs:MaxAttempts` | 默认最大尝试次数（含首次）。 | 默认 `3`。 |
+| `Jobs:Enabled` | 是否运行任务调度器。 | 默认 `true`；关闭后任务只入队不执行，便于排查。 |
+| `Jobs:MaxQueuedJobs` | 排队任务上限，达到后补投停止入队。 | 默认 `5000`。 |
+| `Jobs:TypeLimits` | 按任务类型的并发上限，给高优先级任务留出保底槽位（`GET /api/jobs/quotas` 可看占用）。 | 默认 `{ "plugin.sync": 2 }`；不配或配 `0` 表示该类型不单独限制；只影响下一次领取，不抢占已运行任务；计数是进程内的，多进程部署时每进程各自限流；改完需重启。 |
+| `Plugins:DrainTimeoutSeconds` | 升级/停用前等待在途调用结束的秒数，超时则强停并写审计。 | 默认 `15`，合法区间 0–600。 |
+| `Plugins:ScheduledSyncEnabled` | 是否启用定时同步（插件返回 `nextSyncAfterSeconds` 后由补投器按间隔入队）。 | 默认 `true`；关闭后只能手动触发同步。 |
+| `Plugins:MinScheduledSyncIntervalSeconds` | 定时同步的最小间隔，插件报的间隔比它小就按它算。 | 默认 `60`，合法区间 30–86400。 |
+| `Plugins:TrustedPublisherKeys` | 受信任发布者公钥（按 `PluginId` 域名段前缀匹配）。 | 与库表 `plugin_trusted_keys` 合并，**配置项优先**且不可经由接口删除。 |
 | `VITE_API_BASE_URL` | 前端 API 根地址。 | 未设置时使用同源（空字符串）；Vite 开发服务器通过 `/api` 代理转发到 `http://127.0.0.1:5056`。 |
 
 ### 8.2 本地启动
 
-默认无需准备数据库：`ConnectionStrings:KnowledgeBase` 留空时，启动器会自动拉起 `ExternalTools/pgSQL/pg0-windows-x86_64.exe`，创建 `myfirstmafagent` 数据库并启用 pgvector。若要使用已有 PostgreSQL，把连接串配置到用户机密或环境变量即可（默认会跳过 pg0）：
+默认无需准备数据库：`ConnectionStrings:KnowledgeBase` 留空时，启动器会自动拉起随包的 pg0（Windows/Linux/macOS 按当前平台在 `ExternalTools/pgSQL/<rid>/` 下查找），创建 `myfirstmafagent` 数据库并启用 pgvector。若要使用已有 PostgreSQL，把连接串配置到用户机密或环境变量即可（默认会跳过 pg0）：
 
 ```powershell
 $env:ConnectionStrings__KnowledgeBase = "Host=localhost;Port=5432;Database=knowledge_base;Username=postgres;Password=<password>"
@@ -520,14 +584,13 @@ npm run dev
 - pg0 的 PostgreSQL 安装目录：`%USERPROFILE%\.pg0\installation`（pg0 自身约定）
 - 日志：`%LOCALAPPDATA%\MyFirstMafAgentData\logs`
 
-### 8.3 打包为安装包 / 桌面版 / 控制台便携版
+### 8.3 打包为桌面版 / 控制台便携版
 
-前端已改为同源请求 + 相对资源路径（`base: './'`），可直接由内嵌 Kestrel 托管。项目提供三种分发形态：
+前端已改为同源请求 + 相对资源路径（`base: './'`），可直接由内嵌 Kestrel 托管。项目提供两种分发形态：
 
 | 形态 | 项目 | 说明 |
 | --- | --- | --- |
-| 安装包 | `MyFirstMafAgent.Desktop` + Velopack | `MyFirstMafAgent-win-Setup.exe`，免管理员权限安装，带桌面/开始菜单快捷方式 |
-| 桌面版文件夹 | `MyFirstMafAgent.Desktop` | Photino 原生窗口 + 内嵌 Kestrel + WebView2，绿色免安装 |
+| 桌面版 | `desktop-electron/` + `MyFirstMafAgent.Api` | Electron 窗口 + 作为 sidecar 的 API 子进程（不再有 Photino / Velopack） |
 | 控制台版 | `MyFirstMafAgent.Api` | 启动本地 Kestrel，自动用默认浏览器打开界面 |
 
 一键发布（构建前端 → `dotnet publish` → 复制 `wwwroot` → 校验 pg0/模型）：
@@ -536,60 +599,75 @@ npm run dev
 powershell -ExecutionPolicy Bypass -File scripts/Publish-Portable.ps1 -Target all
 ```
 
-生成安装包（Velopack）：
+`-Target desktop` 发布的是 **API 本体**到 `publish/desktop`，Electron 主进程从那里拉起 sidecar：
 
 ```powershell
-dotnet tool install -g vpk   # 只需一次
-powershell -ExecutionPolicy Bypass -File scripts/Publish-Portable.ps1 -Target desktop -SkipFrontend -Velopack -Version 1.0.0
+powershell -ExecutionPolicy Bypass -File scripts\Publish-Portable.ps1 -Target desktop -SkipFrontend
 ```
 
 产物：
 
-| 文件 | 用途 |
+| 目录 | 用途 |
 | --- | --- |
-| `publish/releases/MyFirstMafAgent-win-Setup.exe` | 安装包（用户双击安装） |
-| `publish/releases/MyFirstMafAgent-win-Portable.zip` | 便携 zip |
-| `publish/releases/MyFirstMafAgent-1.0.0-full.nupkg` | 完整更新包（增量更新基线） |
-| `publish/releases/RELEASES`、`releases.win.json` | 更新“渠道”元数据（自动更新用） |
+| `publish/console/` | 控制台便携版（双击 `MyFirstMafAgent.Api.exe`） |
+| `publish/desktop/` | Electron sidecar（`MyFirstMafAgent.Api.exe` + `wwwroot` + `ExternalTools`） |
+| `publish/releases/` | electron-builder 产出的 NSIS 安装包（`MyFirstMafAgent-<version>-setup.exe`） |
 
-安装行为（已验证）：
+Electron 调试用 `cd desktop-electron; npm install; npm start`（可用 `MAF_API_EXE` 指向已发布的 API）。打安装包：`cd desktop-electron; npm run dist:full`（等价于 `scripts\Build-ElectronInstaller.ps1`，会先发布 sidecar 再跑 electron-builder）。自动更新已接入（`desktop-electron/updater.js` + `electron-updater`），发布用 `npm run dist:publish`，详见 `docs/DEPLOYMENT.md` §7。
 
-- 安装目录：`%LOCALAPPDATA%\MyFirstMafAgent`（`current/` 放程序，`packages/` 放包），无需管理员权限。
-- 用户数据：`%LOCALAPPDATA%\MyFirstMafAgentData`（`data/` 上传与工作区、`logs/`、`pgsql/`）。
-- 卸载/升级会先执行 `OnBeforeUninstallFastCallback` / `OnBeforeUpdateFastCallback` 停止便携数据库，再替换或删除安装目录；**用户数据保留**，重装后可直接继续使用。
-- 快捷方式：桌面 + 开始菜单根目录。
+### 8.4 跨平台与容器
+
+同一份后端代码支持 `win-x64` / `linux-x64` / `linux-arm64` / `osx-arm64` / `osx-x64`（`win-arm64` 无上游便携数据库发行包）。
+
+```powershell
+# 按平台发布（默认会清掉其它平台的原生二进制）
+powershell -ExecutionPolicy Bypass -File scripts\Publish-Portable.ps1 -Target console -Runtime linux-x64
+# 补上该平台的原生工具（需能访问 GitHub）
+powershell -ExecutionPolicy Bypass -File scripts\Download-ExternalTools.ps1 -Runtime linux-x64 -Target all
+```
+
+```bash
+# 容器（不含 Electron，便携库关闭，用外部 pgvector）
+docker compose up -d --build
+```
+
+原生工具查找规则、pg0 发行包对照表、容器环境变量、镜像内含/不含什么、已验证/未验证清单：见 **`docs/DEPLOYMENT.md`**。要点：
+
+- `ExternalTools/pgSQL/<rid>/` 与 `ExternalTools/ffmpeg/<rid>/` 放**上游原始文件名**即可，不需要改名；配置项留空自动定位。
+- 容器里必须用 `--urls http://0.0.0.0:5056` 覆盖，因为 `appsettings.json` 的 `Urls` 会盖掉 `ASPNETCORE_URLS`。
+- 本机尚未装 Docker，也没在 Linux/macOS 真机上跑过；非 Windows 的 pg0/ffmpeg 二进制因网络受限未下载（目录已建好，README 里有逐条下载命令）。
 
 发布要点：
 
 - 静态文件采用外置 `wwwroot`（发布脚本写入），不使用嵌入资源；不启用 AOT，因此不受嵌入文件提供程序限制。
-- 应用图标统一放在仓库根 `assets/app.ico`（ICO 格式，含 16/32/48/64/128/256 六种尺寸）：两个 `csproj` 通过 `<ApplicationIcon>..\assets\app.ico</ApplicationIcon>` 写入 exe 资源；桌面版另把该文件复制到输出目录，由 `PhotinoWindow.SetIconFile` 设置标题栏/任务栏图标；`vpk pack --icon` 用它生成安装程序与快捷方式图标；前端 `public/favicon.ico` 是同一文件的副本。**替换图标：覆盖 `assets/app.ico` 并同步 `FrontEnd/myfist-agent/public/favicon.ico`，再重新发布即可。**
-- 桌面版窗口加载 `http://127.0.0.1:<系统分配端口>/`，API 与窗口在同一进程。窗口必须在 **STA** 线程创建：`Main` 全程同步（`[STAThread]` + `GetAwaiter().GetResult()`），一旦写成 `async`/`await`，续体会落到线程池（MTA），WebView2 初始化会静默失败，表现为窗口空白、服务端日志里没有任何来自浏览器的请求。
+- 应用图标统一放在仓库根 `assets/app.ico`（ICO 格式，含 16/32/48/64/128/256 六种尺寸）：Electron 主进程用它作为窗口图标，打包器用它生成 exe 与快捷方式图标；前端 `public/favicon.ico` 是同一文件的副本。**替换图标：覆盖 `assets/app.ico` 并同步 `FrontEnd/myfist-agent/public/favicon.ico`，再重新发布即可。**
+- 桌面版窗口加载 `http://127.0.0.1:<随机端口>/`，API 是独立子进程：令牌经环境变量传入、由主进程通过 `X-Api-Token` 请求头注入；退出时先 `POST /api/desktop/shutdown`，超时再强杀。
 - pg0 随应用启动，退出时通过 `pg0 stop` 优雅停止；异常退出后下次启动会复用已运行实例。
-- pg0 始终从 `%LOCALAPPDATA%\MyFirstMafAgentData\tools` 运行（首次启动复制一次），工作目录设在 `...\pgsql` 下：这样 `postgres.exe` 子进程不会锁住安装目录，升级/覆盖安装才不会报“拒绝访问”。
-- **文件夹版不要放在桌面、文档或下载目录**：Windows「受控文件夹访问」会限制从这些位置启动的未签名程序写入用户目录，导致便携数据库无法初始化（表现为 `Access is denied` / `os error 5`）。推荐 `D:\Apps\MyFirstMafAgent`；使用安装包则不受此限制。
+- pg0 始终从 `%LOCALAPPDATA%\MyFirstMafAgentData\tools` 运行（首次启动复制一次，按当前平台命名为 `pg0-<rid>[.exe]`），工作目录设在 `...\pgsql` 下：这样 `postgres.exe` 子进程不会锁住安装目录，升级/覆盖安装才不会报“拒绝访问”。
+- **文件夹版不要放在桌面、文档或下载目录**：Windows「受控文件夹访问」会限制从这些位置启动的未签名程序写入用户目录，导致便携数据库无法初始化（表现为 `Access is denied` / `os error 5`）。推荐 `D:\Apps\MyFirstMafAgent`。
 - 应用目录可以包含中文：启动器会把 pg0 复制到纯 ASCII 的 `%LOCALAPPDATA%\MyFirstMafAgentData\tools` 后运行。
 - 文件夹版应用目录需可写（会在其下创建 `App_Data`），不要放在 `Program Files`。
-- 桌面版需要 WebView2 Runtime（Windows 10/11 通常已自带）。
-- 安装包未签名，Windows SmartScreen 首次运行会提示“未知发布者”；分发前建议配置代码签名（Velopack 支持 `--signParams`）。
+- 应用未签名，Windows SmartScreen 首次运行会提示“未知发布者”；分发前建议配置代码签名（届时在 electron-builder 里配置）。
 
 ## 9. 当前边界与运维注意事项
 
 - 当前无用户认证和授权，不能将默认配置视为多用户或公网部署方案；对外开放前需补充认证、授权、请求限流、HTTPS 和敏感配置管理。
 - 原始文件与数据库分开保存，数据库备份不包含上传文件。恢复时需要同时恢复数据库和 `App_Data`，并确保资料记录中的存储路径仍有效。
 - 选择在线聊天模型时，问题、检索片段、提示词及伴侣对话会发送给所配置的服务商；选择本地聊天端点时可避免此类云端调用。Embedding 始终在 API 进程本地运行。
-- 图片描述要求聊天模型支持视觉输入。视频转写依赖 FFmpeg；Whisper 模型首次使用需要网络下载，离线环境需提前准备模型。视频关键帧分析默认关闭，启用后还需视觉模型。
+- 图片描述要求聊天模型支持视觉输入。视频转写依赖 FFmpeg；Whisper 模型（`ggml-base.bin`，约 141 MB）**不随安装包分发**，可在「设置 → 语音转写（Whisper）」里**导入本地 ggml 文件**或点「联网下载」，存在 `%LOCALAPPDATA%\MyFirstMafAgentData\models` 后无需重启即生效。离线部署建议把 `Media:AutoDownloadWhisperModel` 设为 `false`：缺模型时会立刻提示去哪里导入，而不是卡在下载上。转写完成后会尝试用聊天模型生成摘要，**未配置有效聊天端点时只丢摘要，转写内容仍会发布并可检索**。视频关键帧分析默认关闭，启用后还需视觉模型。
 - AI 伴侣仅支持可读 UTF-8 JSON/TXT，未实现微信/QQ 私有格式解密或官方格式适配。伴侣历史检索基于关键词，不是向量检索。
 - 学习笔记已持久化；当前知识库检索以 pgvector 相似度为主，未实现全文与向量混合检索或重排。
+- 上述尚未实现的能力（含代码签名、插件隔离、多用户认证等）已整理成待办清单，见 **`docs/ROADMAP.md`**。
 - 问答历史导出为 Markdown；持久化消息目前不包含独立的引用元数据，导出内容以会话标题、时间、角色和消息文本为主。
 - 分身是模仿而非本人：记忆不足时问答接口直接返回 400 提示先投喂，不会硬编回答；记忆、向量、洞察与会话均与知识库表完全隔离，不参与知识库检索，也不会被当作事实引用。若使用云端聊天模型或云端向量模型，投喂文本、记忆与人格洞察会发送给服务商；这些数据不属于医疗、法律或投资建议。
 - 便携数据库首次启动会把 PostgreSQL 18 与 pgvector 释放到 `%USERPROFILE%\.pg0`，数据写入 `%LOCALAPPDATA%\MyFirstMafAgentData\pgsql`，首次解压通常需要 10~60 秒。
 - 便携数据库对路径有硬约束（pg0 自身限制）：**可执行文件路径与数据目录必须是纯 ASCII**。启动器统一把 pg0 复制到 `%LOCALAPPDATA%\MyFirstMafAgentData\tools`，数据目录固定在 `%LOCALAPPDATA%` 下，因此中文安装目录可用；若这些都不可写（例如文件夹版放在桌面），请改用安装包、移出受保护目录或在安全软件中放行。
-- 桌面版依赖 WebView2 Runtime；无运行时的精简版 Windows 需先安装。桌面版的启动诊断写入 `%LOCALAPPDATA%\MyFirstMafAgentData\logs\desktop-boot.log`（每次启动覆盖）与 `desktop-crash.log`，启动失败时同时弹出提示框。排查“窗口空白”时先看 `desktop-boot.log` 的 `apartment=` 是否为 `STA`，再看 Kestrel 请求日志里有没有来自 WebView 的 `GET /` 与 `/assets/*`。
+- 桌面版是 Electron 壳 + API 子进程，不再依赖 WebView2/Photino。启动诊断：Electron 侧写入 `%APPDATA%\myfirstmafagent-desktop\logs\electron-shell.log`（含 `starting API sidecar`、`API sidecar ready` 与 API 输出尾巴），后端写入 `%LOCALAPPDATA%\MyFirstMafAgentData\logs`。排查“窗口空白 / 白屏”时先看 sidecar 是否成功拉起、`/api/health` 是否 200。
 - 安装包未做代码签名，SmartScreen 会提示未知发布者；正式分发前建议配置签名证书。
 
 ## 10. 测试与验证入口
 
-后端测试项目为 `MyFirstMafAgent.Api.Tests`，当前覆盖本地文件安全存储、续传、聊天记录解析、问答 Markdown 导出格式、Agent 文件沙箱与授权目录、分身领域规则（画像校验、经历/行为归一化、推演状态机与完备度）、分身记忆卡的构造/截断与自由类型归一化、整理器 JSON 解析与兜底、文本切段、中文二元组检索排序与洞察 JSON 解析等逻辑。运行命令：
+后端测试项目为 `MyFirstMafAgent.Api.Tests`，当前覆盖本地文件安全存储、续传、聊天记录解析、问答 Markdown 导出格式、Agent 文件沙箱与授权目录、分身领域规则（画像校验、经历/行为归一化、推演状态机与完备度）、分身记忆卡的构造/截断与自由类型归一化、整理器 JSON 解析与兜底、文本切段、中文二元组检索排序与洞察 JSON 解析、插件 manifest/JSON Schema/完整性签名/安装回滚/审计脱敏、平台条目判定矩阵/映射幂等/撤回墓碑/同步游标/知识库作用域与配额、外部智能体客户端密钥/能力匹配/工具准入矩阵/令牌桶限流等逻辑。运行命令：
 
 ```powershell
 dotnet test MyFirstMafAgent.Api.Tests/MyFirstMafAgent.Api.Tests.csproj

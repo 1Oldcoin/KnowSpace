@@ -17,11 +17,21 @@ public sealed class DesktopSecurityTests
     [InlineData("/api/health")]
     [InlineData("/api/knowledge-bases")]
     [InlineData("/api/avatar/feed")]
-    [InlineData("/mcp")]
+    [InlineData("/api/agent-clients")]
     [InlineData("/API/Health")]
     public void Data_plane_paths_require_a_token(string path)
     {
         Assert.True(LocalApiTokenValidator.RequiresToken(new PathString(path)));
+    }
+
+    [Theory]
+    [InlineData("/mcp")]
+    [InlineData("/MCP")]
+    public void Mcp_is_not_guarded_by_the_desktop_token(string path)
+    {
+        // 桌面令牌按设计不下发、不落盘，外部 Agent 拿不到；
+        // /mcp 改由客户端密钥鉴权（见 AgentClientGate）。
+        Assert.False(LocalApiTokenValidator.RequiresToken(new PathString(path)));
     }
 
     [Theory]

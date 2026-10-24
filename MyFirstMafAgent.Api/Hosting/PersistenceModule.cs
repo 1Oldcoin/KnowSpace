@@ -3,7 +3,10 @@ using MyFirstMafAgent.Api.Domain.Knowledge;
 using MyFirstMafAgent.Api.Domain.Notes;
 using MyFirstMafAgent.Api.Domain.Study;
 using MyFirstMafAgent.Api.Domain.Topics;
+using MyFirstMafAgent.Api.Application.Agents;
 using MyFirstMafAgent.Api.Application.Health;
+using MyFirstMafAgent.Api.Application.Jobs;
+using MyFirstMafAgent.Api.Application.Plugins;
 using MyFirstMafAgent.Api.Application.Settings;
 using MyFirstMafAgent.Api.Infrastructure.Persistence;
 using MyFirstMafAgent.Api.Infrastructure.Settings;
@@ -62,6 +65,21 @@ public static class PersistenceModule
         services.AddSingleton<IDocumentTextRepository>(sp => sp.GetRequiredService<SqlSugarDocumentTextRepository>());
         services.AddSingleton<IKnowledgeBaseDirectory, SqlSugarKnowledgeBaseDirectory>();
         services.AddSingleton<IDatabaseHealthProbe, SqlSugarDatabaseHealthProbe>();
+
+        // 插件安装态（启用/配置/授权/范围）与调用审计。
+        services.AddSingleton<SqlSugarPluginRegistry>();
+        services.AddSingleton<IPluginRegistry>(sp => sp.GetRequiredService<SqlSugarPluginRegistry>());
+        services.AddSingleton<IPluginItemMap>(sp => sp.GetRequiredService<SqlSugarPluginRegistry>());
+        services.AddSingleton<IPluginSyncStateStore>(sp => sp.GetRequiredService<SqlSugarPluginRegistry>());
+
+        // 外部智能体客户端（MCP 接入方）与调用审计。
+        services.AddSingleton<SqlSugarAgentClientStore>();
+        services.AddSingleton<IAgentClientStore>(sp => sp.GetRequiredService<SqlSugarAgentClientStore>());
+        services.AddSingleton<IAgentCallLogStore>(sp => sp.GetRequiredService<SqlSugarAgentClientStore>());
+
+        // 长任务队列（落库 + 租约，重启不丢任务）。
+        services.AddSingleton<SqlSugarJobQueue>();
+        services.AddSingleton<IJobQueue>(sp => sp.GetRequiredService<SqlSugarJobQueue>());
 
         return services;
     }

@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { Boxes, Check, Cloud, Cpu, Database, KeyRound, LoaderCircle, Plug, RefreshCw, Save, SlidersHorizontal, Upload, UserRound } from 'lucide-vue-next'
+import { Boxes, Check, Cloud, Cpu, Database, Download, KeyRound, LoaderCircle, Mic, Plug, RefreshCw, RotateCcw, Save, SlidersHorizontal, Sparkles, Trash2, Upload, UserRound } from 'lucide-vue-next'
+import { deleteWhisperModel, downloadWhisperModel, getWhisperModelStatus, importWhisperModel } from '../services/api'
 import { getAgentInfo, getMcpStatus, importLocalEmbeddingSpec, listAgentTools, probeEmbeddingSpec, registerCloudEmbeddingSpec } from '../services/api'
 import { normalizeAgentSettings } from '../services/api'
-import type { AgentInfo, AgentSettings, AgentToolInfo, AppSettings, EmbeddingSpec, McpStatus, SaveSettingsPayload } from '../services/api'
+import type { AgentInfo, AgentSettings, AgentToolInfo, AppSettings, EmbeddingSpec, McpStatus, SaveSettingsPayload, WhisperModelStatus } from '../services/api'
 
 const props = defineProps<{
   settings: AppSettings | null
@@ -60,6 +61,13 @@ const agentTools = ref<AgentToolInfo[]>([])
 const agentBusy = ref(false)
 const agentError = ref('')
 
+const whisperStatus = ref<WhisperModelStatus | null>(null)
+const whisperBusy = ref(false)
+const whisperMessage = ref('')
+const whisperError = ref('')
+const whisperFile = ref<File | null>(null)
+const whisperPickerKey = ref(0)
+
 const agentSettings = ref<AgentSettings>(normalizeAgentSettings(null))
 
 const toolGroups = computed(() => {
@@ -88,8 +96,198 @@ async function loadAgentInfo() {
   }
 }
 
-onMounted(() => { void loadAgentInfo() })
-watch(() => props.apiOnline, online => { if (online) void loadAgentInfo() })
+// ── Whisper 模型：下载是后台任务，靠轮询把进度拉回来 ──────────────────────
+let whisperTimer: number | undefined
+
+async function loadWhisperStatus(silent = false) {
+  if (!props.apiOnline) return
+  if (!silent) whisperMessage.value = ''
+  try {
+    whisperStatus.value = await getWhisperModelStatus()
+    if (whisperStatus.value.lastError) whisperError.value = whisperStatus.value.lastError
+    ensureWhisperPolling()
+  } catch (error) {
+    if (!silent) whisperError.value = errorText(error)
+  }
+}
+
+function ensureWhisperPolling() {
+  const downloading = whisperStatus.value?.downloading === true
+  if (downloading && whisperTimer === undefined) {
+    // 下载还在跑：1.5 秒问一次，顺便把已下载字节数当进度条用。
+    whisperTimer = window.setInterval(() => { void loadWhisperStatus(true) }, 1500)
+  } else if (!downloading && whisperTimer !== undefined) {
+    window.clearInterval(whisperTimer)
+    whisperTimer = undefined
+  }
+}
+
+function onWhisperFileChange(event: Event) {
+  whisperFile.value = (event.target as HTMLInputElement).files?.[0] ?? null
+  whisperError.value = ''
+  whisperMessage.value = ''
+}
+
+async function importWhisper() {
+  if (whisperBusy.value || !whisperFile.value) {
+    if (!whisperFile.value) whisperError.value = '请选择要导入的 .bin 模型文件。'
+    return
+  }
+  whisperBusy.value = true
+  whisperError.value = ''
+  whisperMessage.value = ''
+  try {
+    whisperStatus.value = await importWhisperModel(whisperFile.value)
+    whisperFile.value = null
+    whisperPickerKey.value += 1
+    whisperMessage.value = '模型已导入，下一段视频会直接使用它转写（不需要重启）。'
+  } catch (error) {
+    whisperError.value = errorText(error)
+  } finally {
+    whisperBusy.value = false
+  }
+}
+
+async function downloadWhisper() {
+  if (whisperBusy.value) return
+  whisperBusy.value = true
+  whisperError.value = ''
+  whisperMessage.value = ''
+  try {
+    whisperStatus.value = await downloadWhisperModel()
+    whisperMessage.value = '已开始后台下载，进度会自动刷新。'
+    ensureWhisperPolling()
+  } catch (error) {
+    whisperError.value = errorText(error)
+  } finally {
+    whisperBusy.value = false
+  }
+}
+
+async function removeWhisper() {
+  if (whisperBusy.value) return
+  whisperBusy.value = true
+  whisperError.value = ''
+  whisperMessage.value = ''
+  try {
+    whisperStatus.value = await deleteWhisperModel()
+    whisperMessage.value = '模型已删除。下次导入视频前需要重新导入或下载。'
+  } catch (error) {
+    whisperError.value = errorText(error)
+  } finally {
+    whisperBusy.value = false
+  }
+}
+
+// ── 桌面版自动更新（P0-3）────────────────────────────────────────────────
+// 只有 Electron 壳里才注入 window.desktopHost；在浏览器里打开时整块不渲染。
+// 状态由主进程推送（检查中 / 发现新版本 / 下载中 / 可安装 / 已是最新 / 出错）。
+interface DesktopUpdateState {
+  phase: 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'up-to-date' | 'error' | 'disabled'
+  currentVersion: string
+  version: string | null
+  percent: number
+  error: string | null
+}
+
+interface DesktopHostBridge {
+  getAppInfo: () => Promise<{ version: string; electron: string; platform: string; packaged: boolean }>
+  getUpdateState: () => Promise<DesktopUpdateState | null>
+  checkForUpdates: () => Promise<DesktopUpdateState | null>
+  downloadUpdate: () => Promise<{ ok: boolean; error?: string } | null>
+  installUpdate: () => Promise<{ ok: boolean; error?: string }>
+  onUpdateStatus: (callback: (state: DesktopUpdateState) => void) => () => void
+}
+
+const desktopHost = (window as unknown as { desktopHost?: DesktopHostBridge }).desktopHost
+const isDesktop = Boolean(desktopHost)
+const appVersion = ref('')
+const electronVersion = ref('')
+const updateState = ref<DesktopUpdateState | null>(null)
+const updateBusy = ref(false)
+const updateError = ref('')
+let unsubscribeUpdate: (() => void) | null = null
+
+const updateLabel = computed(() => {
+  const state = updateState.value
+  if (!state) return '未检查'
+  switch (state.phase) {
+    case 'checking': return '正在检查…'
+    case 'available': return `发现新版本 ${state.version ?? ''}`.trim()
+    case 'downloading': return `下载中 ${state.percent}%`
+    case 'downloaded': return `已下载 ${state.version ?? ''}，可重启安装`
+    case 'up-to-date': return '已是最新版本'
+    case 'disabled': return '不可用'
+    case 'error': return '检查失败'
+    default: return '未检查'
+  }
+})
+const canInstallUpdate = computed(() => updateState.value?.phase === 'downloaded')
+
+async function initDesktopUpdate() {
+  if (!desktopHost) return
+  try {
+    const [info, state] = await Promise.all([desktopHost.getAppInfo(), desktopHost.getUpdateState()])
+    appVersion.value = info.version
+    electronVersion.value = info.electron
+    updateState.value = state
+    // 订阅推送；组件卸载时必须退订，否则每次进设置页都会多一个监听器。
+    unsubscribeUpdate = desktopHost.onUpdateStatus((next) => {
+      updateState.value = next
+      if (next.phase === 'downloaded') updateError.value = ''
+    })
+  } catch (error) {
+    updateError.value = errorText(error)
+  }
+}
+
+async function checkDesktopUpdate() {
+  if (!desktopHost || updateBusy.value) return
+  updateBusy.value = true
+  updateError.value = ''
+  try {
+    const state = await desktopHost.checkForUpdates()
+    if (state) updateState.value = state
+    // 手动检查必须给结论，否则用户会以为按钮没生效。
+    if (state?.phase === 'error') updateError.value = state.error ?? '检查更新失败。'
+  } catch (error) {
+    updateError.value = errorText(error)
+  } finally {
+    updateBusy.value = false
+  }
+}
+
+async function downloadDesktopUpdate() {
+  if (!desktopHost || updateBusy.value) return
+  updateBusy.value = true
+  updateError.value = ''
+  try {
+    const result = await desktopHost.downloadUpdate()
+    if (result && !result.ok) updateError.value = result.error ?? '下载失败。'
+  } catch (error) {
+    updateError.value = errorText(error)
+  } finally {
+    updateBusy.value = false
+  }
+}
+
+async function installDesktopUpdate() {
+  if (!desktopHost || updateBusy.value) return
+  updateBusy.value = true
+  updateError.value = ''
+  try {
+    // 主进程会先停 API（连同便携数据库），再交给安装器；成功后进程会退出，走不到下一行。
+    const result = await desktopHost.installUpdate()
+    if (!result.ok) updateError.value = result.error ?? '安装失败。'
+  } catch (error) {
+    updateError.value = errorText(error)
+  } finally {
+    updateBusy.value = false
+  }
+}
+
+onMounted(() => { void loadAgentInfo(); void loadWhisperStatus(); void initDesktopUpdate() })
+watch(() => props.apiOnline, online => { if (online) { void loadAgentInfo(); void loadWhisperStatus() } })
 
 watch(() => props.settings, (settings) => {
   if (!settings) return
@@ -121,6 +319,9 @@ watch(() => props.settings?.embedding.indexes.some(index => index.status === 'Bu
 }, { immediate: true })
 onBeforeUnmount(() => {
   if (pollTimer !== undefined) window.clearInterval(pollTimer)
+  if (whisperTimer !== undefined) window.clearInterval(whisperTimer)
+  unsubscribeUpdate?.()
+  unsubscribeUpdate = null
 })
 
 const mergedSpecs = computed(() => {
@@ -293,6 +494,15 @@ function formatSize(bytes: number) {
   if (bytes < 1024 ** 3) return `${(bytes / 1024 / 1024).toFixed(0)} MB`
   return `${(bytes / 1024 ** 3).toFixed(1)} GB`
 }
+
+const whisperStateLabel = computed(() => {
+  const status = whisperStatus.value
+  if (!status) return '读取中…'
+  if (status.downloading) return `下载中 · 已获取 ${formatSize(status.downloadedBytes)}`
+  return status.exists ? '已就绪' : '未安装'
+})
+
+const whisperReady = computed(() => whisperStatus.value?.exists === true)
 </script>
 
 <template>
@@ -448,6 +658,79 @@ function formatSize(bytes: number) {
 
         <p v-if="embeddingMessage" class="settings-hint settings-hint-success"><Check :size="13" /> {{ embeddingMessage }}</p>
         <p v-if="embeddingError" class="settings-hint settings-hint-error">{{ embeddingError }}</p>
+      </article>
+
+      <article class="settings-card settings-card-wide">
+        <header class="settings-card-head">
+          <span class="settings-icon settings-icon-blue"><Mic :size="18" /></span>
+          <div><h2>语音转写（Whisper）</h2><p>视频资料会先抽出音轨，再用 whisper.cpp 的 ggml 模型转写。模型 141 MB 起，不随安装包分发：离线环境请导入本地模型文件。</p></div>
+          <button class="button button-soft settings-head-action" :disabled="!apiOnline || whisperBusy" @click="loadWhisperStatus()">
+            <LoaderCircle v-if="whisperBusy" :size="14" class="spinning" /><RefreshCw v-else :size="14" /> 刷新
+          </button>
+        </header>
+
+        <div class="settings-endpoint settings-endpoint-active">
+          <div class="settings-endpoint-title">
+            <span>当前模型</span>
+            <span class="settings-badge">{{ whisperStatus?.model ?? 'base' }}</span>
+          </div>
+          <div class="settings-endpoint-grid">
+            <label class="settings-field"><span>状态</span><input :value="whisperStateLabel" readonly /></label>
+            <label class="settings-field"><span>体积</span><input :value="whisperReady ? formatSize(whisperStatus?.sizeBytes ?? 0) : '—'" readonly /></label>
+            <label class="settings-field" style="grid-column: 1 / -1"><span>保存位置</span><input :value="whisperStatus?.path ?? ''" readonly /></label>
+          </div>
+          <div class="settings-whisper-actions">
+            <label class="settings-field settings-whisper-file">
+              <span>导入本地模型（.bin，ggml 格式）</span>
+              <input :key="`whisper-${whisperPickerKey}`" type="file" accept=".bin" @change="onWhisperFileChange" />
+            </label>
+            <button class="button button-soft settings-inline-action" :disabled="whisperBusy || !apiOnline || !whisperFile" @click="importWhisper">
+              <LoaderCircle v-if="whisperBusy" :size="15" class="spinning" /><Upload v-else :size="15" /> 导入模型
+            </button>
+            <button class="button button-soft settings-inline-action" :disabled="whisperBusy || !apiOnline || whisperReady || whisperStatus?.downloading" @click="downloadWhisper">
+              <Cloud :size="15" /> 联网下载
+            </button>
+            <button v-if="whisperReady" class="button button-soft settings-inline-action settings-whisper-remove" :disabled="whisperBusy || !apiOnline" @click="removeWhisper">
+              <Trash2 :size="15" /> 删除模型
+            </button>
+          </div>
+        </div>
+
+        <p class="settings-hint"><Mic :size="13" /> 导入的文件会先校验文件头是否为 ggml；校验失败不会覆盖现有模型。导入或下载成功后无需重启，下一段视频会用新模型。</p>
+        <p v-if="whisperMessage" class="settings-hint settings-hint-success"><Check :size="13" /> {{ whisperMessage }}</p>
+        <p v-if="whisperError" class="settings-hint settings-hint-error">{{ whisperError }}</p>
+      </article>
+
+      <article v-if="isDesktop" class="settings-card settings-card-wide">
+        <header class="settings-card-head">
+          <span class="settings-icon settings-icon-blue"><Sparkles :size="18" /></span>
+          <div><h2>桌面版更新</h2><p>安装版会每 6 小时自动检查一次；下载完成后重启即可完成升级，资料、插件与数据库都保留在原位置。</p></div>
+          <button class="button button-soft settings-head-action" :disabled="updateBusy" @click="checkDesktopUpdate">
+            <LoaderCircle v-if="updateBusy" :size="14" class="spinning" /><RefreshCw v-else :size="14" /> 检查更新
+          </button>
+        </header>
+
+        <div class="settings-endpoint settings-endpoint-active">
+          <div class="settings-endpoint-title">
+            <span>当前版本</span>
+            <span class="settings-badge">{{ appVersion || '—' }}</span>
+          </div>
+          <div class="settings-endpoint-grid">
+            <label class="settings-field"><span>更新状态</span><input :value="updateLabel" readonly /></label>
+            <label class="settings-field"><span>Electron</span><input :value="electronVersion || '—'" readonly /></label>
+          </div>
+          <div class="settings-whisper-actions">
+            <button v-if="updateState?.phase === 'available'" class="button button-soft settings-inline-action" :disabled="updateBusy" @click="downloadDesktopUpdate">
+              <Download :size="15" /> 立即下载
+            </button>
+            <button v-if="canInstallUpdate" class="button button-primary settings-inline-action" :disabled="updateBusy" @click="installDesktopUpdate">
+              <RotateCcw :size="15" /> 重启并安装
+            </button>
+          </div>
+        </div>
+
+        <p class="settings-hint"><Sparkles :size="13" /> 更新源由安装包或环境变量 <code>MAF_UPDATE_URL</code> 决定；安装前会先停止后端与便携数据库，避免文件被占用。</p>
+        <p v-if="updateError" class="settings-hint settings-hint-error">{{ updateError }}</p>
       </article>
 
       <article class="settings-card settings-card-wide">
@@ -617,4 +900,10 @@ function formatSize(bytes: number) {
 .settings-switch-track.disabled.on { background: #eceeec; }
 .settings-switch-track.disabled > span,
 .settings-switch-track.disabled.on > span { transform: translateX(0); box-shadow: none; }
+
+/* Whisper 模型：文件选择与按钮同排，窄屏自动折行。 */
+.settings-whisper-actions { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; margin-top: 4px; }
+.settings-whisper-file { flex: 1 1 260px; min-width: 0; }
+.settings-whisper-actions .settings-inline-action { margin-top: 0; }
+.settings-whisper-remove { color: #b06a5a; }
 </style>

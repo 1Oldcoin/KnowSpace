@@ -3,12 +3,20 @@
   "version": "0.1.0",
   "private": true,
   "description": "MyFirstMafAgent desktop shell: native Electron main process + .NET API sidecar",
+  "author": "MyFirstMafAgent",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "start:packaged": "electron ."
+    "dist": "electron-builder --win --x64",
+    "dist:full": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/Build-ElectronInstaller.ps1",
+    "dist:publish": "electron-builder --win --x64 --publish always",
+    "test:updater": "node test/updater.test.js"
+  },
+  "dependencies": {
+    "electron-updater": "^6.6.2"
   },
   "devDependencies": {
-    "electron": "^33.4.11"
+    "electron": "^33.4.11",
+    "electron-builder": "^26.15.3"
   }
 }

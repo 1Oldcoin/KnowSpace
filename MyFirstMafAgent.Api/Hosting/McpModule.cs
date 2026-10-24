@@ -1,4 +1,5 @@
 using ModelContextProtocol.Protocol;
+using MyFirstMafAgent.Api.Application.Agents;
 using MyFirstMafAgent.Api.Mcp;
 using MyFirstMafAgent.Api.Options;
 
@@ -16,6 +17,11 @@ public static class McpModule
     public static McpServerRegistration AddMcpModule(this IServiceCollection services, IConfiguration configuration)
     {
         services.AddSingleton<McpClientRegistry>();
+
+        // 外部接入方：客户端密钥校验、限流与工具准入都依赖这三个服务。
+        services.AddHttpContextAccessor();
+        services.AddSingleton<AgentClientService>();
+        services.AddSingleton<AgentRateLimiter>();
 
         var enabled = configuration.GetValue<bool?>($"{McpOptions.SectionName}:EnableServer") ?? true;
         var path = configuration.GetValue<string?>($"{McpOptions.SectionName}:ServerPath");

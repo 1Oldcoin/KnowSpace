@@ -1,4 +1,4 @@
-export type ViewName = 'overview' | 'materials' | 'notes' | 'assistant' | 'companions' | 'avatar' | 'topics' | 'settings'
+export type ViewName = 'overview' | 'materials' | 'notes' | 'assistant' | 'companions' | 'avatar' | 'topics' | 'jobs' | 'plugins' | 'settings'
 
 export type MaterialKind = 'pdf' | 'html' | 'document' | 'image' | 'video' | 'note'
 

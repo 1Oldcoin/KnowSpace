@@ -80,6 +80,8 @@ public static class ApiHost
         builder.Services.AddDocumentsChatsModule();
         builder.Services.AddAvatarModule();
         builder.Services.AddAgentModule();
+        builder.Services.AddPluginModule();
+        builder.Services.AddJobsModule();
         var mcp = builder.Services.AddMcpModule(builder.Configuration);
         builder.Services.AddBackgroundWorkers();
 
@@ -101,10 +103,13 @@ public static class ApiHost
             });
         }
 
-        var hasStaticFrontend = HostPipeline.Configure(app, desktopSecurity);
+        var hasStaticFrontend = HostPipeline.Configure(app, desktopSecurity, mcp);
 
         app.Logger.LogInformation("Starting API in {EnvironmentName}", app.Environment.EnvironmentName);
         await DatabaseInitializer.InitializeAsync(app, CancellationToken.None);
+
+        // 插件在数据库就绪后启动：单个插件失败不影响核心。
+        await PluginModule.InitializePluginsAsync(app, CancellationToken.None);
 
         HostPipeline.MapEndpoints(app, hasStaticFrontend, mcp, desktopSecurity);
         return app;
