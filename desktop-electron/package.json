@@ -1,6 +1,6 @@
 {
   "name": "myfirstmafagent-desktop",
-  "version": "0.1.1",
+  "version": "1.0.1",
   "private": true,
   "description": "MyFirstMafAgent desktop shell: native Electron main process + .NET API sidecar",
   "author": "MyFirstMafAgent",

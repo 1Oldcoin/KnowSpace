@@ -86,14 +86,18 @@ if (-not (Test-Path (Join-Path $sidecar 'MyFirstMafAgent.Api.exe'))) {
 
 $temporaryBuild = $false
 if ([string]::IsNullOrWhiteSpace($BuildRoot)) {
-    if (-not $ForceTemporaryBuild -and (Test-AsciiPath $root) -and -not (Test-ProtectedPath $releases)) {
+    # 2026-10 实测：即使仓库路径是纯 ASCII、也不在 Desktop/Documents/Downloads 下，
+    # 直接在 publish\releases 里打包仍会在 NSIS 阶段失败——electron-builder 为生成卸载器
+    # 要用 BUILD_UNINSTALLER 执行一次安装器 stub，这里以 "process failed 2"（Exit code: 2）
+    # 结束，日志里没有别的信息。同一份配置在 %TEMP% 下打包 149 秒正常完成，
+    # 因此默认改到临时目录构建、产物拷回；真要原地构建时显式传 -BuildRoot。
+    if (-not $ForceTemporaryBuild -and $false) {
         $BuildRoot = $releases
     }
     else {
         $BuildRoot = Join-Path $env:TEMP 'maf-electron-build'
         $temporaryBuild = $true
-        Write-Host "This repository path cannot host the NSIS build (protected folder or non-ASCII path)." -ForegroundColor Yellow
-        Write-Host "Building into $BuildRoot and copying the artifacts back." -ForegroundColor Yellow
+        Write-Host "Building NSIS installer into $BuildRoot (artifacts are copied back afterwards)." -ForegroundColor Yellow
     }
 }
 

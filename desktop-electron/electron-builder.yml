@@ -32,16 +32,22 @@ asar: true
 
 # 自动更新发布源（P0-3）。
 #
-# 这里写的是一个**占位地址**，作用是让 electron-builder 生成 latest.yml
-# 并在 resources/app-update.yml 里写入 provider 信息。
+# 默认指向本项目的 GitHub Releases：electron-builder 会生成 latest.yml 并把
+# provider 信息写进 resources/app-update.yml，安装后的客户端直接查这个源。
+#
 # 运行时优先级（见 updater.js）：
 #   1. 环境变量 MAF_UPDATE_URL
 #   2. 用户数据目录 update-feed.json 里的 { "url": "..." }
-#   3. 本文件里的默认值
+#   3. 本文件里的默认值（下面的 GitHub 仓库）
 # 因此同一个安装包可以指向 GitHub Releases、自建静态目录或内网发布点。
+#
+# 说明：GitHub 源不需要 gh CLI，发布动作由 scripts/Publish-Release.ps1 调
+# REST API 完成（令牌从 git credential 里取，见该脚本注释）。
 publish:
-  provider: generic
-  url: https://updates.invalid/myfirstmafagent
+  provider: github
+  owner: 1Oldcoin
+  repo: KnowSpace
+  releaseType: release
 
 win:
   target:

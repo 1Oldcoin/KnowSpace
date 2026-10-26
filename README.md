@@ -129,13 +129,28 @@ npm start          # 开发运行
 npm run dist:full  # 打包 NSIS 安装包
 ```
 
-**原生工具（可选）**：`MyFirstMafAgent.Api/ExternalTools/` 下的 ffmpeg / Embedding 模型 / 便携 PostgreSQL **不入库**（体积大、含单文件超 100 MB 的二进制）。按需装配：
+**原生工具**：`MyFirstMafAgent.Api/ExternalTools/` 下的 ffmpeg / Embedding 模型 / 便携 PostgreSQL 现在**随仓库分发**，克隆下来即可用：
+
+- `ExternalTools/Embedding/`（bge-small-zh-v1.5，约 90 MB）与 `ExternalTools/pgSQL/`（便携 PostgreSQL，约 65 MB）是普通 git 对象，clone 即得。
+- `ExternalTools/ffmpeg/` 三个 exe（ffmpeg / ffplay / ffprobe，各约 100 MB）超过 GitHub 单文件 100 MiB 上限，**走 Git LFS**。
+
+因此克隆前先装 git-lfs，否则那三个 exe 只会是几十字节的指针文件：
+
+```bash
+winget install GitHub.GitLFS
+git lfs install
+git clone https://github.com/1Oldcoin/KnowSpace.git
+```
+
+已经克隆但漏了 LFS 的话，进仓库执行 `git lfs pull` 即可补回。只想补 ffmpeg，也可以继续用装配脚本：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\Download-ExternalTools.ps1 -Target all
+powershell -ExecutionPolicy Bypass -File scripts\Download-ExternalTools.ps1 -Target ffmpeg
 ```
 
 缺任何一个都不会导致启动失败：ffmpeg 缺失时视频功能报可读错误，便携数据库缺失时回落到外部 PostgreSQL 连接串。
+
+> **运行时数据也入库了**：`MyFirstMafAgent.Api/App_Data/` 里的便携 PostgreSQL 数据目录（`pgdata/`，已建好表结构与扩展）与 `uploads/` 一并提交，clone 后初始化即用，不用自己建库。只有运行期临时文件（`postmaster.pid`、`pglogs/`、`pg_stat_tmp/`）被忽略。因为本机 `core.autocrlf=true`，`.gitattributes` 已把 `App_Data/` 与 `ExternalTools/` 标记为 `-text`，避免换行改写把数据库弄坏。
 
 ## 把知识库接给外部 AI（MCP）
 
