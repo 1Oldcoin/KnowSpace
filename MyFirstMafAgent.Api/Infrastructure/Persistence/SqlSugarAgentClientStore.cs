@@ -19,8 +19,15 @@ public sealed class SqlSugarAgentClientStore(SqlSugarScope database)
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
-    public Task InitializeAsync(CancellationToken cancellationToken)
+    // 两个接口都声明了 InitializeAsync(CancellationToken)，签名不能加可选参数；
+    // 需要"跳过建表检查"时走下面的重载（结构指纹一致时由 DatabaseInitializer 调用）。
+    public Task InitializeAsync(CancellationToken cancellationToken) =>
+        InitializeAsync(cancellationToken, ensureSchema: true);
+
+    public Task InitializeAsync(CancellationToken cancellationToken, bool ensureSchema)
     {
+        if (!ensureSchema) return Task.CompletedTask;
+
         database.CodeFirst.InitTables<AgentClientSchemaEntity>();
         database.CodeFirst.InitTables<AgentClientCallSchemaEntity>();
         return Task.CompletedTask;

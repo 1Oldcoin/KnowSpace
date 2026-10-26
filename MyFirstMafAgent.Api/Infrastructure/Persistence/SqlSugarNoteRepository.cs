@@ -71,10 +71,15 @@ public sealed class SqlSugarNoteRepository(SqlSugarScope database, ILogger<SqlSu
 {
     private const string TableName = "kb_notes";
 
-    public async Task InitializeAsync(CancellationToken cancellationToken)
+    public async Task InitializeAsync(CancellationToken cancellationToken, bool ensureSchema = true)
     {
-        database.CodeFirst.InitTables<NoteSchemaEntity>();
-        EnsureColumns();
+        if (ensureSchema)
+        {
+            database.CodeFirst.InitTables<NoteSchemaEntity>();
+            EnsureColumns();
+        }
+
+        // 数据回填与建表无关：结构没变也可能有旧行需要补 source_document_ids。
         await BackfillSourceDocumentIdsAsync(cancellationToken);
     }
 

@@ -1,12 +1,15 @@
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Primitives;
+using MyFirstMafAgent.Api.Options;
 
 namespace MyFirstMafAgent.Api.Hosting;
 
 /// <summary>
-/// 桌面宿主（Electron 壳）的本机 API 安全设置。
+/// 本机/服务端 API 安全设置。
 ///
 /// <para>
 /// 监听 127.0.0.1 不等同于鉴权：同一台机器上的其它进程同样可以访问回环端口。
@@ -15,14 +18,27 @@ namespace MyFirstMafAgent.Api.Hosting;
 /// </para>
 ///
 /// <para>
-/// 控制台/开发模式不设置令牌时，本层整体禁用，行为与之前完全一致。
+/// 服务端部署（云主机/容器/内网）没有宿主来生成令牌，改用长期令牌
+/// <c>Server:ApiToken</c> / 环境变量 <c>MAF_SERVER_TOKEN</c>，走同一个中间件、同一个请求头。
+/// 反向代理也可以在自己的认证通过后注入 <c>X-Api-Token</c>，浏览器端就不需要改代码。
+/// </para>
+///
+/// <para>
+/// 两者都没配置时（纯本机控制台调试），本层整体禁用，行为与之前完全一致。
 /// </para>
 /// </summary>
-public sealed record DesktopSecurityOptions(bool Enabled, string? Token, bool StrictContentSecurityPolicy)
+public sealed record DesktopSecurityOptions(
+    bool Enabled,
+    string? Token,
+    bool StrictContentSecurityPolicy,
+    bool AllowAnonymousHealth = false)
 {
     public const string TokenEnvironmentVariable = "DESKTOP_API_TOKEN";
     public const string StrictCspEnvironmentVariable = "DESKTOP_STRICT_CSP";
     public const string TokenHeaderName = "X-Api-Token";
+
+    /// <summary>健康检查路径：负载均衡与容器探活拿不到令牌，需要单独放行。</summary>
+    public const string HealthPath = "/api/health";
 
     /// <summary>受限内容安全策略：用于桌面窗口，禁止内联脚本与外部资源。</summary>
     public const string StrictContentSecurityPolicyValue =
@@ -40,17 +56,27 @@ public sealed record DesktopSecurityOptions(bool Enabled, string? Token, bool St
 
     public static DesktopSecurityOptions FromConfiguration(IConfiguration configuration)
     {
+        // 优先级：桌面宿主注入的环境变量 > 服务端长期令牌环境变量 > 配置文件。
+        // 桌面令牌是每次启动重新生成的，一旦存在就应该压过任何写在文件里的静态值。
         var configured = configuration["Desktop:ApiToken"];
         var token = string.IsNullOrWhiteSpace(configured)
             ? Environment.GetEnvironmentVariable(TokenEnvironmentVariable)
             : configured;
+
+        if (string.IsNullOrWhiteSpace(token))
+            token = Environment.GetEnvironmentVariable(ServerSecurityOptions.TokenEnvironmentVariable);
+
+        if (string.IsNullOrWhiteSpace(token))
+            token = configuration[$"{ServerSecurityOptions.SectionName}:ApiToken"];
 
         token = string.IsNullOrWhiteSpace(token) ? null : token.Trim();
 
         var strictCsp = configuration.GetValue<bool?>("Desktop:StrictContentSecurityPolicy")
             ?? ParseBoolean(Environment.GetEnvironmentVariable(StrictCspEnvironmentVariable));
 
-        return new DesktopSecurityOptions(!string.IsNullOrEmpty(token), token, strictCsp);
+        var allowAnonymousHealth = configuration.GetValue<bool?>($"{ServerSecurityOptions.SectionName}:AllowAnonymousHealth") ?? false;
+
+        return new DesktopSecurityOptions(!string.IsNullOrEmpty(token), token, strictCsp, allowAnonymousHealth);
     }
 
     private static bool ParseBoolean(string? value) =>
@@ -61,7 +87,7 @@ public sealed record DesktopSecurityOptions(bool Enabled, string? Token, bool St
 }
 
 /// <summary>
-/// 本机 API 令牌校验。只有 REST 数据面（<c>/api</c>）需要令牌；
+/// API 令牌校验。只有 REST 数据面（<c>/api</c>）需要令牌；
 /// 静态资源与 SPA 文档本身不需要，避免窗口加载首页时依赖自定义请求头。
 ///
 /// <para>
@@ -74,23 +100,33 @@ public static class LocalApiTokenValidator
 {
     private static readonly string[] ProtectedPrefixes = ["/api"];
 
-    /// <summary>该请求路径是否属于必须鉴权的数据面。</summary>
-    public static bool RequiresToken(PathString path)
+    /// <summary>
+    /// 该请求路径是否属于必须鉴权的数据面。
+    /// <paramref name="allowAnonymousHealth"/> 为 true 时放行 <c>/api/health</c>（负载均衡探活）。
+    /// </summary>
+    public static bool RequiresToken(PathString path, bool allowAnonymousHealth = false)
     {
         foreach (var prefix in ProtectedPrefixes)
         {
-            if (path.StartsWithSegments(prefix, StringComparison.OrdinalIgnoreCase))
-                return true;
+            if (!path.StartsWithSegments(prefix, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (allowAnonymousHealth && IsHealthPath(path)) return false;
+            return true;
         }
 
         return false;
     }
 
+    private static bool IsHealthPath(PathString path) =>
+        path.Equals(new PathString(DesktopSecurityOptions.HealthPath), StringComparison.OrdinalIgnoreCase)
+        || path.Equals(new PathString(DesktopSecurityOptions.HealthPath + "/"), StringComparison.OrdinalIgnoreCase);
+
     /// <summary>令牌是否匹配。使用固定时间比较，避免计时侧信道。</summary>
     public static bool IsAuthorized(DesktopSecurityOptions options, PathString path, StringValues headerValue)
     {
         if (!options.Enabled) return true;
-        if (!RequiresToken(path)) return true;
+        if (!RequiresToken(path, options.AllowAnonymousHealth)) return true;
         if (StringValues.IsNullOrEmpty(headerValue)) return false;
 
         var provided = headerValue.ToString();
@@ -145,7 +181,7 @@ public static class DesktopSecurityMiddleware
 
         app.Use(async (context, next) =>
         {
-            if (!LocalApiTokenValidator.RequiresToken(context.Request.Path))
+            if (!LocalApiTokenValidator.RequiresToken(context.Request.Path, options.AllowAnonymousHealth))
             {
                 await next();
                 return;

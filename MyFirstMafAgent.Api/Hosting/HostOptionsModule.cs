@@ -87,6 +87,15 @@ public static class HostOptionsModule
                 && options.TimeoutSeconds is >= 1 and <= 120,
                 "WebSearch max results must be between 1 and 10 and the timeout must be between 1 and 120 seconds.")
             .ValidateOnStart();
+        // 服务端部署安全：令牌长度、代理列表与失败闸门必须有效。
+        services.AddOptions<ServerSecurityOptions>()
+            .BindConfiguration(ServerSecurityOptions.SectionName)
+            .Validate(options => (string.IsNullOrWhiteSpace(options.ApiToken) || options.ApiToken.Trim().Length >= 16)
+                && options.FailedAuthLimitPerMinute is >= 0 and <= 100_000
+                && options.FailedAuthBlockSeconds is >= 0 and <= 86_400
+                && options.KnownProxies.All(proxy => System.Net.IPAddress.TryParse(proxy?.Trim(), out _)),
+                "Server:ApiToken must be empty or at least 16 characters; the failed-auth limit, block seconds and every KnownProxies entry must be valid.")
+            .ValidateOnStart();
         // 插件运行时：目录、超时与重启退避必须有效，否则启动即失败。
         services.AddOptions<PluginOptions>()
             .BindConfiguration(PluginOptions.SectionName)

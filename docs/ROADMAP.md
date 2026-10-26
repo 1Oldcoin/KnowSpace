@@ -214,7 +214,13 @@
 | 在 Desktop 路径跑测试会崩 | `dotnet test` 的 testhost 在受保护目录下崩，必须加 `-p:OutputPath=C:\Temp\maftests\`（已记入仓库记忆） |
 | 缺少 `DELETE /api/knowledge-bases/{id}` | 现在只能删资料、笔记、专题，知识库本身删不掉；清理验证用的一次性库只能重建数据库。加接口时要一并处理笔记/专题/资料/向量/落盘文件的级联（`KnowledgePackageStore.DeleteKnowledgeBaseAsync` 已有事务版实现可复用） |
 | `docs/PHASE0-BASELINE.md` | 阶段 0 的延迟/索引测量，属于历史基线，不必再更新 |
-| **安装包需要重打** | `publish/releases/MyFirstMafAgent-0.1.0-setup.exe` 是 2026-10-23 构建，**不含** D-1/D-5/D-6/T-3/T-5/BUG-1/T-6。对外分发前必须重跑 `scripts/Publish-Portable.ps1` + `scripts/Build-ElectronInstaller.ps1`，否则用户装到的是"已修好的 bug 还在"的旧行为 |
+| 旧安装包 | ✅ 已重打（2026-10-26）：`publish/releases/MyFirstMafAgent-0.1.1-setup.exe`（283 MB）+ `.blockmap` + `latest.yml`。含 D-1/D-5/D-6/T-3/T-5/BUG-1/T-6，以及 0.1.1 新增的「专题无法新增 / 侧栏无法滚动」修复与启动性能优化（后端就绪 3.8–5.1s → 1.4s）。旧的 0.1.0 产物已删除。**⚠️ 2026-10-26 瘦身时 `publish/releases` 已清空，安装包现存于 `%USERPROFILE%\Downloads`，仓库内不再保留二进制产物** |
+| 打包会被拦 | 在 `publish\releases` 直接跑 electron-builder 时，NSIS 生成的临时安装器**无法执行**（`ERR_ELECTRON_BUILDER_CANNOT_EXECUTE`，exit code null）。必须加 `-ForceTemporaryBuild` 在 `%TEMP%` 构建后拷回 |
+| 从仓库目录运行安装包会报 “Error writing temporary file” | **不是安装包的缺陷**。本机 `C:\Word\MAF\MyFirstMafAgent` 被沙箱接管（`Mandatory Label\Low Mandatory Level:(OI)(CI)(NW)` + 显式 `Everyone:(DENY)(S,DC)`），从该目录启动的进程令牌带 `NO_WRITE_UP`，**连写 `%TEMP%` 都被拒**（`cmd /c echo x > %TEMP%\y` → `Access is denied.`）；NSIS 引导阶段建 `$PLUGINSDIR` 因此失败并弹出该错误，静默安装退出码 2。**同一份 exe（SHA256 一致）从 `Downloads` / `C:\Word` 等普通目录安装退出码 0 且功能完整**。故：调试安装包时先复制到仓库外再运行；这也是上面 `ERR_ELECTRON_BUILDER_CANNOT_EXECUTE` 的真实根因 |
+| 安装包运行时依赖 | 判定安装是否可用要检查 `resources\api\ExternalTools\pgSQL\win-x64\bin\pg_ctl.exe`、`postgres.exe`、`win-x64\lib\vector.dll`（注意是 `win-x64\bin` 子目录，不是 `bin`） |
+| 瘦身（2026-10-26） | 删掉全部 `bin`/`obj`（含 `bin` 里 5 份 `ExternalTools` 副本，共 2.45 GB）、`.vs`、`publish\console`、`wtprobe`、`tcp-probe`、根 `App_Data`、`App_Data\probe-root`：**7.86 GB → 1.69 GB**。剩余大头是 `publish\desktop`（718 MB，安装包的重建输入）与两个 `node_modules`（470 MB）。`publish\` 整体可随时删，重建需 `Publish-Portable.ps1` |
+| 云部署安全已加固 | `/api` 服务端令牌（`Server:ApiToken`/`MAF_SERVER_TOKEN`）、按 IP 的鉴权失败闸门、可信转发头（修审计 IP 与 `shutdown` 回环判定欺骗）、匿名健康检查开关、安全响应头与 `Server` 头隐藏。详见 `docs/CLOUD-DEPLOYMENT.md` |
+| MCP 授权模型已完整 | 密钥 + 能力 + 工具白名单 + 知识库范围 + 限流 + 审计，清单外工具默认拒绝。`ARCHITECTURE.md` §9.10 里「MCP 服务端当前没有鉴权」的旧描述已更正 |
 
 ---
 

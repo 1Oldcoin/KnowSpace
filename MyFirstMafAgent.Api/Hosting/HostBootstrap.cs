@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Http.Features;
 using MyFirstMafAgent.Api.Infrastructure;
 using MyFirstMafAgent.Api.Infrastructure.Logging;
+using MyFirstMafAgent.Api.Options;
 
 namespace MyFirstMafAgent.Api.Hosting;
 
@@ -68,7 +69,12 @@ public static class HostBootstrap
         var maxRequestBodySize = Math.Max(Math.Max(Math.Max(maxFileRequestSize, maxAudioFileSize), uploadChunkSize),
             Math.Max(maxEmbeddingModelSize, maxWhisperModelSize)) + 1_048_576;
 
-        builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = maxRequestBodySize);
+        builder.WebHost.ConfigureKestrel(options =>
+        {
+            options.Limits.MaxRequestBodySize = maxRequestBodySize;
+            // 默认不回 Server 头：少一点指纹信息给扫描器。
+            options.AddServerHeader = !(builder.Configuration.GetValue<bool?>($"{ServerSecurityOptions.SectionName}:HideServerHeader") ?? true);
+        });
         builder.Services.Configure<FormOptions>(options => options.MultipartBodyLengthLimit = maxRequestBodySize);
         builder.Services.AddProblemDetails();
         builder.Services.AddOpenApi();

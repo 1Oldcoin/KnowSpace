@@ -9,7 +9,17 @@ public sealed class SqlSugarAvatarRepository(SqlSugarScope database) : IAvatarRe
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
-    public async Task InitializeAsync(CancellationToken cancellationToken)
+    /// <param name="ensureSchema">
+    /// false = 结构已由 <see cref="Hosting.SchemaStamp"/> 证明是最新的，跳过全部建表检查。
+    /// 这里 20 张表的 catalog 往返实测约 1.4 秒，是启动耗时第二大户。
+    /// </param>
+    public async Task InitializeAsync(CancellationToken cancellationToken, bool ensureSchema = true)
+    {
+        if (ensureSchema)
+            await EnsureSchemaAsync(cancellationToken);
+    }
+
+    private async Task EnsureSchemaAsync(CancellationToken cancellationToken)
     {
         database.CodeFirst.InitTables<AvatarProfileSchemaEntity>();
         database.CodeFirst.InitTables<AvatarFragmentSchemaEntity>();

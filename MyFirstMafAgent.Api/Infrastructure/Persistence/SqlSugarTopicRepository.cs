@@ -29,8 +29,10 @@ public sealed class TopicSchemaEntity
 
 public sealed class SqlSugarTopicRepository(SqlSugarScope database) : ITopicRepository
 {
-    public Task InitializeAsync(CancellationToken cancellationToken)
+    public Task InitializeAsync(CancellationToken cancellationToken, bool ensureSchema = true)
     {
+        if (!ensureSchema) return Task.CompletedTask;
+
         database.CodeFirst.InitTables<TopicSchemaEntity>();
         return Task.CompletedTask;
     }

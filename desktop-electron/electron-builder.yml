@@ -19,6 +19,9 @@ files:
   - main.js
   - preload.js
   - updater.js
+  - splash.html
+  # 可选：用户放一张 splash.gif 就能换成自己的启动动画（没有也不影响）。
+  - splash.gif
   - package.json
 
 extraResources:

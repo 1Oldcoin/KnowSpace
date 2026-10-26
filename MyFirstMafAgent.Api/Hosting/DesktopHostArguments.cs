@@ -23,20 +23,33 @@ public sealed record DesktopHostArguments(string? ReadyFilePath, string? DataRoo
     {
         if (string.IsNullOrWhiteSpace(ReadyFilePath)) return;
 
-        var directory = Path.GetDirectoryName(ReadyFilePath);
-        if (!string.IsNullOrWhiteSpace(directory)) Directory.CreateDirectory(directory);
-
-        var payload = JsonSerializer.Serialize(new
+        try
         {
-            url,
-            pid = Environment.ProcessId,
-            startedAt = DateTimeOffset.Now
-        });
+            var directory = Path.GetDirectoryName(ReadyFilePath);
+            if (!string.IsNullOrWhiteSpace(directory)) Directory.CreateDirectory(directory);
 
-        // 先写临时文件再替换，避免宿主读到写了一半的内容。
-        var temp = ReadyFilePath + ".tmp";
-        await File.WriteAllTextAsync(temp, payload, cancellationToken);
-        File.Move(temp, ReadyFilePath, overwrite: true);
+            var payload = JsonSerializer.Serialize(new
+            {
+                url,
+                pid = Environment.ProcessId,
+                startedAt = DateTimeOffset.Now
+            });
+
+            // 先写临时文件再替换，避免宿主读到写了一半的内容。
+            var temp = ReadyFilePath + ".tmp";
+            await File.WriteAllTextAsync(temp, payload, cancellationToken);
+            File.Move(temp, ReadyFilePath, overwrite: true);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // 写就绪文件失败时，宿主只会看到"等待就绪超时"，那条信息对排查毫无帮助。
+            // 这里把真实原因（哪个路径、什么权限）直接打到启动日志，再抛出明确异常。
+            StartupTimeline.Mark($"无法写入就绪文件 {ReadyFilePath}：{exception.GetType().Name}: {exception.Message}");
+            throw new InvalidOperationException(
+                $"无法写入就绪文件（{ReadyFilePath}）：{exception.Message}。"
+                + "宿主与数据目录可能在同一个盘上但权限不一致，请检查该目录是否可写。",
+                exception);
+        }
     }
 
     private static string? ReadOption(string[] args, string name)

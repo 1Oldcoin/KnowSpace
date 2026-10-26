@@ -9,6 +9,9 @@
 # ---------------------------------------------------------------------------
 [Bb]in/
 [Oo]bj/
+# 例外：ExternalTools 下的便携 PostgreSQL 自带 bin/lib/share，属于要分发的运行时
+!MyFirstMafAgent.Api/ExternalTools/pgSQL/**/bin/
+!MyFirstMafAgent.Api/ExternalTools/pgSQL/**/lib/
 .vs/
 artifacts/
 publish/
@@ -71,26 +74,24 @@ desktop-electron/out/
 
 # ---------------------------------------------------------------------------
 # 3. 运行时数据 / 本地数据库
-#    根目录 App_Data 与 MyFirstMafAgent.Api/App_Data 都会被忽略：
-#    pg0home（PostgreSQL 数据目录）、uploads、agent-workspace 等
+#    2026-10 起 App_Data **随仓库分发**（便携 PostgreSQL 数据目录 + uploads），
+#    用户 clone 后初始化即可直接使用，不再需要自行建库。
+#    只排除运行期临时/锁文件与日志，避免污染仓库或让新机器起不来。
 # ---------------------------------------------------------------------------
-App_Data/
-*.db
-*.db-shm
-*.db-wal
-*.sqlite
-*.sqlite3
+**/pglogs/
+**/pg_stat_tmp/
+**/postmaster.pid
+**/postmaster.opts
 *.bak
 *.dump
 *.pgdump
 
 # ---------------------------------------------------------------------------
-# 4. 第三方二进制与模型（体积大，不入库）
-#    ExternalTools 内含 pg0 / ffmpeg / bge 嵌入模型；.finaltest 为发布快照
+# 4. 第三方二进制与模型
+#    2026-10 起 Embedding 模型（bge-small-zh-v1.5）与便携 PostgreSQL 随仓库分发；
+#    ffmpeg 三个 exe 均 >100MiB，走 Git LFS（见 .gitattributes）。
+#    Whisper 语音模型（gguf / ggml）仍不入库，运行时自动下载。
 # ---------------------------------------------------------------------------
-MyFirstMafAgent.Api/ExternalTools/
-*.onnx
-*.onnx.data
 *.gguf
 ggml-*.bin
 dotnet/

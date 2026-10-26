@@ -1,0 +1,28 @@
+# ============================================================================
+# Git LFS 规则
+# GitHub 单文件硬上限 100MiB，下面这些 ffmpeg 二进制都超过了：
+#   ffplay.exe 102.0 MB / ffmpeg.exe 100.5 MB / ffprobe.exe 100.3 MB
+# 因此必须走 LFS；普通 git 对象会被服务端直接拒绝（pre-receive hook 报错）。
+#
+# 克隆前先装 git-lfs：
+#   winget install GitHub.GitLFS   或   https://git-lfs.com
+# 克隆时若没装 LFS，这几个 exe 只会是几十字节的指针文件，
+# 此时运行 scripts\Download-ExternalTools.ps1 -Target ffmpeg 或重新 clone 即可。
+# ============================================================================
+MyFirstMafAgent.Api/ExternalTools/ffmpeg/*.exe filter=lfs diff=lfs merge=lfs -text
+
+# Windows 脚本统一 CRLF，避免 clone 后换行被改写
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# 运行时数据与第三方工具目录：完全按原始字节存取。
+# 特别注意 App_Data/pgdata —— PostgreSQL 的 PG_VERSION 等文件不允许任何换行改写
+# （本机 core.autocrlf=true，不加这条 clone 下来会变成 CRLF，数据库起不来）。
+MyFirstMafAgent.Api/App_Data/** -text
+MyFirstMafAgent.Api/ExternalTools/** -text
+
+# 模型与二进制禁止任何换行/文本化处理
+*.onnx binary
+*.onnx.data binary
+*.dll binary

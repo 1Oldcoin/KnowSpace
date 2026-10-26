@@ -17,20 +17,36 @@ const { spawn } = require('node:child_process');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 const { createUpdater } = require('./updater');
 
 const TOKEN_HEADER = 'X-Api-Token';
 const READY_TIMEOUT_MS = 180_000;
 const HEALTH_TIMEOUT_MS = 180_000;
 const SHUTDOWN_TIMEOUT_MS = 20_000;
+/**
+ * 启动画面延迟出现的时间。
+ *
+ * 后端已经在后台跑（关窗不关服务）时，从双击到窗口出现只有几百毫秒；这种情况下再闪一个
+ * 启动画面反而是噪音。所以画面先建好但按住不发，超过这个时间主窗口还没就绪才显示；
+ * 正常冷启动（要拉起数据库）一定超过，用户看到的是"立刻有反馈"。
+ */
+const SPLASH_DELAY_MS = 180;
 
 let mainWindow = null;
+let splashWindow = null;
+let splashShowTimer = null;
+let splashClosed = false;
+/** 最后一次设置的状态文案：页面加载完成后用它补写（见 createSplash）。 */
+let lastSplashPhase = '';
 let apiProcess = null;
 let apiBaseUrl = null;
 let apiToken = null;
 let apiOwned = false;
 let isQuitting = false;
 let updater = null;
+/** 进程启动时刻：启动画面与日志用它算「用户等了多久」。 */
+const startupBeganAt = Date.now();
 
 /**
  * 运行时发现文件与共享令牌，路径与 API 侧 DesktopRuntimeFile 必须一致：
@@ -163,13 +179,17 @@ async function waitForReadyFile(readyFile) {
     if (fs.existsSync(readyFile)) {
       try {
         const payload = JSON.parse(fs.readFileSync(readyFile, 'utf8'));
-        if (payload && typeof payload.url === 'string' && payload.url.length > 0) return payload.url;
+        if (payload && typeof payload.url === 'string' && payload.url.length > 0) {
+          log(`ready file detected after ${Date.now() - startupBeganAt}ms`);
+          return payload.url;
+        }
       } catch {
         // 可能是写入过程中的半截文件，稍后重试。
       }
     }
 
-    await sleep(200);
+    // 60ms 而不是 200ms：文件出现到我们看见它，平均白等 100ms，而每次 stat 只要几十微秒。
+    await sleep(60);
   }
 
   throw new Error('等待 API 就绪超时（ready 文件未出现）。');
@@ -185,12 +205,16 @@ async function waitForHealth(baseUrl) {
       const response = await fetch(`${baseUrl}/api/health`, {
         headers: apiToken ? { [TOKEN_HEADER]: apiToken } : {}
       });
-      if (response.ok) return;
+      if (response.ok) {
+        log(`health ok after ${Date.now() - startupBeganAt}ms`);
+        return;
+      }
     } catch {
       // 端口已开但 Kestrel 尚未就绪，继续等待。
     }
 
-    await sleep(300);
+    // ready 文件已经写过，健康检查基本只会失败一次（端口刚绑定），间隔别设太大。
+    await sleep(120);
   }
 
   throw new Error('API 健康检查超时。');
@@ -260,7 +284,12 @@ function createWindow(baseUrl) {
     item.once('done', (_doneEvent, state) => log(`download ${item.getFilename()} -> ${target} (${state})`));
   });
 
-  mainWindow.once('ready-to-show', () => mainWindow.show());
+  mainWindow.once('ready-to-show', () => {
+    if (mainWindow) mainWindow.show();
+    // 主窗口一出来就把启动画面收掉：两个窗口同时存在会抢焦点。
+    closeSplash();
+    log(`main window shown at ${Date.now() - startupBeganAt}ms`);
+  });
   mainWindow.on('closed', () => { mainWindow = null; });
 
   mainWindow.loadURL(baseUrl);
@@ -276,6 +305,146 @@ function openExternal(url) {
   } catch {
     // 非法 URL 直接忽略。
   }
+}
+
+/**
+ * 启动画面。
+ *
+ * 为什么需要：真正的首屏要等「.NET 主机起来 + 便携数据库就绪 + 建表检查完成 + Kestrel 监听」，
+ * 冷启动是秒级。这段时间里如果什么都不画，用户会以为双击没生效、再点一次（于是变成
+ * 「程序已经在运行」的困惑）。启动画面的价值不是装饰，而是**立刻证明点击被接收到**，
+ * 并且用一句文案说明现在卡在哪一步。
+ *
+ * 实现取最小依赖：一个本地 HTML（不联网、不加载字体、无 JS 依赖），文案由主进程用
+ * `executeJavaScript` 直接写进 DOM——这样 splash 页面不需要 preload，也不需要开
+ * nodeIntegration。
+ */
+function createSplash() {
+  if (splashWindow || splashClosed) return;
+
+  splashWindow = new BrowserWindow({
+    width: 380,
+    height: 250,
+    frame: false,
+    resizable: false,
+    movable: true,
+    maximizable: false,
+    minimizable: false,
+    fullscreenable: false,
+    center: true,
+    show: false,
+    backgroundColor: '#f4f8f4',
+    skipTaskbar: false,
+    title: '知间',
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      spellcheck: false
+    }
+  });
+
+  splashWindow.once('ready-to-show', () => {
+    // 先按住不发：快路径（接管已在跑的后端）不该看到闪一下的画面。
+    splashShowTimer = setTimeout(() => {
+      splashShowTimer = null;
+      if (splashWindow && !splashWindow.isDestroyed() && !mainWindow?.isVisible()) {
+        splashWindow.show();
+        log(`splash shown at ${Date.now() - startupBeganAt}ms`);
+      }
+    }, SPLASH_DELAY_MS);
+  });
+
+  splashWindow.on('closed', () => {
+    splashWindow = null;
+  });
+
+  splashWindow.loadFile(path.join(__dirname, 'splash.html'));
+
+  splashWindow.webContents.on('did-finish-load', () => {
+    // 页面加载完成后补写版本号，并把「最后一次想显示的状态」重新贴上去：
+    // 在 did-finish-load 之前调用的 setSplashPhase 会因为页面还没就绪而被丢弃。
+    setSplashVersion(`版本 ${app.getVersion()}`);
+    if (lastSplashPhase) setSplashPhase(lastSplashPhase);
+    applySplashGif();
+  });
+}
+
+/** 允许用一张 gif 顶掉内置图标动画：把 splash.gif 放到 desktop-electron\ 下即可。 */
+function applySplashGif() {
+  if (!splashWindow || splashWindow.isDestroyed()) return;
+
+  const gifPath = path.join(__dirname, 'splash.gif');
+  if (!fs.existsSync(gifPath)) return;
+
+  const href = pathToFileURL(gifPath).href;
+  splashWindow.webContents
+    .executeJavaScript(
+      `(() => {
+        const image = document.getElementById('splash-gif');
+        if (!image) return;
+        image.src = ${JSON.stringify(href)};
+        image.hidden = false;
+        document.body.classList.add('with-gif');
+      })()`
+    )
+    .catch((error) => log(`splash gif failed: ${error.message}`));
+}
+
+/** 更新启动画面上的状态文案；画面不在（已关/未建）时静默跳过。 */
+function setSplashPhase(text) {
+  lastSplashPhase = text;
+  if (!splashWindow || splashWindow.isDestroyed()) return;
+
+  splashWindow.webContents
+    .executeJavaScript(
+      `(() => {
+        const phase = document.getElementById('phase');
+        if (phase) phase.textContent = ${JSON.stringify(text)};
+      })()`
+    )
+    .catch(() => {
+      // 页面还没加载完时执行会失败，忽略即可：did-finish-load 会用 lastSplashPhase 补上。
+    });
+}
+
+/** 右下角的版本号。与状态文案分开写，避免互相覆盖。 */
+function setSplashVersion(text) {
+  if (!splashWindow || splashWindow.isDestroyed()) return;
+
+  splashWindow.webContents
+    .executeJavaScript(
+      `(() => {
+        const version = document.getElementById('version');
+        if (version) version.textContent = ${JSON.stringify(text)};
+      })()`
+    )
+    .catch(() => { });
+}
+
+/** 关闭启动画面：先淡出再销毁，避免生硬地"啪"一下消失。 */
+function closeSplash() {
+  if (splashShowTimer) {
+    clearTimeout(splashShowTimer);
+    splashShowTimer = null;
+  }
+  if (!splashWindow || splashWindow.isDestroyed()) {
+    splashClosed = true;
+    return;
+  }
+
+  const window = splashWindow;
+  splashWindow = null;
+  splashClosed = true;
+
+  window.webContents
+    .executeJavaScript(`document.documentElement.classList.add('leaving')`)
+    .catch(() => { })
+    .finally(() => {
+      setTimeout(() => {
+        if (!window.isDestroyed()) window.destroy();
+      }, 200);
+    });
 }
 
 function installMenu() {
@@ -484,10 +653,18 @@ async function bootstrap() {
   }
 
   try {
+    // 启动画面先建：它是文件页，不依赖后端，~100ms 就能画出来。
+    // 顺序很重要——先给用户反馈，再去等后端，而不是反过来。
+    createSplash();
+    setSplashPhase('正在准备运行环境…');
+
     // 先看有没有已经在跑的后台服务；有就接管，没有才自己拉起。
-    if (!(await attachExistingBackend())) {
+    if (await attachExistingBackend()) {
+      setSplashPhase('已连接到正在运行的知识库服务…');
+    } else {
       const exePath = resolveApiExecutable();
       if (!exePath) {
+        closeSplash();
         dialog.showErrorBox('缺少后端服务',
           '未找到 MyFirstMafAgent.Api.exe。请先执行 scripts\\Publish-Portable.ps1，或设置 MAF_API_EXE 指向已发布的可执行文件。');
         app.exit(1);
@@ -496,14 +673,17 @@ async function bootstrap() {
 
       apiToken = crypto.randomBytes(32).toString('hex');
       apiOwned = true;
+      setSplashPhase('正在启动知识库服务…');
       apiProcess = startApi(exePath, readyFile);
       apiBaseUrl = await waitForReadyFile(readyFile);
+      setSplashPhase('正在校验服务状态…');
     }
 
     await waitForHealth(apiBaseUrl);
+    setSplashPhase('正在载入界面…');
     installTokenHeader(apiBaseUrl);
     createWindow(apiBaseUrl);
-    log(`API ready at ${apiBaseUrl} (${apiOwned ? 'spawned' : 'attached'})`);
+    log(`API ready at ${apiBaseUrl} (${apiOwned ? 'spawned' : 'attached'}) after ${Date.now() - startupBeganAt}ms`);
 
     // 自动更新：窗口就绪后再启用，避免和首屏抢资源。
     updater = createUpdater({
@@ -515,6 +695,7 @@ async function bootstrap() {
     updater.startPeriodicChecks();
   } catch (error) {
     log(`startup failed: ${error.message}`);
+    closeSplash();
     dialog.showErrorBox('启动失败', error.message);
     isQuitting = true;
     if (apiOwned) await stopApi();

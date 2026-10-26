@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Microsoft.AspNetCore.Diagnostics;
 using MyFirstMafAgent.Api.Endpoints;
+using MyFirstMafAgent.Api.Options;
 using Scalar.AspNetCore;
 
 namespace MyFirstMafAgent.Api.Hosting;
@@ -15,8 +16,13 @@ public static class HostPipeline
     public static bool Configure(
         WebApplication app,
         DesktopSecurityOptions desktopSecurity,
-        McpServerRegistration mcp)
+        McpServerRegistration mcp,
+        ServerSecurityOptions serverSecurity)
     {
+        // 转发头必须在最前面：后面所有读 RemoteIpAddress 的逻辑（审计、限流、回环判定）都靠它。
+        app.UseTrustedForwardedHeaders(serverSecurity);
+        app.UseSecurityHeaders(serverSecurity);
+
         var requestLogger = app.Services.GetRequiredService<ILoggerFactory>()
             .CreateLogger("MyFirstMafAgent.Api.Requests");
         app.Use(async (context, next) =>

@@ -8,8 +8,10 @@ public sealed class KnowledgeChatStore(SqlSugarScope database)
     private const string UserRole = "user";
     private const string AssistantRole = "assistant";
 
-    public Task InitializeAsync(CancellationToken cancellationToken)
+    public Task InitializeAsync(CancellationToken cancellationToken, bool ensureSchema = true)
     {
+        if (!ensureSchema) return Task.CompletedTask;
+
         database.CodeFirst.InitTables<KnowledgeChatSessionSchemaEntity>();
         database.CodeFirst.InitTables<KnowledgeChatMessageSchemaEntity>();
         EnsureMessageColumns();

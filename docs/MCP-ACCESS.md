@@ -1,8 +1,9 @@
-# 把本机知识库接给外部智能体（MCP 接入指南）
+# 把知识库接给外部智能体（MCP 接入指南）
 
 > 📘 **对外整合版**：`docs/MCP-INTEGRATION-MANUAL.md` §2（含 Cursor / Claude Desktop 配置与排查顺序）。
+> ☁️ **云端部署**：`docs/CLOUD-DEPLOYMENT.md`（把知识库放云服务器、对外暴露前的安全清单、Docker/systemd/Windows 三种形态）。
 
-本文只讲一件事：**怎么让 Cursor、Claude Desktop 或自研 Agent 通过 MCP 使用本机的知识库**，以及它们被允许做什么。
+本文只讲一件事：**怎么让 Cursor、Claude Desktop 或自研 Agent 通过 MCP 使用知识库**，以及它们被允许做什么。
 
 ---
 
@@ -10,11 +11,13 @@
 
 | 面 | 谁在用 | 凭据 | 说明 |
 | --- | --- | --- | --- |
-| `/api` | 桌面窗口里的前端 | 桌面一次性令牌 `X-Api-Token` | 每次启动重新生成，不落盘、不下发给渲染进程 |
+| `/api` | 界面（浏览器 / 桌面窗口） | `X-Api-Token` | 桌面：一次性令牌，每次启动重生成、不落盘、不下发给渲染进程<br>服务端：长期令牌 `Server:ApiToken` / 环境变量 `MAF_SERVER_TOKEN`，或反向代理认证后注入 |
 | `/mcp` | 外部智能体 | 客户端密钥 `Authorization: Bearer ...` 或 `X-Api-Key: ...` | 长期有效，可轮换/停用/删除 |
 | 静态资源 | 浏览器 | 无 | 首页与 `assets/*` 不需要凭据 |
 
 **为什么不是同一个令牌**：桌面令牌按设计不落盘，外部 Agent 拿不到；而如果为了对外把令牌固定下来，等于让本机上任何进程都能读走整个知识库。两件事必须分开。
+
+> ⚠️ **云端部署必读**：`/api` 默认只靠 Electron 宿主注入令牌。直接把容器端口映射到公网，`/api` 是**不鉴权**的——扫到端口就能读写全部资料、问答记录，甚至读改 LLM 密钥。处理方式见 `docs/CLOUD-DEPLOYMENT.md` §3.1。
 
 ---
 
@@ -127,10 +130,15 @@ curl.exe -s http://127.0.0.1:5056/api/agent-clients/catalog
 | --- | --- | --- |
 | 没带密钥 / 密钥错 | 401 | `{"jsonrpc":"2.0","id":null,"error":{"code":-32001,...}}` + `WWW-Authenticate` |
 | 客户端被停用 | 403 | `-32003 客户端已停用` |
+| 来源 IP 鉴权失败过多 | 429 | `Retry-After: <秒>` + `-32006` |
 | 超过每分钟上限 | 429 | `Retry-After: <秒>` + `-32004` |
 | 没这项能力 / 不在白名单 / 越界知识库 | 200 | `-32003` + 可读中文原因 |
 | 工具不存在 | 200 | `-32601` |
 | 请求体超过上限 | 413 | `-32600` |
+
+关于 `-32006`：密钥是 256 位随机值猜不中，这个闸门防的是**无上限的失败重试**打满日志/磁盘。
+按**来源 IP** 计数（不是客户端 ID——失败请求根本没有客户端 ID），默认 30 次/分钟触发，封 300 秒，
+成功一次即清零。阈值由 `Server:FailedAuthLimitPerMinute` / `FailedAuthBlockSeconds` 控制，`0` 表示不限。
 
 工具级拒绝故意用 HTTP 200 + JSON-RPC 错误：模型能读到原因并改道（比如改用 `list_documents`），而不是拿到一个无法理解的传输错误。
 
@@ -173,6 +181,24 @@ curl.exe -s http://127.0.0.1:5056/api/agent-clients/catalog
 - `RequireClientKey=false` 只留给本机调试：关掉之后 `/mcp` 不鉴权、不限流、不审计，启动日志会打警告。
 - `MaxRequestBodyBytes` 必须够大以容纳 `upload_document` 的正文，网关需要读参数才能判定权限。
 
+服务端部署（云主机 / 容器 / 内网）另需：
+
+```json
+"Server": {
+  "ApiToken": "",                    // 留空则不启用；生产用环境变量 MAF_SERVER_TOKEN
+  "AllowAnonymousHealth": false,      // 云端设 true，让 LB/HEALTHCHECK 探活
+  "TrustForwardedHeaders": false,     // 放在反向代理后面时必开
+  "KnownProxies": [],                 // 代理不同机时填它的 IP
+  "FailedAuthLimitPerMinute": 30,
+  "FailedAuthBlockSeconds": 300,
+  "HideServerHeader": true
+}
+```
+
+> `TrustForwardedHeaders` 不开是一个**真实漏洞**：`RemoteIpAddress` 恒为代理地址，于是审计来源 IP 全变
+> `127.0.0.1`（无法溯源），且 `/api/desktop/shutdown` 的回环校验会把经代理进来的请求当成本机请求——
+> 公网任何人都能关掉服务。详见 `docs/CLOUD-DEPLOYMENT.md` §3.2。
+
 ---
 
 ## 8. 验证与排错
@@ -188,11 +214,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Test-McpE2E.ps1
 2. 不带密钥打 `/mcp` 是否 401（应该是）；如果 200，说明 `RequireClientKey` 被关掉了。
 3. 带密钥失败 → 看 `GET /api/agent-clients/calls?limit=20` 的 `outcome` 与 `error`，拒绝原因写在里面。
 4. 客户端显示"连上了但没有工具" → 检查能力是否为空（能力为空 = 什么都调不了）。
+5. 云上出现 `429 -32006` → 触发失败闸门；等 `Retry-After` 秒，或确认密钥是否正确。
+6. 审计里来源 IP 全是 `127.0.0.1` → 没开 `Server:TrustForwardedHeaders`。
 
 ---
 
 ## 9. 边界
 
-- 客户端密钥是**长期凭据**，不是 OAuth：不要在公共机器上长期保存，怀疑泄露就轮换。
+- 客户端密钥是**长期凭据**，不是 OAuth：不要在公共机器上长期保存，怀疑泄露就轮换。当前**没有有效期字段**，建议每季度主动轮换一次。
 - 子进程/工具仍以当前用户身份运行，访问 `/mcp` 的 Agent 能读到的内容 = 该客户端被授予的范围，不是操作系统级隔离。
 - 审计不含请求正文，因此"谁搜了什么词"不会入库；如果需要，请在网关层另行加字段前先评估隐私影响。
+- 应用本身不终止 TLS。密钥是 Bearer 型凭据，**明文 HTTP 上等于公开**——云端必须由反向代理提供 HTTPS。
+
+## 相关文档
+
+- [`CLOUD-DEPLOYMENT.md`](CLOUD-DEPLOYMENT.md) —— 云服务器部署与 MCP 接入（安全清单、三种部署形态、密钥生命周期）
+- [`MCP-INTEGRATION-MANUAL.md`](MCP-INTEGRATION-MANUAL.md) —— MCP 两个方向的完整说明书
+- [`MCP-INTEGRATION.md`](MCP-INTEGRATION.md) —— 速查版
+- [`../ARCHITECTURE.md`](../ARCHITECTURE.md) §9.10 —— 授权模型的设计取舍

@@ -1,4 +1,4 @@
-# MyFirstMafAgent 桌面壳（Electron sidecar）
+﻿# MyFirstMafAgent 桌面壳（Electron sidecar）
 
 原生 Electron 主进程 + .NET API sidecar。**不**使用 Electron.NET：`ElectronNET.Core` 目前只有 0.6.0 预览重写版，`ElectronNET.API` 仍停留在 Electron 23，均无法作为 .NET 10 + 现代 Electron 的稳定基线（详见 `docs/PHASE0-BASELINE.md`）。sidecar 方案保持 REST/MCP 契约不变。
 
@@ -41,9 +41,18 @@ npm start
 ## 启动 / 退出顺序
 
 ```
-启动：API（便携库由 API 自己的启动流程拉起）→ 轮询 ready 文件 → 轮询 /api/health → 创建窗口
+启动：创建启动画面（本地 HTML，~100ms）→ 接管已跑的后端 或 拉起 API
+      （便携库由 API 自己的启动流程拉起）→ 轮询 ready 文件（60ms）
+      → 轮询 /api/health（120ms）→ 创建主窗口 → 主窗口 ready-to-show
+      → 关闭启动画面
 退出：POST /api/desktop/shutdown → 等待 API 退出（最长 20s）→ 强制结束 → app.exit
 ```
+
+**启动画面**（`splash.html`）是刻意放在最前面的：冷启动要等「.NET 主机 + 便携 PostgreSQL + 建表检查 + Kestrel 监听」，秒级不可避免；这段时间里如果屏幕上什么都没有，用户会以为双击没生效而再点一次。
+
+- 延迟 `SPLASH_DELAY_MS`（180ms）才显示：接管已在跑的后端时只要几百毫秒，此时不该闪一下画面。
+- 状态文案由主进程用 `executeJavaScript` 写进 DOM，所以画面页不需要 preload、不开 `nodeIntegration`。
+- 想换成自己的 GIF 动画：把 `splash.gif` 放到 `desktop-electron\` 下即可（`electron-builder.yml` 已包含该可选文件），内置图标动画会自动让位。
 
 壳不知道数据库存在：便携 PostgreSQL 的 `initdb`、`pg_ctl start`、`CREATE EXTENSION vector` 全在 API 进程里做。`ApplicationStopping` 只停止**由本次启动**拉起的实例（`PortablePostgres:StopOnExit` 控制），不会误停用户已有的外部 PostgreSQL。
 
@@ -55,6 +64,14 @@ npm start
 - 令牌使用固定时间比较，仅覆盖 `/api` 与 `/mcp`；静态资源不需要令牌（窗口首页加载不依赖自定义头）。
 
 ## 验证
+
+启动耗时可以用脚本量（同一台机器前后对比）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Measure-Startup.ps1 -Runs 3
+```
+
+它按 `[startup] +1234ms …` 前缀打印每一段（便携库 / 建表 / 监听）；第二次之后的数字才是用户日常感受到的（第一次要付页缓存与杀软扫描）。
 
 不需要 Electron 也能验证契约的关键部分：
 

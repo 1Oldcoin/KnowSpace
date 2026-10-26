@@ -1,0 +1,51 @@
+﻿THIRD-PARTY NOTICES
+===================
+
+PostgreSQL 17.9 - PostgreSQL License (see below). Binaries come from the
+EnterpriseDB Windows x64 archive.
+
+pgvector 0.8.7 - PostgreSQL License. Compiled from source with MSVC against
+the PostgreSQL headers of this very tree.
+
+Bundled dependencies inside bin\ and lib\ (all dynamically linked):
+  OpenSSL (libcrypto-3-x64.dll, libssl-3-x64.dll)  Apache License 2.0
+  ICU     (icudt67.dll, icuin67.dll, icuuc67.dll)   Unicode License
+  zlib    (zlib1.dll)                               zlib License
+  zstd    (libzstd.dll)                             BSD 3-Clause
+  lz4     (liblz4.dll)                              BSD 2-Clause
+  libxml2 (libxml2.dll), libxslt (libxslt.dll)      MIT
+  libiconv (libiconv-2.dll)                         LGPL 2.1  <-- note
+  libintl (libintl-9.dll)                           LGPL 2.1  <-- note
+  wxWidgets is NOT included (only needed by pgAdmin/StackBuilder, stripped)
+
+libiconv / libintl are LGPL-2.1. They are shipped here as unmodified,
+dynamically linked DLLs next to the executables, which is the usual way to
+satisfy the LGPL. If you redistribute this tree inside a commercial product,
+keep them as separate DLLs (do not statically link, do not rename) and include
+this notice.
+
+--------------------------------------------------------------------------
+PostgreSQL License
+
+PostgreSQL Database Management System
+(formerly known as Postgres, then as Postgres95)
+
+Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+Portions Copyright (c) 1994, The Regents of the University of California
+
+Permission to use, copy, modify, and distribute this software and its
+documentation for any purpose, without fee, and without a written agreement
+is hereby granted, provided that the above copyright notice and this paragraph
+and the following two paragraphs appear in all copies.
+
+IN NO EVENT SHALL THE UNIVERSITY OF CALIFORNIA BE LIABLE TO ANY PARTY FOR
+DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, INCLUDING
+LOST PROFITS, ARISING OUT OF THE USE OF THIS SOFTWARE AND ITS DOCUMENTATION,
+EVEN IF THE UNIVERSITY OF CALIFORNIA HAS BEEN ADVISED OF THE POSSIBILITY OF
+SUCH DAMAGE.
+
+THE UNIVERSITY OF CALIFORNIA SPECIFICALLY DISCLAIMS ANY WARRANTIES, INCLUDING,
+BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE. THE SOFTWARE PROVIDED HEREUNDER IS ON AN "AS IS" BASIS,
+AND THE UNIVERSITY OF CALIFORNIA HAS NO OBLIGATIONS TO PROVIDE MAINTENANCE,
+SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.

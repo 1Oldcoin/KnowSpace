@@ -25,8 +25,10 @@ public sealed class SqlSugarSettingsRepository(SqlSugarScope database) : ISettin
     private const string SettingsKey = "app.settings";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
-    public Task InitializeAsync(CancellationToken cancellationToken)
+    public Task InitializeAsync(CancellationToken cancellationToken, bool ensureSchema = true)
     {
+        if (!ensureSchema) return Task.CompletedTask;
+
         database.CodeFirst.InitTables<AppSettingSchemaEntity>();
         return Task.CompletedTask;
     }

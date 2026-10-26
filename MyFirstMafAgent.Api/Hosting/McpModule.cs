@@ -22,6 +22,8 @@ public static class McpModule
         services.AddHttpContextAccessor();
         services.AddSingleton<AgentClientService>();
         services.AddSingleton<AgentRateLimiter>();
+        // 鉴权失败闸门：按来源 IP 计，防无上限的密钥重试与日志刷屏。
+        services.AddSingleton<AgentAuthThrottle>();
 
         var enabled = configuration.GetValue<bool?>($"{McpOptions.SectionName}:EnableServer") ?? true;
         var path = configuration.GetValue<string?>($"{McpOptions.SectionName}:ServerPath");

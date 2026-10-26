@@ -34,8 +34,14 @@ public sealed class SqlSugarJobQueue(
     /// <summary>一次领取尝试的候选数量：既避免全表扫描，也不至于频繁扑空。</summary>
     private const int ClaimBatchSize = 20;
 
-    public Task InitializeAsync(CancellationToken cancellationToken)
+    public Task InitializeAsync(CancellationToken cancellationToken) =>
+        InitializeAsync(cancellationToken, ensureSchema: true);
+
+    /// <summary>结构指纹一致时跳过建表检查（见 <see cref="Hosting.SchemaStamp"/>）。</summary>
+    public Task InitializeAsync(CancellationToken cancellationToken, bool ensureSchema)
     {
+        if (!ensureSchema) return Task.CompletedTask;
+
         database.CodeFirst.InitTables<JobSchemaEntity>();
         return Task.CompletedTask;
     }

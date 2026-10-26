@@ -305,7 +305,7 @@ Electron.NET 现阶段不能作为基线：`ElectronNET.Core` 最新为 `0.6.0`�
 | --- | --- | --- |
 | Electron 主进程 | `desktop-electron/main.js` | 单实例锁、随机端口、一次性令牌、子进程生命周期、外链拦截、菜单与退出 |
 | Preload | `desktop-electron/preload.js` | 白名单：`desktopHost.platform`、`desktopHost.openExternal`；**不**下发令牌 |
-| 本机鉴权 | `Hosting/DesktopSecurity.cs` | `X-Api-Token` 仅覆盖 `/api` 与 `/mcp`；固定时间比较；未配置令牌时整体禁用 |
+| 本机鉴权 | `Hosting/DesktopSecurity.cs` | `X-Api-Token` 仅覆盖 `/api`；固定时间比较；未配置令牌时整体禁用。`/mcp` 走独立的客户端密钥体系（见 §9.10.3） |
 | 启动契约 | `Hosting/DesktopHostArguments.cs` | `--desktop-ready-file`、`--desktop-data-root`；ready 文件只含 `url`/`pid`，不含令牌 |
 | 控制面 | `Endpoints/DesktopEndpoints.cs` | `GET /api/desktop/info`、`POST /api/desktop/shutdown`（仅桌面模式注册） |
 | 渲染安全 | `ApiHost` + `DESKTOP_STRICT_CSP=1` | 严格 CSP 响应头；`contextIsolation`/`sandbox` 开启、`nodeIntegration` 关闭 |
@@ -595,6 +595,30 @@ Embedding 使用 `Microsoft.ML.OnnxRuntime` 和 `Microsoft.ML.Tokenizers` NuGet 
 2. **安装顺序固定为 `stopApi → markQuitting → quitAndInstall`**。安装器要覆盖 `resources/api`，而便携 `postgres.exe` 会锁住目录（§9.8 的卸载钩子解决的是同一个问题的另一面）。顺序在测试里被显式断言，且 `beforeInstall` 抛错时**绝不会**调到安装器。
 3. **更新源三级覆盖**：`MAF_UPDATE_URL` → 用户数据目录 `update-feed.json` → 包内 `app-update.yml`。同一份安装包因此能服务 GitHub Releases、自建静态目录和离线内网发布点。
 
+### 9.10.1 启动速度（双击到看见界面）
+
+这条链路横跨四段，**任何一段都不能靠猜**。因此统一打点：`StartupTimeline` 输出 `[startup] +1234ms …`（控制台 + 文件日志），`scripts/Measure-Startup.ps1` 按这个前缀做前后对比。
+
+冷启动的真实分布（本机实测，win-x64 自包含发布）：
+
+| 阶段 | 优化前 | 优化后（日常启动） | 手段 |
+| --- | --- | --- | --- |
+| Electron 进程起来 → 能画界面 | ~1s | 同左（Electron/Chromium 自身开销，不可压缩） | — |
+| .NET 主机构建 + 便携 PostgreSQL 拉起 | 0.6–2.3s | 0.5–0.7s | `pg_ctl` 就绪探测从固定 500ms 改为 40ms 起步退避；`CREATE EXTENSION vector` 前先用 `pg_extension` 探询（幂等 DDL 每次要约 300ms） |
+| **数据库建表检查（CodeFirst + `IsAnyColumn`）** | **3.1–4.5s** | **0.7–0.8s** | **结构指纹快路径**（见下） |
+| 插件初始化 | 0.2s–30s（每个插件握手） | 移出关键路径 | 改到 `ApplicationStarted` 之后后台执行 |
+| 轮询粒度（ready 文件 / health） | 0–500ms | 0–180ms | 200ms→60ms、300ms→120ms |
+
+**结构指纹（`Hosting/SchemaStamp.cs`）是这次的主要收益**。每个 store 的 `InitializeAsync` 都是一轮「查 catalog → 缺什么建什么」：知识库 11 张表 + 分身 20 张表合计约 2.8 秒，占后端启动的四分之三，而结果在两次启动之间完全一样。做法：
+
+1. 启动时算一个指纹 = 所有 `*SchemaEntity` 的 `SugarTable`/`SugarColumn` 元数据 + 程序集 MVID；
+2. 与上次初始化成功后写进 `maf_schema_stamp` 的值比对；
+3. 一致 → 所有 `InitializeAsync(ct, ensureSchema: false)`，只跑数据步骤（默认知识库、笔记回填、设置加载、向量规格与默认索引）；不一致（升级/降级/手工改库）→ 完整初始化，成功后写指纹。
+
+**为什么把 MVID 也算进去**：只要有代码重新编译就重跑一次完整初始化。代价是每次升级后第一次启动慢一点（实测约 6s），换来的是「有人绕过实体直接手写 ALTER」这类情况不会被漏掉。应急开关 `MAF_FORCE_SCHEMA_INIT=1` 强制完整初始化。
+
+**启动画面**不是装饰，是让「点击已被接收」这件事在 150ms 内可见：`desktop-electron/splash.html` 是纯本地页面（不联网、不加载字体、不需要 preload），状态文案由主进程 `executeJavaScript` 写入。它在拉起后端**之前**创建，延迟 180ms 才显示（接管已在跑的后端时不该闪一下），主窗口 `ready-to-show` 时淡出销毁。要换成自己的 GIF 动画，把 `splash.gif` 放进 `desktop-electron\` 即可。
+
 ### 9.11 问答引用元数据（阶段 12）
 
 引用要能**回答"这句话是从哪一段来的"**，而不只是"用了哪个文件"。整条链路有四个点必须对齐，缺一个引用就退化成装饰：
@@ -769,7 +793,26 @@ Embedding 使用 `Microsoft.ML.OnnxRuntime` 和 `Microsoft.ML.Tokenizers` NuGet 
 
 **仍未实现**：OAuth 授权码流（当前是长期密钥）、按客户端的内容级 ACL（只有知识库级）、MCP 删除工具、调用配额与计费。
 
-**明确没做的一件事**：`tools/list` 不按客户端能力裁剪，受限客户端会「看得见但调不通」。裁剪必须在响应体重写上做（MCP SDK 的 `ToolCollection` 是单例，不支持按请求过滤），而这会动到 MCP 传输层，风险高于收益。因此权限判定的唯一入口仍然是 `tools/call` 的闸门，接第三方 Agent 时 `-32003` 应当作「换个工具再做」的正常分支处理。
+**明确没做的一件事**：`tools/list` 不按客户端能力裁剪，受限客户端会「看得见但调不通」。裁剪必须在响应体重写上做（MCP SDK 的 `ToolCollection` 是单例，不支持按请求过滤），而这会动到 MCP 传输层，风险高于收益。因此权限判定的唯一入口仍然是 `tools/call` 的闸门，接第三方 Agent 时 `-32003` 应当作「换个工具再做事」的正常分支处理。
+
+### 云部署加固（`Server` 配置节）
+
+上面两张信任路径都默认「跑在本机」。把同一份产物丢到云主机后有三个必须补的口子，全部由 `Options/ServerSecurityOptions.cs` + `Hosting/ServerSecurity.cs` 承载：
+
+| 口子 | 不修会怎样 | 修法 |
+| --- | --- | --- |
+| `/api` 在服务端模式下**完全不鉴权** | 桌面令牌只由 Electron 宿主注入；云端没人发它 → 扫到端口即可读写全部资料、问答历史，甚至读改 LLM 密钥 | `Server:ApiToken` / `MAF_SERVER_TOKEN`（长期令牌），或反向代理认证后注入 `X-Api-Token` |
+| 鉴权失败**无上限** | 客户端密钥是 256 位随机值猜不中，但失败请求能打满日志/磁盘并形成无上限重试流量 | `Application/Agents/AgentAuthThrottle.cs`：按来源 IP 计失败，超限封禁（默认 30 次/分 → 封 300 秒），成功即清零 |
+| **反向代理下回环判定被欺骗** | `RemoteIpAddress` 恒为代理地址 → ① 审计来源 IP 全变 `127.0.0.1`，无法溯源；② `/api/desktop/shutdown` 的回环校验放行，**公网任何人都能关掉服务** | `Server:TrustForwardedHeaders` + `KnownProxies`，`UseForwardedHeaders` 放在管线最前 |
+
+配套的两个细节：
+
+- `Server:AllowAnonymousHealth`（默认关）——云端需要让 LB / `HEALTHCHECK` 探活时不带令牌，但只放行 `/api/health` 一个精确路径，`/api/healthz`、`/api/settings` 仍然要令牌。
+- `Server:HideServerHeader`（默认开）——移除 `Server: Kestrel`，配合全局 `X-Content-Type-Options`、`X-Frame-Options: DENY`、`Referrer-Policy` 三个响应头，减少扫描器能拿到的指纹。
+
+令牌解析优先级：`Desktop:ApiToken` > `DESKTOP_API_TOKEN` > `MAF_SERVER_TOKEN` > `Server:ApiToken`。桌面 host 生成的一次性令牌永远压过配置文件里的静态值——否则「每次启动轮换」这个性质会被一份写在磁盘上的 token 悄悄抹掉。
+
+完整的部署步骤、三种形态（Docker / systemd / Windows 服务）、客户端接入（Cursor / Claude Desktop / 自研 Agent）与密钥生命周期见 [`docs/CLOUD-DEPLOYMENT.md`](docs/CLOUD-DEPLOYMENT.md)。
 
 ### 聊天历史回读（`chat:read`）
 
@@ -843,7 +886,7 @@ Embedding 使用 `Microsoft.ML.OnnxRuntime` 和 `Microsoft.ML.Tokenizers` NuGet 
 - 联网能力默认对用户关闭：`web_search` 与 `fetch_url` 同属 `web` 分类，关闭“允许联网搜索”后两者一并剔除，模型无法绕过开关访问网络。
 - `fetch_url` 只接受 http/https 绝对地址，抓取前经 `SafeUrlGuard` 拒绝环回、私网、链路本地、云元数据等内部地址（并在 DNS 解析后二次校验），响应体最多读取 2 MB。
 - 联网与抓取结果在提示词中被明确标注为引用数据而非指令，页面内的“忽略以上指令”之类文本按普通内容对待。
-- MCP 服务端当前没有鉴权，默认仅监听本机；如需对外暴露必须在前置代理上加认证。
+- MCP 服务端**有完整鉴权**（`Hosting/AgentClientGate.cs`）：客户端密钥 + 能力 + 工具白名单 + 知识库范围 + 限流 + 审计，清单外工具默认拒绝。详见 §9.10.3。
 
 ## 11. 分身模块（Avatar）
 

@@ -1,6 +1,9 @@
 # 跨平台部署（Windows / Linux / macOS / Docker）
 
 > 这份文档是**部署口径的唯一来源**。改打包方式、加平台、动原生工具目录，先读这里。
+>
+> ☁️ **对外暴露到公网（云主机 / 容器）时，先读 [`CLOUD-DEPLOYMENT.md`](CLOUD-DEPLOYMENT.md)** ——
+> 那里有 `/api` 令牌、可信代理头、失败闸门三项必做配置；本文只讲“怎么产出产物”。
 
 ## 1. 三种交付形态
 
@@ -122,6 +125,19 @@ docker compose up -d --build
 | `HEALTHCHECK` 打 `/api/health` | 它会真的查一次数据库，比只看端口有意义 |
 
 镜像里**没有**的东西（按需自行挂载或加卷）：Whisper 模型、插件 ZIP、用户数据。
+
+### 6.1 对外暴露前必须配的三项
+
+`docker-compose.yml` 默认把端口绑在 `127.0.0.1`，因为容器里的 `/api` **默认不鉴权**（它原本只服务于 Electron 窗口）。
+要让局域网/公网访问，三件事缺一不可：
+
+| 项 | 不配的后果 |
+| --- | --- |
+| `MAF_SERVER_TOKEN`（或反代注入 `X-Api-Token`） | 扫到端口即可读写全部资料、问答记录，甚至读改 LLM 密钥 |
+| `Server__TrustForwardedHeaders=true` | 审计来源 IP 全变 `127.0.0.1`（无法溯源）；且 `/api/desktop/shutdown` 的回环校验被代理骗过，**公网可关机** |
+| 反向代理上 TLS | MCP 客户端密钥是 Bearer 型凭据，明文 HTTP 上等于公开 |
+
+完整步骤（含 nginx / Caddy 配置示例、Docker / systemd / Windows 三种形态）见 [`CLOUD-DEPLOYMENT.md`](CLOUD-DEPLOYMENT.md)。
 
 ## 7. 桌面版自动更新（P0-3）
 

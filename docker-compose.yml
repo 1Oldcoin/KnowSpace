@@ -8,7 +8,9 @@
 #   api — ASP.NET Core 后端 + 前端静态文件（wwwroot），不含 Electron
 #
 # 注意：
-#   - 密码只是本地开发的默认值，对外暴露前务必改掉。
+#   - 默认只绑 127.0.0.1。对外请用反向代理上 TLS 与认证，并配好 MAF_SERVER_TOKEN，
+#     否则 /api 是不鉴权的（它原本只服务于 Electron 窗口）。详见 docs/CLOUD-DEPLOYMENT.md。
+#   - 密码只是本地开发的默认值，对外暴露前务必用 .env 覆盖 PG_PASSWORD。
 #   - Whisper 模型（141 MB ~ 3 GB）不随镜像分发：首次使用会按需下载到
 #     maf-data 卷里；离线环境把 Media__AutoDownloadWhisperModel 设为 false，
 #     再从「设置 → 语音转写」导入本地 ggml 文件。
@@ -21,7 +23,8 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      # 云端务必改掉：用 .env 里的 PG_PASSWORD 覆盖。
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-postgres}
       POSTGRES_DB: myfirstmafagent
     volumes:
       - maf-pgdata:/var/lib/postgresql/data
@@ -43,12 +46,23 @@ services:
       db:
         condition: service_healthy
     ports:
-      - "5056:5056"
+      # 默认只绑回环：对外请用 nginx/Caddy 做 TLS + 认证后再反代，
+      # 不要直接把 5056 映射到 0.0.0.0——容器里的 /api 默认不鉴权。
+      - "127.0.0.1:5056:5056"
     environment:
       # 关键：填了连接串就不会启动便携 PostgreSQL。
-      ConnectionStrings__KnowledgeBase: "Host=db;Port=5432;Database=myfirstmafagent;Username=postgres;Password=postgres"
+      ConnectionStrings__KnowledgeBase: "Host=db;Port=5432;Database=myfirstmafagent;Username=postgres;Password=${PG_PASSWORD:-postgres}"
       PortablePostgres__Enabled: "false"
       Desktop__OpenBrowser: "false"
+      # --- 安全（对外暴露前必读 docs/CLOUD-DEPLOYMENT.md）---
+      # 服务端长期 API 令牌：保护 /api（否则扫到端口就能读写全部资料）。
+      # 生成：openssl rand -hex 32
+      MAF_SERVER_TOKEN: "${MAF_SERVER_TOKEN:-}"
+      # 放行未鉴权的 /api/health，给 LB / HEALTHCHECK / 监控探活用。
+      Server__AllowAnonymousHealth: "true"
+      # 放在反向代理后面时必开，否则审计来源 IP 全变 127.0.0.1，
+      # 且 /api/desktop/shutdown 的回环校验会被代理骗过。
+      Server__TrustForwardedHeaders: "${TRUST_FORWARDED_HEADERS:-true}"
       # 聊天模型（OpenAI 兼容）。也可以在「设置」页里改。
       Llm__UseCloudApi: "true"
       Llm__Online__Endpoint: "${LLM_ENDPOINT:-https://api.deepseek.com/v1}"

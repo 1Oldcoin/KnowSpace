@@ -10,7 +10,10 @@ const props = defineProps<{
   apiOnline: boolean
   sessions: KnowledgeChatSession[]
   activeSessionId: string
+  /** 侧栏「问答历史」列表的一次性加载，只影响侧栏。 */
   sessionsLoading: boolean
+  /** 打开某段历史对话时的消息加载，只影响聊天区，侧栏保持可点。 */
+  historyLoading: boolean
   /** 单轮工具开关，由 App 统一持久化。 */
   toolOptions: Required<ChatToolOptions>
   /** 全局总闸（Agent:EnableToolCalling）关闭时，工具开关不可用。 */
@@ -46,9 +49,16 @@ function usePrompt(prompt: string) {
   draft.value = prompt
 }
 
-watch(() => [props.messages.length, props.activeSessionId], async () => {
+// 切换会话时用瞬时定位：平滑滚动会把「旧内容 → 新内容」演成一段长距离滑动，
+// 视觉上同样像闪烁。只有追加新消息时才平滑滚到底部。
+watch(() => props.activeSessionId, async () => {
   await nextTick()
-  scrollAnchor.value?.scrollIntoView({ behavior: 'smooth' })
+  scrollAnchor.value?.scrollIntoView({ block: 'end' })
+})
+
+watch(() => props.messages.length, async () => {
+  await nextTick()
+  scrollAnchor.value?.scrollIntoView({ behavior: 'smooth', block: 'end' })
 })
 
 watch(() => props.sessions.map(session => session.id), sessionIds => {
@@ -223,7 +233,12 @@ function canSaveAsNote(message: AssistantMessage) {
       </aside>
       <div class="assistant-chat-column">
         <div class="chat-stage">
-          <div v-if="messages.length === 0" class="chat-welcome">
+          <!-- 首次打开一段还没到手的对话：给骨架屏，而不是先闪一下欢迎页。 -->
+          <div v-if="historyLoading && messages.length === 0" class="chat-history-skeleton" aria-live="polite">
+            <div class="history-skeleton-line"><span></span><span></span><span></span></div>
+            <p>正在加载这段对话…</p>
+          </div>
+          <div v-else-if="messages.length === 0" class="chat-welcome">
             <div class="chat-orb"><Sparkles :size="24" /></div><div class="chat-welcome-kicker">LEARN SOMETHING NEW</div><h2>今天想弄懂什么？</h2><p>我可以陪你梳理概念、总结思路，或把一个问题拆开来看。</p>
             <div class="prompt-grid"><button @click="usePrompt('帮我用简单的例子解释一个复杂概念')"><span class="prompt-icon prompt-lilac"><Sparkles :size="16" /></span><span><strong>拆解复杂概念</strong><small>用例子讲清一个难点</small></span><CornerDownLeft :size="14" /></button><button @click="usePrompt('帮我设计一个本周的学习计划')"><span class="prompt-icon prompt-mint"><Check :size="16" /></span><span><strong>制定学习计划</strong><small>让目标变成可执行步骤</small></span><CornerDownLeft :size="14" /></button><button @click="usePrompt('帮我总结这段时间学习的重点')"><span class="prompt-icon prompt-peach"><FileText :size="16" /></span><span><strong>回顾学习重点</strong><small>把零散收获串联起来</small></span><CornerDownLeft :size="14" /></button></div>
           </div>
@@ -232,6 +247,12 @@ function canSaveAsNote(message: AssistantMessage) {
             <div v-if="busy" class="chat-message message-assistant"><div class="message-avatar"><Sparkles :size="16" /></div><div class="typing-indicator"><i></i><i></i><i></i></div></div>
             <div ref="scrollAnchor"></div>
           </div>
+          <!-- 已有内容时切换会话：保留旧消息并盖一层薄遮罩，避免整块内容被清空再填回来。 -->
+          <Transition name="history-scrim">
+            <div v-if="historyLoading && messages.length > 0" class="chat-history-scrim" aria-live="polite">
+              <span class="history-spinner"></span>正在加载这段对话…
+            </div>
+          </Transition>
         </div>
         <div class="chat-composer-wrap"><div class="chat-composer"><div class="composer-tools"><button type="button" class="composer-tool" :class="{ on: toolOptions.enableToolCalling && toolsAvailable, muted: !toolsAvailable }" :disabled="!canUseTools" :title="toolsAvailable ? '允许模型调用工具；关闭后只使用知识库资料回答' : '服务端已关闭工具调用'" @click="toggleMaster"><Wrench :size="12" /> 工具</button><button type="button" class="composer-tool" :class="{ on: toolOptions.enableToolCalling && toolOptions.enableWebSearch, muted: !toolOptions.enableToolCalling || !toolsAvailable }" :disabled="!canUseTools || !toolOptions.enableToolCalling" title="允许模型联网搜索知识库以外的实时信息" @click="toggleWebSearch"><Globe :size="12" /> 联网搜索</button><button type="button" class="composer-tool" :class="{ on: toolOptions.enableToolCalling && toolOptions.enableFileAccess, muted: !toolOptions.enableToolCalling || !toolsAvailable }" :disabled="!canUseTools || !toolOptions.enableToolCalling" title="允许模型查看授权目录、工作目录与资料原文" @click="toggleFileAccess"><FolderOpen :size="12" /> 本地文件</button><span class="composer-tool-hint">{{ toolHint }}</span></div><textarea v-model="draft" rows="1" placeholder="输入你的问题，按 Enter 发送" @keydown.enter.exact.prevent="submit"></textarea><div class="composer-bottom"><span class="composer-hint"><span><BookOpen :size="13" /> {{ toolOptions.enableToolCalling ? '工具增强问答' : '知识库问答' }}</span><span><ArrowDown :size="13" /> Enter 发送</span></span><button class="send-button" :disabled="!draft.trim() || busy || sessionsLoading" aria-label="发送" @click="submit"><Send :size="17" /></button></div></div><p class="assistant-disclaimer">回答优先基于已处理资料；开启工具后模型可检索知识库以外的信息，AI 生成内容可能不准确，请核对引用来源。</p></div>
       </div>
@@ -267,7 +288,22 @@ function canSaveAsNote(message: AssistantMessage) {
 .assistant-session-menu .session-menu-danger:hover { background: #f9eded; }
 .assistant-session-empty { padding: 8px 3px; color: #9aa59e; font-size: 9px; line-height: 1.6; }
 .assistant-chat-column { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
-.assistant-chat-column .chat-stage { min-height: 0; flex: 1; }
+.assistant-chat-column .chat-stage { position: relative; min-height: 0; flex: 1; }
+/* 切换历史对话的加载态：不清空消息，只用遮罩/骨架，避免整屏闪一下。 */
+.chat-history-scrim { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 7px; border-radius: 10px; color: #6f8378; background: #fbfdfbd9; font-size: 9px; pointer-events: none; }
+.history-spinner { width: 11px; height: 11px; border: 1.5px solid #cfe0d3; border-top-color: #4b8a67; border-radius: 50%; animation: history-spin .7s linear infinite; }
+@keyframes history-spin { to { transform: rotate(360deg); } }
+.history-scrim-enter-active, .history-scrim-leave-active { transition: opacity .16s; }
+.history-scrim-enter-from, .history-scrim-leave-to { opacity: 0; }
+.chat-history-skeleton { width: min(100%, 520px); display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 20px 0; }
+.history-skeleton-line { width: 100%; display: flex; flex-direction: column; gap: 10px; }
+.history-skeleton-line span { height: 11px; border-radius: 6px; background: linear-gradient(90deg, #f1f5f1 25%, #e8efe9 37%, #f1f5f1 63%); background-size: 400% 100%; animation: history-shimmer 1.4s ease-in-out infinite; }
+.history-skeleton-line span:nth-child(1) { width: 62%; }
+.history-skeleton-line span:nth-child(2) { width: 92%; }
+.history-skeleton-line span:nth-child(3) { width: 78%; }
+@keyframes history-shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
+.chat-history-skeleton p { margin: 4px 0 0; color: #a3ada6; font-size: 9px; }
+@media (prefers-reduced-motion: reduce) { .history-spinner, .history-skeleton-line span { animation: none; } }
 .assistant-chat-column .chat-messages { width: 100%; max-height: 55vh; }
 .composer-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; margin-bottom: 7px; }
 .composer-tool { display: inline-flex; align-items: center; gap: 4px; padding: 3px 7px; border: 1px solid #e3eae4; border-radius: 999px; color: #85938b; background: #fbfcfb; font-size: 9px; line-height: 1.4; cursor: pointer; transition: color .15s, border-color .15s, background .15s; }

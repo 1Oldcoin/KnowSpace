@@ -22,13 +22,26 @@ public sealed class KnowledgeBaseStore(SqlSugarScope database) : IDocumentIndexS
     private const string UploadingStatus = "Uploading";
     private const string CompletedStatus = "Completed";
 
-    public async Task InitializeAsync(CancellationToken cancellationToken)
+    /// <param name="ensureSchema">
+    /// false = 结构已由 <see cref="Hosting.SchemaStamp"/> 证明是最新的，跳过建表/补列/建索引。
+    /// 这一段是本项目启动耗时第一大户（实测 1.0–1.5 秒）：15 张表的 catalog 往返加上
+    /// <c>kb_chunks</c> 的兼容性检查，结果在两次启动之间完全一致。
+    /// </param>
+    public async Task InitializeAsync(CancellationToken cancellationToken, bool ensureSchema = true)
+    {
+        if (ensureSchema)
+            await EnsureSchemaAsync(cancellationToken);
+
+        // 默认知识库的"没有就插一条"是数据步骤，与建表无关：跳过了建表也必须有这个库。
+        await EnsureDefaultKnowledgeBaseAsync(cancellationToken);
+    }
+
+    private async Task EnsureSchemaAsync(CancellationToken cancellationToken)
     {
         // pgvector 扩展是数据库级对象，SqlSugar 没有对应的 DbMaintenance API，DDL 统一封装在 PgVectorSql。
         await PgVectorSql.EnsureExtensionAsync(database, cancellationToken);
 
         database.CodeFirst.InitTables<KnowledgeBaseSchemaEntity>();
-        await EnsureDefaultKnowledgeBaseAsync(cancellationToken);
 
         // 历史库需要先补齐 kb_documents 的列，再让 CodeFirst 同步表结构。
         EnsureDocumentColumns();

@@ -1,0 +1,761 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2026年4月起 · 大小周时间管理（码字增强版）</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+        }
+        body {
+            background: #f0f2f5;
+            color: #333;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1100px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.1);
+            padding: 25px;
+        }
+        h1 {
+            text-align: center;
+            color: #2c3e50;
+            font-size: 2.2rem;
+            margin-bottom: 4px;
+        }
+        .subtitle {
+            text-align: center;
+            color: #7f8c8d;
+            margin-bottom: 10px;
+            font-size: 1.05rem;
+        }
+        .week-hint {
+            text-align: center;
+            background: #eaf2f8;
+            padding: 8px 16px;
+            border-radius: 30px;
+            display: inline-block;
+            margin: 0 auto 20px;
+            font-size: 0.95rem;
+            color: #1a5276;
+            border: 1px solid #aed6f1;
+        }
+        .week-hint strong {
+            color: #c0392b;
+        }
+        .tabs {
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-bottom: 20px;
+        }
+        .tab-btn {
+            background: #ecf0f1;
+            border: none;
+            padding: 12px 28px;
+            border-radius: 30px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-size: 1rem;
+        }
+        .tab-btn:hover {
+            background: #3498db;
+            color: white;
+        }
+        .tab-btn.active {
+            background: #3498db;
+            color: white;
+        }
+        .schedule {
+            display: none;
+            animation: fade 0.4s;
+        }
+        .schedule.active {
+            display: block;
+        }
+        @keyframes fade {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        /* 子Tab (休息日中的大周/小周切换) */
+        .sub-tabs {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin: 10px 0 18px;
+        }
+        .sub-tab-btn {
+            background: #e8e8e8;
+            border: none;
+            padding: 8px 24px;
+            border-radius: 20px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-size: 0.95rem;
+        }
+        .sub-tab-btn:hover {
+            background: #2e86c1;
+            color: white;
+        }
+        .sub-tab-btn.active {
+            background: #2e86c1;
+            color: white;
+        }
+        .sub-schedule {
+            display: none;
+            animation: fade 0.3s;
+        }
+        .sub-schedule.active {
+            display: block;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 20px;
+        }
+        th {
+            background: #2c3e50;
+            color: white;
+            padding: 12px;
+            text-align: left;
+        }
+        td {
+            padding: 14px 12px;
+            border-bottom: 1px solid #ddd;
+        }
+        tr:nth-child(even) {
+            background: #f9f9f9;
+        }
+        .time-col {
+            width: 14%;
+            font-weight: bold;
+            color: #2c3e50;
+            white-space: nowrap;
+        }
+        .activity-col {
+            width: 32%;
+        }
+        .detail-col {
+            width: 54%;
+        }
+        .weekend-row {
+            background: #eaf7e9 !important;
+        }
+        .highlight-row {
+            background: #fef9e7 !important;
+            border-left: 4px solid #f1c40f;
+        }
+        .badge {
+            display: inline-block;
+            padding: 3px 12px;
+            border-radius: 20px;
+            font-size: 0.78rem;
+            font-weight: bold;
+            margin-right: 6px;
+        }
+        .badge-tech {
+            background: #d4e6f1;
+            color: #1a5276;
+        }
+        .badge-write {
+            background: #f5d0d0;
+            color: #922b21;
+        }
+        .badge-fit {
+            background: #d5f5e3;
+            color: #1e8449;
+        }
+        .badge-fun {
+            background: #fdebd0;
+            color: #a04000;
+        }
+        .badge-call {
+            background: #e8daef;
+            color: #6c3483;
+        }
+        .badge-rest {
+            background: #f0f0f0;
+            color: #616a6b;
+        }
+        .badge-arch {
+            background: #d1f2eb;
+            color: #0e6655;
+        }
+        .badge-work {
+            background: #d6eaf8;
+            color: #1b4f72;
+        }
+        .badge-code {
+            background: #fadbd8;
+            color: #922b21;
+        }
+        .note-box {
+            background: #fef9e7;
+            padding: 18px 22px;
+            border-radius: 8px;
+            border-left: 5px solid #f1c40f;
+            margin-top: 16px;
+        }
+        .note-box h3 {
+            margin-bottom: 8px;
+            color: #7d6608;
+        }
+        .note-box ul {
+            padding-left: 22px;
+            line-height: 1.8;
+        }
+        .note-box li {
+            margin-bottom: 2px;
+        }
+        .code-stats {
+            background: #ebf5fb;
+            padding: 12px 18px;
+            border-radius: 8px;
+            margin: 10px 0 16px;
+            border-left: 4px solid #2980b9;
+            font-weight: 500;
+        }
+        .code-stats span {
+            color: #c0392b;
+            font-weight: 700;
+        }
+        footer {
+            text-align: center;
+            margin-top: 30px;
+            color: #7f8c8d;
+            border-top: 1px solid #e5e5e5;
+            padding-top: 18px;
+            font-size: 0.95rem;
+            line-height: 1.8;
+        }
+        @media (max-width: 768px) {
+            th,
+            td {
+                display: block;
+                width: 100%;
+                border: none;
+            }
+            tr {
+                display: block;
+                margin-bottom: 15px;
+                border: 1px solid #ddd;
+                padding: 10px;
+                background: white;
+            }
+            .time-col {
+                font-weight: bold;
+                white-space: normal;
+            }
+            td::before {
+                content: attr(data-label);
+                font-weight: bold;
+                display: inline-block;
+                width: 100px;
+            }
+            .tabs {
+                flex-direction: column;
+                align-items: center;
+            }
+            .sub-tabs {
+                flex-direction: column;
+                align-items: center;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>⏳ 大小周 · 时间管理表</h1>
+        <div class="subtitle">2026年4月1日起 · 工作日码字 <strong>3.5h</strong>，周末集中创作 · 工作早上高效完成</div>
+
+        <!-- 大小周提示 -->
+        <div style="text-align:center; margin-bottom:12px;">
+            <span class="week-hint">📌 每月第 <strong>1、3、5</strong> 周为 <strong>小周</strong>（6天班，周六上班） · 第 <strong>2、4</strong> 周为 <strong>大周</strong>（双休） · 次月重置</span>
+        </div>
+
+        <!-- 主Tab -->
+        <div class="tabs">
+            <button class="tab-btn active" data-tab="weekday">📅 工作日（周一至周五）</button>
+            <button class="tab-btn" data-tab="sat">🔧 小周周六（上班）</button>
+            <button class="tab-btn" data-tab="rest">🌟 休息日（大周 / 小周）</button>
+        </div>
+
+        <!-- ==================== Tab 1: 工作日 ==================== -->
+        <div id="weekday" class="schedule active">
+            <div class="code-stats">
+                ✍️ 每日码字：<span>3.5 小时</span>（15:30-18:00 + 20:30-21:30）&nbsp;·&nbsp; 💼 工作集中在上午
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th class="time-col">时间段</th>
+                        <th class="activity-col">活动内容</th>
+                        <th class="detail-col">具体安排 / 目标</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td class="time-col" data-label="时间段">07:00 - 08:00</td>
+                        <td class="activity-col" data-label="活动内容">
+                            <span class="badge badge-arch">架构学习</span> 早间深度学习
+                        </td>
+                        <td class="detail-col" data-label="具体安排">系统架构、微服务、云原生（结合面试准备）</td>
+                    </tr>
+                    <tr>
+                        <td class="time-col" data-label="时间段">08:00 - 09:00</td>
+                        <td class="activity-col" data-label="活动内容">🚌 通勤 + 早餐</td>
+                        <td class="detail-col" data-label="具体安排">听技术播客 / 小说构思（耳机必备）</td>
+                    </tr>
+                    <tr>
+                        <td class="time-col" data-label="时间段">09:00 - 12:00</td>
+                        <td class="activity-col" data-label="活动内容">
+                            <span class="badge badge-work">工作</span> 上午黄金段
+                        </td>
+                        <td class="detail-col" data-label="具体安排">💪 全力投入主业，高效产出核心任务</td>
+                    </tr>
+                    <tr>
+                        <td class="time-col" data-label="时间段">12:00 - 13:30</td>
+                        <td class="activity-col" data-label="活动内容">
+                            <span class="badge badge-rest">午休</span> 午餐 + 休息
+                        </td>
+                        <td class="detail-col" data-label="具体安排">午餐30min，午休30min，剩余30min阅读/构思小说</td>
+                    </tr>
+                    <tr>
+                        <td class="time-col" data-label="时间段">13:30 - 15:30</td>
+                        <td class="activity-col" data-label="活动内容">
+                            <span class="badge badge-work">工作</span> 下午扫尾
+                        </td>
+                        <td class="detail-col" data-label="具体安排">处理剩余事务，收尾当天工作</td>
+                    </tr>
+                    <tr class="highlight-row">
+                        <td class="time-col" data-label="时间段">15:30 - 18:00</td>
+                        <td class="activity-col" data-label="活动内容">
+                            <span class="badge badge-write">✍️ 码字</span> <strong>2.5h 创作</strong>
+                        </td>
+                        <td class="detail-col" data-label="具体安排">🚀 专注小说码字，目标 <strong>3000-4000 字</strong></td>
+                    </tr>
+                    <tr>
+                        <td class="time-col" data-label="时间段">18:00 - 19:00</td>
+                        <td class="activity-col" data-label="活动内容">🚌 通勤 + 放松</td>
+                        <td class="detail-col" data-label="具体安排">听音乐 / 播客，切换心情</td>
+                    </tr>
+                    <tr>
+                        <td class="time-col" data-label="时间段">19:00 - 19:30</td>
+                        <td class="activity-col" data-label="活动内容">🍽️ 晚餐</td>
+                        <td class="detail-col" data-label="具体安排">晚餐，与家人/室友交流</td>
+                    </tr>
+                    <tr>
+                        <td class="time-col" data-label="时间段">19:30 - 20:30</td>
+                        <td class="activity-col" data-label="活动内容">
+                            <span class="badge badge-arch">架构学习</span> 晚间深度学习
+                        </td>
+                        <td class="detail-col" data-label="具体安排">分布式系统、设计模式、高并发（结合工作实践）</td>
+                    </tr>
+                    <tr class="highlight-row">
+                        <td class="time-col" data-label="时间段">20:30 - 21:30</td>
+                        <td class="activity-col" data-label="活动内容">
+                            <span class="badge badge-write">✍️ 码字</span> <strong>1h 续写</strong>
+                        </td>
+                        <td class="detail-col" data-label="具体安排">继续码字，目标 <strong>1000-1500 字</strong>，巩固剧情</td>
+                    </tr>
+                    <tr>
+                        <td class="time-col" data-label="时间段">21:30 - 22:00</td>
+                        <td class="activity-col" data-label="活动内容">
+                            <span class="badge badge-fit">健身</span> 居家锻炼
+                        </td>
+                        <td class="detail-col" data-label="具体安排">HIIT / 核心力量 / 瑜伽（30min，无器械）</td>
+                    </tr>
+                    <tr>
+                        <td class="time-col" data-label="时间段">22:00 - 23:00</td>
+                        <td class="activity-col" data-label="活动内容">
+                            <span class="badge badge-fun">娱乐</span> 自由时间
+                        </td>
+                        <td class="detail-col" data-label="具体安排">看剧 / 游戏 / 社交 / 阅读（非技术），完全放松</td>
+                    </tr>
+                    <tr>
+                        <td class="time-col" data-label="时间段">23:00 - 23:30</td>
+                        <td class="activity-col" data-label="活动内容">
+                            <span class="badge badge-call">练字</span> 静心书写
+                        </td>
+                        <td class="detail-col" data-label="具体安排">硬笔书法练习，平静心绪，准备入睡</td>
+                    </tr>
+                    <tr>
+                        <td class="time-col" data-label="时间段">23:30</td>
+                        <td class="activity-col" data-label="活动内容">😴 睡觉</td>
+                        <td class="detail-col" data-label="具体安排">保证 7.5h 睡眠，为第二天充电</td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="note-box">
+                <h3>📌 工作日要点</h3>
+                <ul>
+                    <li><strong>✍️ 码字 3.5h/天</strong>：下午 15:30-18:00（2.5h）+ 晚上 20:30-21:30（1h），日均产出 <strong>4000-5500 字</strong>。</li>
+                    <li><strong>💼 工作集中上午</strong>：09:00-12:00 高效产出，下午 13:30-15:30 扫尾，为码字腾出整块时间。</li>
+                    <li><strong>🏛️ 架构学习 2h/天</strong>：早 1h + 晚 1h，持续提升技术深度。</li>
+                    <li><strong>🏋️ 健身 30min</strong> + <strong>🖊️ 练字 30min</strong>（睡前），坚持形成习惯。</li>
+                    <li><strong>🎮 娱乐 1h</strong>（22:00-23:00）作为努力后的奖励，保持心理平衡。</li>
+                    <li>通勤 &amp; 午休碎片时间可用来构思小说情节。</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- ==================== Tab 2: 小周周六 ==================== -->
+        <div id="sat" class="schedule">
+            <div class="code-stats">
+                ✍️ 小周周六码字：<span>4 小时</span>（15:00-18:00 + 20:30-21:30）&nbsp;·&nbsp; 下午工作仅 1.5h，更多时间创作
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th class="time-col">时间段</th>
+                        <th class="activity-col">活动内容</th>
+                        <th class="detail-col">具体安排 / 目标</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td class="time-col" data-label="时间段">07:00 - 08:00</td>
+                        <td class="activity-col" data-label="活动内容">
+                            <span class="badge badge-arch">架构学习</span> 早间深度学习
+                        </td>
+                        <td class="detail-col" data-label="具体安排">系统架构、微服务、云原生（同工作日）</td>
+                    </tr>
+                    <tr>
+                        <td class="time-col" data-label="时间段">08:00 - 09:00</td>
+                        <td class="activity-col" data-label="活动内容">🚌 通勤 + 早餐</td>
+                        <td class="detail-col" data-label="具体安排">听播客 / 构思小说</td>
+                    </tr>
+                    <tr>
+                        <td class="time-col" data-label="时间段">09:00 - 12:00</td>
+                        <td class="activity-col" data-label="活动内容">
+                            <span class="badge badge-work">工作</span> 上午高效段
+                        </td>
+                        <td class="detail-col" data-label="具体安排">💪 集中处理核心工作，周六任务较轻</td>
+                    </tr>
+                    <tr>
+                        <td class="time-col" data-label="时间段">12:00 - 13:30</td>
+                        <td class="activity-col" data-label="活动内容">
+                            <span class="badge badge-rest">午休</span> 午餐 + 休息
+                        </td>
+                        <td class="detail-col" data-label="具体安排">午餐30min，午休30min，剩余30min阅读/构思</td>
+                    </tr>
+                    <tr>
+                        <td class="time-col" data-label="时间段">13:30 - 15:00</td>
+                        <td class="activity-col" data-label="活动内容">
+                            <span class="badge badge-work">工作</span> 下午收尾
+                        </td>
+                        <td class="detail-col" data-label="具体安排">1.5h 处理剩余事务，提前结束工作</td>
+                    </tr>
+                    <tr class="highlight-row">
+                        <td class="time-col" data-label="时间段">15:00 - 18:00</td>
+                        <td class="activity-col" data-label="活动内容">
+                            <span class="badge badge-write">✍️ 码字</span> <strong>3h 集中创作</strong>
+                        </td>
+                        <td class="detail-col" data-label="具体安排">🚀 大块时间码字，目标 <strong>4000-5000 字</strong></td>
+                    </tr>
+                    <tr>
+                        <td class="time-col" data-label="时间段">18:00 - 19:00</td>
+                        <td class="activity-col" data-label="活动内容">🚌 通勤 + 放松</td>
+                        <td class="detail-col" data-label="具体安排">听音乐 / 播客，切换心情</td>
+                    </tr>
+                    <tr>
+                        <td class="time-col" data-label="时间段">19:00 - 19:30</td>
+                        <td class="activity-col" data-label="活动内容">🍽️ 晚餐</td>
+                        <td class="detail-col" data-label="具体安排">晚餐，与家人/室友交流</td>
+                    </tr>
+                    <tr>
+                        <td class="time-col" data-label="时间段">19:30 - 20:30</td>
+                        <td class="activity-col" data-label="活动内容">
+                            <span class="badge badge-arch">架构学习</span> 晚间深度学习
+                        </td>
+                        <td class="detail-col" data-label="具体安排">分布式系统、设计模式、高并发</td>
+                    </tr>
+                    <tr class="highlight-row">
+                        <td class="time-col" data-label="时间段">20:30 - 21:30</td>
+                        <td class="activity-col" data-label="活动内容">
+                            <span class="badge badge-write">✍️ 码字</span> <strong>1h 续写</strong>
+                        </td>
+                        <td class="detail-col" data-label="具体安排">继续码字，目标 <strong>1000-1500 字</strong></td>
+                    </tr>
+                    <tr>
+                        <td class="time-col" data-label="时间段">21:30 - 22:00</td>
+                        <td class="activity-col" data-label="活动内容">
+                            <span class="badge badge-fit">健身</span> 居家锻炼
+                        </td>
+                        <td class="detail-col" data-label="具体安排">HIIT / 核心力量 / 瑜伽（30min）</td>
+                    </tr>
+                    <tr>
+                        <td class="time-col" data-label="时间段">22:00 - 23:00</td>
+                        <td class="activity-col" data-label="活动内容">
+                            <span class="badge badge-fun">娱乐</span> 自由时间
+                        </td>
+                        <td class="detail-col" data-label="具体安排">看剧 / 游戏 / 社交，彻底放松</td>
+                    </tr>
+                    <tr>
+                        <td class="time-col" data-label="时间段">23:00 - 23:30</td>
+                        <td class="activity-col" data-label="活动内容">
+                            <span class="badge badge-call">练字</span> 静心书写
+                        </td>
+                        <td class="detail-col" data-label="具体安排">硬笔书法练习，平静心绪</td>
+                    </tr>
+                    <tr>
+                        <td class="time-col" data-label="时间段">23:30</td>
+                        <td class="activity-col" data-label="活动内容">😴 睡觉</td>
+                        <td class="detail-col" data-label="具体安排">保证 7.5h 睡眠</td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="note-box">
+                <h3>📌 小周周六要点</h3>
+                <ul>
+                    <li><strong>✍️ 码字 4h</strong>：下午 15:00-18:00（3h）+ 晚上 20:30-21:30（1h），日均产出 <strong>5000-6500 字</strong>。</li>
+                    <li><strong>💼 工作仅 1.5h 下午</strong>（13:30-15:00），上午 3h 搞定核心任务，为码字让路。</li>
+                    <li><strong>🏛️ 架构学习 2h</strong>（早+晚），保持技术积累不断档。</li>
+                    <li>其他安排与工作日一致，但下午码字时间更长、更集中。</li>
+                    <li>周六晚上娱乐时间不变，劳逸结合。</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- ==================== Tab 3: 休息日 ==================== -->
+        <div id="rest" class="schedule">
+            <!-- 子Tab：大周 / 小周 -->
+            <div class="sub-tabs">
+                <button class="sub-tab-btn active" data-subtab="bigweek">🌞 大周（双休）</button>
+                <button class="sub-tab-btn" data-subtab="smallweek">🌙 小周（单休·周日）</button>
+            </div>
+
+            <!-- 大周（双休） -->
+            <div id="bigweek" class="sub-schedule active">
+                <div class="code-stats">
+                    ✍️ 大周周六码字 <span>7h</span> · 周日码字 <span>4h</span> · 周末总计 <span>11h</span> 集中创作
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th class="time-col">时间段</th>
+                            <th class="activity-col">活动内容</th>
+                            <th class="detail-col">具体安排 / 目标</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr class="weekend-row">
+                            <td class="time-col" data-label="时间段">08:00 - 09:00</td>
+                            <td class="activity-col" data-label="活动内容">🛌 起床 + 早餐</td>
+                            <td class="detail-col" data-label="具体安排">周末稍晚起，好好吃早餐</td>
+                        </tr>
+                        <tr class="weekend-row highlight-row">
+                            <td class="time-col" data-label="时间段">09:00 - 12:00</td>
+                            <td class="activity-col" data-label="活动内容">
+                                <span class="badge badge-write">✍️ 码字</span> <strong>3h 上午创作</strong>
+                            </td>
+                            <td class="detail-col" data-label="具体安排">🚀 集中码字，目标 <strong>4000-5000 字</strong></td>
+                        </tr>
+                        <tr class="weekend-row">
+                            <td class="time-col" data-label="时间段">12:00 - 13:30</td>
+                            <td class="activity-col" data-label="活动内容">🍽️ 午餐 + 午休</td>
+                            <td class="detail-col" data-label="具体安排">与家人/朋友聚餐，放松</td>
+                        </tr>
+                        <tr class="weekend-row highlight-row">
+                            <td class="time-col" data-label="时间段">13:30 - 17:30</td>
+                            <td class="activity-col" data-label="活动内容">
+                                <span class="badge badge-write">✍️ 码字</span> <strong>4h 下午冲刺</strong>
+                            </td>
+                            <td class="detail-col" data-label="具体安排">🔥 长时段码字，目标 <strong>5000-6000 字</strong></td>
+                        </tr>
+                        <tr class="weekend-row">
+                            <td class="time-col" data-label="时间段">17:30 - 18:30</td>
+                            <td class="activity-col" data-label="活动内容">
+                                <span class="badge badge-fit">健身</span> 户外 / 健身房
+                            </td>
+                            <td class="detail-col" data-label="具体安排">1h 高强度训练（跑步 / 游泳 / 力量）</td>
+                        </tr>
+                        <tr class="weekend-row">
+                            <td class="time-col" data-label="时间段">18:30 - 19:30</td>
+                            <td class="activity-col" data-label="活动内容">🍽️ 晚餐</td>
+                            <td class="detail-col" data-label="具体安排">晚餐，可外出用餐</td>
+                        </tr>
+                        <tr class="weekend-row">
+                            <td class="time-col" data-label="时间段">19:30 - 22:30</td>
+                            <td class="activity-col" data-label="活动内容">
+                                <span class="badge badge-fun">娱乐</span> 自由时间
+                            </td>
+                            <td class="detail-col" data-label="具体安排">3h 纯粹娱乐（电影 / 游戏 / 社交）</td>
+                        </tr>
+                        <tr class="weekend-row">
+                            <td class="time-col" data-label="时间段">22:30 - 23:30</td>
+                            <td class="activity-col" data-label="活动内容">
+                                <span class="badge badge-call">练字</span> + 整理
+                            </td>
+                            <td class="detail-col" data-label="具体安排">练字30min + 整理笔记 / 规划下周（共1h）</td>
+                        </tr>
+                        <tr class="weekend-row">
+                            <td class="time-col" data-label="时间段">23:30</td>
+                            <td class="activity-col" data-label="活动内容">😴 睡觉</td>
+                            <td class="detail-col" data-label="具体安排">保证睡眠，为下周充电</td>
+                        </tr>
+                    </tbody>
+                </table>
+                <div style="margin-top: -8px; margin-bottom: 16px; background: #f4f6f7; padding: 10px 16px; border-radius: 8px;">
+                    <span style="font-weight:600;">📌 大周周日安排：</span> 与周六基本一致，但上午 09:00-12:00 可改为 <span class="badge badge-arch">架构学习</span>（3h），下午 13:30-17:30 码字 <strong>4h</strong>，其余相同。
+                    <br><span style="color:#7f8c8d; font-size:0.9rem;">💡 周日可根据状态灵活调整，建议上午学习、下午创作，保持节奏。</span>
+                </div>
+                <div class="note-box">
+                    <h3>📌 大周（双休）要点</h3>
+                    <ul>
+                        <li><strong>✍️ 周六码字 7h</strong>（上午3h + 下午4h），可产出 <strong>9000-11000 字</strong>，强力存稿。</li>
+                        <li><strong>✍️ 周日码字 4h</strong>（下午），可产出 <strong>5000-6000 字</strong>，保持创作惯性。</li>
+                        <li><strong>🏛️ 周日学习 3h</strong>（上午），深度研究架构，与技术提升两不误。</li>
+                        <li><strong>🏋️ 健身 1h</strong>（周六日各1h），利用大块时间强化体能。</li>
+                        <li><strong>🎮 娱乐 3h</strong>（周六日晚），彻底放松，恢复精力。</li>
+                        <li>周末总计码字 <strong>11h</strong>，是工作日存稿的黄金时段。</li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- 小周（单休·周日） -->
+            <div id="smallweek" class="sub-schedule">
+                <div class="code-stats">
+                    ✍️ 小周周日码字 <span>7h</span> · 单休日集中创作，为下周储备存稿
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th class="time-col">时间段</th>
+                            <th class="activity-col">活动内容</th>
+                            <th class="detail-col">具体安排 / 目标</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr class="weekend-row">
+                            <td class="time-col" data-label="时间段">08:00 - 09:00</td>
+                            <td class="activity-col" data-label="活动内容">🛌 起床 + 早餐</td>
+                            <td class="detail-col" data-label="具体安排">周日稍晚起，好好吃早餐</td>
+                        </tr>
+                        <tr class="weekend-row highlight-row">
+                            <td class="time-col" data-label="时间段">09:00 - 12:00</td>
+                            <td class="activity-col" data-label="活动内容">
+                                <span class="badge badge-write">✍️ 码字</span> <strong>3h 上午创作</strong>
+                            </td>
+                            <td class="detail-col" data-label="具体安排">🚀 集中码字，目标 <strong>4000-5000 字</strong></td>
+                        </tr>
+                        <tr class="weekend-row">
+                            <td class="time-col" data-label="时间段">12:00 - 13:30</td>
+                            <td class="activity-col" data-label="活动内容">🍽️ 午餐 + 午休</td>
+                            <td class="detail-col" data-label="具体安排">与家人/朋友聚餐，放松</td>
+                        </tr>
+                        <tr class="weekend-row highlight-row">
+                            <td class="time-col" data-label="时间段">13:30 - 17:30</td>
+                            <td class="activity-col" data-label="活动内容">
+                                <span class="badge badge-write">✍️ 码字</span> <strong>4h 下午冲刺</strong>
+                            </td>
+                            <td class="detail-col" data-label="具体安排">🔥 长时段码字，目标 <strong>5000-6000 字</strong></td>
+                        </tr>
+                        <tr class="weekend-row">
+                            <td class="time-col" data-label="时间段">17:30 - 18:30</td>
+                            <td class="activity-col" data-label="活动内容">
+                                <span class="badge badge-fit">健身</span> 户外 / 健身房
+                            </td>
+                            <td class="detail-col" data-label="具体安排">1h 高强度训练（跑步 / 游泳 / 力量）</td>
+                        </tr>
+                        <tr class="weekend-row">
+                            <td class="time-col" data-label="时间段">18:30 - 19:30</td>
+                            <td class="activity-col" data-label="活动内容">🍽️ 晚餐</td>
+                            <td class="detail-col" data-label="具体安排">晚餐，可外出用餐</td>
+                        </tr>
+                        <tr class="weekend-row">
+                            <td class="time-col" data-label="时间段">19:30 - 22:30</td>
+                            <td class="activity-col" data-label="活动内容">
+                                <span class="badge badge-fun">娱乐</span> 自由时间
+                            </td>
+                            <td class="detail-col" data-label="具体安排">3h 纯粹娱乐（电影 / 游戏 / 社交）</td>
+                        </tr>
+                        <tr class="weekend-row">
+                            <td class="time-col" data-label="时间段">22:30 - 23:30</td>
+                            <td class="activity-col" data-label="活动内容">
+                                <span class="badge badge-call">练字</span> + 整理
+                            </td>
+                            <td class="detail-col" data-label="具体安排">练字30min + 整理笔记 / 规划下周（共1h）</td>
+                        </tr>
+                        <tr class="weekend-row">
+                            <td class="time-col" data-label="时间段">23:30</td>
+                            <td class="activity-col" data-label="活动内容">😴 睡觉</td>
+                            <td class="detail-col" data-label="具体安排">保证睡眠，为下周充电</td>
+                        </tr>
+                    </tbody>
+                </table>
+                <div class="note-box">
+                    <h3>📌 小周（单休·周日）要点</h3>
+                    <ul>
+                        <li><strong>✍️ 周日码字 7h</strong>（上午3h + 下午4h），可产出 <strong>9000-11000 字</strong>，为下周工作日储备存稿。</li>
+                        <li><strong>🏛️ 架构学习</strong>：周日无专门学习时段，但工作日每天有 2h 学习，可保持节奏。</li>
+                        <li><strong>🏋️ 健身 1h</strong> + <strong>🎮 娱乐 3h</strong>，单休日也要充分放松。</li>
+                        <li>小周只有周日休息，更要高效利用这一天，平衡创作、健身与娱乐。</li>
+                        <li>如周日状态好，可适当延长码字时间，积攒更多存稿。</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer>
+            <p>⏰ 核心目标：工作日码字 <strong>3.5h</strong> · 小周周六 <strong>4h</strong> · 大周周末 <strong>11h</strong> · 小周周日 <strong>7h</strong></p>
+            <p>🏛️ 架构学习：工作日 <strong>2h</strong> · 大周周日 <strong>3h</strong>  ·  💪 健身：工作日 <strong>0.5h</strong> · 周末 <strong>1h</strong></p>
+            <p>🎯 坚持执行，每月码字量可突破 <strong>15万字+</strong>，技术 &amp; 创作双丰收！</p>
+            <p style="margin-top:6px; color:#95a5a6; font-size:0.85rem;">📅 2026年4月起 · 大小周循环 · 根据实际情况灵活微调</p>
+        </footer>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // ----- 主Tab切换 -----
+            const tabBtns = document.querySelectorAll('.tabs .tab-btn');
+            const schedules = document.querySelectorAll('.schedule');
+            tabBtns.forEach(btn => {
+                btn.addEventListener('click', function() {
+                    tabBtns.forEach(b => b.classList.remove('active'));
+                    this.classList.add('active');
+                    const target = this.dataset.tab;
+                    schedules.forEach(s => s.classList.remove('active'));
+                    document.getElementById(target).classList.add('active');
+                });
+            });
+
+            // ----- 子Tab切换（休息日中的大周/小周） -----
+            const subTabBtns = document.querySelectorAll('.sub-tab-btn');
+            const subSchedules = document.querySelectorAll('.sub-schedule');
+            subTabBtns.forEach(btn => {
+                btn.addEventListener('click', function() {
+                    subTabBtns.forEach(b => b.classList.remove('active'));
+                    this.classList.add('active');
+                    const target = this.dataset.subtab;
+                    subSchedules.forEach(s => s.classList.remove('active'));
+                    document.getElementById(target).classList.add('active');
+                });
+            });
+
+            // 默认：大周激活
+            document.querySelector('.sub-tab-btn[data-subtab="bigweek"]')?.classList.add('active');
+            document.getElementById('bigweek')?.classList.add('active');
+        });
+    </script>
+</body>
+</html>

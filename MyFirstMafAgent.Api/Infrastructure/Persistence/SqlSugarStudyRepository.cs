@@ -82,8 +82,10 @@ public sealed class SqlSugarStudyRepository(SqlSugarScope database) : IStudyRepo
 
     internal const string DeleteByDateSql = "DELETE FROM study_checkins WHERE checkin_date = CAST(@checkinDate AS date)";
 
-    public Task InitializeAsync(CancellationToken cancellationToken)
+    public Task InitializeAsync(CancellationToken cancellationToken, bool ensureSchema = true)
     {
+        if (!ensureSchema) return Task.CompletedTask;
+
         database.CodeFirst.InitTables<StudyCheckinSchemaEntity>();
         return Task.CompletedTask;
     }

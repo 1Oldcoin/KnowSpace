@@ -713,6 +713,13 @@ public sealed class PortablePostgresHost : IAsyncDisposable
     }
 
     /// <summary>
+    /// 就绪探测的退避：<c>pg_ctl -w</c> 已经把「服务器能接受连接」等到了，这里通常一次就通；
+    /// 用 500ms 固定间隔时，失败一次就要白等半秒，所以从 80ms 起步、逐步拉长到 250ms 封顶。
+    /// </summary>
+    private static TimeSpan NextProbeDelay(int attempts) =>
+        TimeSpan.FromMilliseconds(Math.Min(250, 40 + attempts * 40));
+
+    /// <summary>
     /// <c>pg_ctl -w</c> 已经等到“就绪”，这里再用真实连接确认一次：
     /// 只有能跑通一条 SQL，才算数据库真的可用。
     /// </summary>
@@ -754,7 +761,7 @@ public sealed class PortablePostgresHost : IAsyncDisposable
                         lastError);
                 }
 
-                await Task.Delay(500, cancellationToken);
+                await Task.Delay(NextProbeDelay(attempts), cancellationToken);
             }
         }
 
@@ -809,6 +816,16 @@ public sealed class PortablePostgresHost : IAsyncDisposable
     {
         await using var connection = new NpgsqlConnection(BuildConnectionString(Port, Database, _options));
         await connection.OpenAsync(cancellationToken);
+
+        // 先做一次便宜的探询再决定要不要执行 DDL：
+        // CREATE EXTENSION IF NOT EXISTS 虽然幂等，但它要拿锁、读 control 文件，实测每次约 300ms；
+        // 而 pg_extension 的查询是毫秒级。扩展装好之后每次启动都该走这条快路。
+        await using (var probe = connection.CreateCommand())
+        {
+            probe.CommandText = "SELECT 1 FROM pg_extension WHERE extname = 'vector'";
+            if (await probe.ExecuteScalarAsync(cancellationToken) is not null) return;
+        }
+
         await using var command = connection.CreateCommand();
         command.CommandText = "CREATE EXTENSION IF NOT EXISTS vector;";
         await command.ExecuteNonQueryAsync(cancellationToken);

@@ -52,9 +52,14 @@ public static class ApiHost
 
         void LogStartup(string message)
         {
-            Console.WriteLine($"[startup] {message}");
-            fileLogger?.Write($"{DateTimeOffset.Now:O} [startup] {message}");
+            // 统一带上「距进程启动」的毫秒数：启动慢的时候能一眼看出是哪一段慢。
+            var line = $"[startup] +{StartupTimeline.ElapsedMilliseconds,7:F0}ms {message}";
+            Console.WriteLine(line);
+            fileLogger?.Write($"{DateTimeOffset.Now:O} {line}");
         }
+
+        StartupTimeline.Sink = LogStartup;
+        StartupTimeline.Mark("process arguments parsed");
 
         HostBootstrap.ConfigureHttp(builder);
         builder.AddValidatedOptions();
@@ -64,8 +69,10 @@ public static class ApiHost
         PortablePostgresHost? portablePostgres = null;
         if (builder.Configuration.GetValue<bool?>($"{PortablePostgresOptions.SectionName}:Enabled") ?? true)
         {
+            var beforePostgres = StartupTimeline.Mark("portable PostgreSQL starting");
             portablePostgres = await PortablePostgresHost.StartAsync(
                 builder.Configuration, root, LogStartup);
+            StartupTimeline.Step("portable PostgreSQL ready", beforePostgres);
             if (portablePostgres is not null)
             {
                 builder.Configuration["ConnectionStrings:KnowledgeBase"] = portablePostgres.ConnectionString;
@@ -109,7 +116,9 @@ public static class ApiHost
         var mcp = builder.Services.AddMcpModule(builder.Configuration);
         builder.Services.AddBackgroundWorkers();
 
+        var beforeBuild = StartupTimeline.Mark("service registration done");
         var app = builder.Build();
+        StartupTimeline.Step("host built", beforeBuild);
 
         if (portablePostgres is not null)
         {
@@ -127,13 +136,20 @@ public static class ApiHost
             });
         }
 
-        var hasStaticFrontend = HostPipeline.Configure(app, desktopSecurity, mcp);
+        var serverSecurity = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<ServerSecurityOptions>>().Value;
+        var hasStaticFrontend = HostPipeline.Configure(app, desktopSecurity, mcp, serverSecurity);
 
         app.Logger.LogInformation("Starting API in {EnvironmentName}", app.Environment.EnvironmentName);
+        var beforeSchema = StartupTimeline.Mark("database schema initialization starting");
         await DatabaseInitializer.InitializeAsync(app, CancellationToken.None);
+        StartupTimeline.Step("database schema ready", beforeSchema);
 
         // 插件在数据库就绪后启动：单个插件失败不影响核心。
-        await PluginModule.InitializePluginsAsync(app, CancellationToken.None);
+        // 这段曾阻塞 Kestrel 监听（插件含 AppContainer 启动与 30s 握手超时），
+        // 现在由 PluginModule 自己挪到「主机已监听」之后，不再占用首屏时间。
+        var beforePlugins = StartupTimeline.Mark("plugin initialization queued");
+        PluginModule.QueueInitialization(app);
+        StartupTimeline.Step("plugin initialization queued", beforePlugins);
 
         HostPipeline.MapEndpoints(app, hasStaticFrontend, mcp, desktopSecurity);
         return app;

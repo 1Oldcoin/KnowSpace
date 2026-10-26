@@ -10,8 +10,10 @@ public sealed class CompanionStore(SqlSugarScope database)
     private const int RecentSessionMessageLimit = 30;
     private const int InsertBatchSize = 500;
 
-    public Task InitializeAsync(CancellationToken cancellationToken)
+    public Task InitializeAsync(CancellationToken cancellationToken, bool ensureSchema = true)
     {
+        if (!ensureSchema) return Task.CompletedTask;
+
         database.CodeFirst.InitTables<CompanionProfileSchemaEntity>();
         database.CodeFirst.InitTables<CompanionMessageSchemaEntity>();
         database.CodeFirst.InitTables<CompanionSessionSchemaEntity>();

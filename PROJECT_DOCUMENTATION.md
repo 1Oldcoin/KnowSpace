@@ -125,9 +125,14 @@ MyFirstMafAgent/
 | `Application/Agents/AgentClientService.cs` | 客户端用例：创建、轮换密钥、改作用域、启停、删除与接入校验（校验能力/工具名/知识库存在性）。 |
 | `Application/Agents/AgentCallGate.cs` | MCP 工具准入矩阵（能力 → 工具白名单 → 知识库范围），纯函数可穷举测试。 |
 | `Application/Agents/AgentRateLimiter.cs` | 按客户端的令牌桶限流，额度可运行期调整，能给出准确的 `Retry-After`。 |
+| `Application/Agents/AgentAuthThrottle.cs` | 按来源 IP 的鉴权失败闸门：超限封禁并返回 `Retry-After`，成功即清零。防无上限的密钥重试与日志刷屏。 |
 | `Persistence/AgentClientSchemaEntities.cs` | `agent_clients` / `agent_client_calls` 表结构。 |
 | `Infrastructure/Persistence/SqlSugarAgentClientStore.cs` | 客户端与调用审计的 SqlSugar 实现（损坏 JSON 按最小权限处理）。 |
-| `Hosting/AgentClientGate.cs` | `/mcp` 准入中间件：认证 → 启停 → 限流 → 工具准入 → 审计。 |
+| `Hosting/AgentClientGate.cs` | `/mcp` 准入中间件：鉴权失败闸门 → 认证 → 启停 → 限流 → 工具准入 → 审计。 |
+| `Options/ServerSecurityOptions.cs` | 云部署安全配置：服务端长期令牌、匿名健康检查、可信代理、失败闸门阈值、响应头隐藏。 |
+| `Hosting/ServerSecurity.cs` | 可信转发头（修审计 IP 与回环判定欺骗）与全局安全响应头。 |
+| `Hosting/SchemaStamp.cs` | 数据库结构指纹：与上次成功初始化一致时跳过全部建表检查（启动省 2.4–3.7s），`MAF_FORCE_SCHEMA_INIT=1` 可强制完整初始化。 |
+| `Hosting/StartupTimeline.cs` | 启动打点（`[startup] +1234ms …`），配合 `scripts/Measure-Startup.ps1` 做前后对比。 |
 | `Endpoints/AgentClientEndpoints.cs` | 客户端管理、能力/工具清单、密钥轮换与调用审计接口。 |
 | `Domain/Chats/ChatHistory.cs` | 聊天历史读取端口与模型：四个来源名（`knowledge`/`avatar`/`companion`/`companion-import`）、会话摘要与消息命中，只读。 |
 | `Application/Chats/ChatHistoryService.cs` | 聊天历史回读用例：来源名规范化（写错报错而非返回空）、条数夹紧、错误说人话。 |

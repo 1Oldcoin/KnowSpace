@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline';" />
+    <title>知间</title>
+    <style>
+      /* 启动画面：唯一的依赖是本地文件，不联网、不加载字体。
+         目标是在 Electron 起来后 ~150ms 内就能画出东西，让用户知道"点到了"。 */
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        -webkit-user-select: none;
+        user-select: none;
+        cursor: default;
+      }
+      body {
+        display: grid;
+        place-items: center;
+        padding: 22px;
+        color: #25322e;
+        background: linear-gradient(150deg, #f7faf6 0%, #f2f7f3 55%, #eef4ef 100%);
+        font-family: 'DM Sans', 'Noto Sans SC', -apple-system, 'Segoe UI', sans-serif;
+        border: 1px solid #e4ece4;
+        border-radius: 14px;
+      }
+
+      .card { width: 100%; text-align: center; }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 11px;
+        margin-bottom: 6px;
+      }
+      .mark {
+        position: relative;
+        width: 40px;
+        height: 40px;
+        display: grid;
+        place-items: center;
+        border-radius: 13px 13px 13px 5px;
+        color: #fff;
+        background: #397c65;
+        box-shadow: 0 8px 20px #397c6533;
+        animation: breathe 2.4s ease-in-out infinite;
+      }
+      .mark svg { width: 21px; height: 21px; }
+      .name { font-size: 22px; font-weight: 700; letter-spacing: -.6px; color: #283832; }
+      .name span { color: #73aa8e; margin: 0 1px; }
+
+      .tagline { margin: 0 0 20px; color: #9aa79f; font-size: 11px; letter-spacing: .3px; }
+
+      /* 有 splash.gif 时优先播动画：把图片放到 desktop-electron\splash.gif 即可，
+         主进程会把它塞进 <img> 并隐藏下面的 CSS 标志。 */
+      #splash-gif {
+        display: block;
+        max-width: 260px;
+        max-height: 120px;
+        margin: 0 auto 14px;
+        object-fit: contain;
+      }
+      body.with-gif .brand, body.with-gif .tagline { display: none; }
+
+      .bar {
+        position: relative;
+        height: 3px;
+        width: 168px;
+        margin: 0 auto 12px;
+        overflow: hidden;
+        border-radius: 3px;
+        background: #e2ebe3;
+      }
+      .bar::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        width: 45%;
+        border-radius: inherit;
+        background: linear-gradient(90deg, #a9d3b6, #397c65);
+        animation: slide 1.15s cubic-bezier(.45, .05, .55, .95) infinite;
+      }
+
+      #phase {
+        min-height: 15px;
+        margin: 0;
+        color: #7f8c84;
+        font-size: 10.5px;
+        letter-spacing: .2px;
+      }
+      #version {
+        position: absolute;
+        right: 14px;
+        bottom: 9px;
+        color: #b3bdb6;
+        font-size: 9px;
+      }
+
+      @keyframes slide {
+        0% { transform: translateX(-105%); }
+        100% { transform: translateX(232%); }
+      }
+      @keyframes breathe {
+        0%, 100% { transform: translateY(0) scale(1); }
+        50% { transform: translateY(-2px) scale(1.03); }
+      }
+
+      /* 收起时淡出，避免"啪"地消失。 */
+      html.leaving body { transition: opacity .18s ease; opacity: 0; }
+
+      @media (prefers-reduced-motion: reduce) {
+        .mark, .bar::after { animation: none; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <img id="splash-gif" alt="" hidden />
+      <div class="brand">
+        <div class="mark">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 6.5C12 5 10.5 3.8 8.6 3.8H4.2v13.4h4.4c1.9 0 3.4 1.2 3.4 2.7" />
+            <path d="M12 6.5c0-1.5 1.5-2.7 3.4-2.7h4.4v13.4h-4.4c-1.9 0-3.4 1.2-3.4 2.7" />
+          </svg>
+        </div>
+        <div class="name">知间<span>·</span></div>
+      </div>
+      <p class="tagline">让每一份学习都有迹可循</p>
+      <div class="bar"></div>
+      <p id="phase">正在启动…</p>
+    </div>
+    <div id="version"></div>
+  </body>
+</html>

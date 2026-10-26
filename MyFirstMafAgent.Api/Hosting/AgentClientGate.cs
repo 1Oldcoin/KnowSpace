@@ -50,6 +50,8 @@ public static class AgentClientGate
         var logger = app.Services.GetRequiredService<ILoggerFactory>()
             .CreateLogger("MyFirstMafAgent.Api.AgentClientGate");
 
+        var serverOptions = app.Services.GetRequiredService<IOptions<ServerSecurityOptions>>().Value;
+
         app.Use(async (context, next) =>
         {
             if (!context.Request.Path.StartsWithSegments(mcp.Path, StringComparison.OrdinalIgnoreCase))
@@ -67,7 +69,25 @@ public static class AgentClientGate
             var services = context.RequestServices;
             var clients = services.GetRequiredService<AgentClientService>();
             var limiter = services.GetRequiredService<AgentRateLimiter>();
+            var throttle = services.GetRequiredService<AgentAuthThrottle>();
             var callLog = services.GetRequiredService<IAgentCallLogStore>();
+
+            // 来源 IP：开了可信代理头之后这里是真实客户端地址，否则是代理/本机地址。
+            var remoteAddress = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+
+            // 先拦被封禁的来源：失败请求没有客户端 ID，只能按 IP 计。
+            if (throttle.IsBlocked(remoteAddress, out var blockedForSeconds))
+            {
+                logger.LogWarning(
+                    "Blocked MCP request from {Remote} after too many failed authentications ({RetryAfter}s left).",
+                    remoteAddress, blockedForSeconds);
+
+                context.Response.Headers.RetryAfter = blockedForSeconds.ToString();
+                await WriteErrorAsync(context, null, -32006,
+                    $"鉴权失败次数过多，请 {blockedForSeconds} 秒后重试。",
+                    StatusCodes.Status429TooManyRequests);
+                return;
+            }
 
             var presentedKey = AgentClientKey.ExtractFromHeaders(
                 context.Request.Headers.Authorization.ToString(),
@@ -80,13 +100,22 @@ public static class AgentClientGate
 
             if (client is null)
             {
+                // 只在「失败」上计数：正常客户端的偶发拼错会被下一次成功清除。
+                var nowBlocked = throttle.RecordFailure(
+                    remoteAddress,
+                    serverOptions.FailedAuthLimitPerMinute,
+                    serverOptions.FailedAuthBlockSeconds);
+
                 logger.LogWarning(
-                    "Rejected MCP request with an unknown or missing client key: {Method} {Path}",
-                    context.Request.Method, context.Request.Path);
+                    "Rejected MCP request with an unknown or missing client key from {Remote}: {Method} {Path}{Blocked}",
+                    remoteAddress, context.Request.Method, context.Request.Path,
+                    nowBlocked ? " (source blocked)" : string.Empty);
 
                 await WriteErrorAsync(context, null, -32001, "缺少或无效的客户端密钥。", StatusCodes.Status401Unauthorized);
                 return;
             }
+
+            throttle.RecordSuccess(remoteAddress);
 
             if (!client.Enabled)
             {

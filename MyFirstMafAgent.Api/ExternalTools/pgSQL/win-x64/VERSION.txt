@@ -1,0 +1,4 @@
+﻿PostgreSQL 17.9 (Windows x64, EDB binaries)
+pgvector  0.8.7 (built from source with MSVC)
+built     2026-10-25 10:54:27
+layout    bin\ lib\ share\

@@ -50,9 +50,15 @@ let semanticRequestVersion = 0
 
 const knowledgeChatSessions = ref<KnowledgeChatSession[]>([])
 const activeKnowledgeChatSessionId = ref('')
+// 侧栏「问答历史」列表的一次性加载：只用于侧栏骨架与按钮禁用。
+const isChatSessionListLoading = ref(false)
+// 打开某段历史对话时的消息加载：只影响聊天区，不再清空既有内容。
 const isChatHistoryLoading = ref(false)
+// chatMessages 里当前装的是哪个会话的消息，用来判断「已加载」避免重复请求。
+const chatHistorySessionId = ref('')
 const isChatHistoryMutating = ref(false)
 let chatRequestVersion = 0
+let chatHistoryRequestVersion = 0
 
 // AI 知识问答页的单轮工具开关：与设置页的全局偏好分离，只影响本页提问。
 // 未手动调整过时沿用设置页保存的偏好；手动调整后写入 localStorage 并优先采用。
@@ -259,6 +265,7 @@ async function changeKnowledgeBase(id: string) {
   window.localStorage.setItem('myfirstmafagent.activeKnowledgeBaseId', id)
   materials.value = []
   chatMessages.value = []
+  chatHistorySessionId.value = ''
   knowledgeChatSessions.value = []
   activeKnowledgeChatSessionId.value = ''
   isChatBusy.value = false
@@ -754,7 +761,7 @@ watch(apiOnline, (online) => {
 })
 
 async function loadKnowledgeChatSessions(knowledgeBaseId: string) {
-  isChatHistoryLoading.value = true
+  isChatSessionListLoading.value = true
   try {
     const sessions = await listKnowledgeChatSessions(knowledgeBaseId)
     if (knowledgeBaseId !== activeKnowledgeBaseId.value) return
@@ -763,25 +770,36 @@ async function loadKnowledgeChatSessions(knowledgeBaseId: string) {
     if (latest) await openKnowledgeChatSession(latest.id)
     else {
       activeKnowledgeChatSessionId.value = ''
+      chatHistorySessionId.value = ''
       chatMessages.value = []
     }
   } catch (error) {
     if (knowledgeBaseId === activeKnowledgeBaseId.value)
       showToast(error instanceof Error ? error.message : '无法读取问答历史。')
   } finally {
-    if (knowledgeBaseId === activeKnowledgeBaseId.value) isChatHistoryLoading.value = false
+    if (knowledgeBaseId === activeKnowledgeBaseId.value) isChatSessionListLoading.value = false
   }
 }
 
+/**
+ * 切换历史对话。
+ *
+ * 关键点：这里**不清空** chatMessages。以前先清空再请求，messages.length 会瞬间
+ * 归零，模版切到欢迎页（居中的大标题 + 提示卡片），数据回来后又切回消息列表，
+ * 视觉上就是一次全屏闪烁。现在旧内容留着、盖一层薄遮罩，新数据到了直接替换，
+ * 布局不跳；旧内容属于哪个会话由 chatHistorySessionId 记录。
+ */
 async function openKnowledgeChatSession(sessionId: string) {
   const knowledgeBaseId = activeKnowledgeBaseId.value
   if (!knowledgeBaseId) return
+  // 已经是这个会话且消息已加载完：不重复请求。
+  if (sessionId === activeKnowledgeChatSessionId.value && chatHistorySessionId.value === sessionId) return
+  const requestVersion = ++chatHistoryRequestVersion
   activeKnowledgeChatSessionId.value = sessionId
   isChatHistoryLoading.value = true
-  chatMessages.value = []
   try {
     const history = await listKnowledgeChatMessages(knowledgeBaseId, sessionId)
-    if (knowledgeBaseId !== activeKnowledgeBaseId.value || sessionId !== activeKnowledgeChatSessionId.value) return
+    if (requestVersion !== chatHistoryRequestVersion || knowledgeBaseId !== activeKnowledgeBaseId.value) return
     chatMessages.value = history.map(message => ({
       id: String(message.id),
       role: message.role,
@@ -792,12 +810,16 @@ async function openKnowledgeChatSession(sessionId: string) {
       toolCalls: message.answerMeta?.toolCalls ?? [],
       retrieval: message.answerMeta?.retrieval ?? undefined,
     }))
+    chatHistorySessionId.value = sessionId
   } catch (error) {
-    if (knowledgeBaseId === activeKnowledgeBaseId.value && sessionId === activeKnowledgeChatSessionId.value)
+    if (requestVersion === chatHistoryRequestVersion && knowledgeBaseId === activeKnowledgeBaseId.value) {
+      // 拉不到就退回空态，不能把上一段对话的内容冒充成这一段。
+      chatMessages.value = []
+      chatHistorySessionId.value = ''
       showToast(error instanceof Error ? error.message : '无法恢复这段对话。')
+    }
   } finally {
-    if (knowledgeBaseId === activeKnowledgeBaseId.value && sessionId === activeKnowledgeChatSessionId.value)
-      isChatHistoryLoading.value = false
+    if (requestVersion === chatHistoryRequestVersion) isChatHistoryLoading.value = false
   }
 }
 
@@ -1015,10 +1037,13 @@ function chatTime(value?: string) {
 }
 
 async function startNewChat() {
-  if (isChatBusy.value || isChatHistoryLoading.value || isChatHistoryMutating.value) return
+  if (isChatBusy.value || isChatHistoryMutating.value) return
   const knowledgeBaseId = activeKnowledgeBaseId.value
   if (!knowledgeBaseId) return
   const requestVersion = ++chatRequestVersion
+  // 还有历史消息在路上就丢掉它，否则会把旧会话内容盖到新对话上。
+  chatHistoryRequestVersion++
+  isChatHistoryLoading.value = false
   isChatBusy.value = true
   try {
     const session = await createKnowledgeChatSession(knowledgeBaseId)
@@ -1026,6 +1051,7 @@ async function startNewChat() {
     knowledgeChatSessions.value.unshift(session)
     activeKnowledgeChatSessionId.value = session.id
     chatMessages.value = []
+    chatHistorySessionId.value = session.id
   } catch (error) {
     if (requestVersion === chatRequestVersion) showToast(error instanceof Error ? error.message : '无法创建新对话。')
   } finally {
@@ -1033,8 +1059,10 @@ async function startNewChat() {
   }
 }
 
+// 切换历史对话不再被「正在加载」拦住：重复点击由 openKnowledgeChatSession 的
+// 请求版本号处理，最后一次点击胜出。
 function selectKnowledgeChatSession(sessionId: string) {
-  if (isChatBusy.value || isChatHistoryLoading.value || isChatHistoryMutating.value) return
+  if (isChatBusy.value || isChatHistoryMutating.value) return
   void openKnowledgeChatSession(sessionId)
 }
 
@@ -1127,8 +1155,10 @@ async function deleteSelectedHistorySessions(sessionIds: string[]) {
 async function selectAvailableSessionAfterDelete(deletedIds: string[]) {
   if (!deletedIds.includes(activeKnowledgeChatSessionId.value)) return
   chatRequestVersion++
+  chatHistoryRequestVersion++
   activeKnowledgeChatSessionId.value = ''
   chatMessages.value = []
+  chatHistorySessionId.value = ''
   const nextSession = knowledgeChatSessions.value[0]
   if (nextSession) await openKnowledgeChatSession(nextSession.id)
 }
@@ -1203,7 +1233,7 @@ async function exportHistorySession(sessionId: string) {
         <NotesView v-else-if="currentView === 'notes'" :notes="notes" :query="searchQuery" :api-online="apiOnline" :busy="notesSaving" :loading="notesLoading" :active-knowledge-base-id="activeKnowledgeBaseId" :topics="topics" @create="createNoteHandler" @update="updateNoteHandler" @delete="deleteNoteHandler" @pin="pinNoteHandler" @export-notes="exportNotesHandler" @read-source="openReaderById" @notice="showToast" />
         <TopicsView v-else-if="currentView === 'topics'" :topics="topics" :materials="materials" :api-online="apiOnline" :active-topic-id="activeTopicId" @create="requestCreateTopic" @rename="renameTopic" @delete="removeTopic" @open="selectTopic" />
         <SettingsView v-else-if="currentView === 'settings'" :settings="appSettings" :api-online="apiOnline" :busy="isSettingsSaving" :loading="isSettingsLoading" :knowledge-base-names="knowledgeBaseNameMap" :knowledge-bases="knowledgeBases" :active-knowledge-base-id="activeKnowledgeBaseId" @save="saveSettings" @reload="loadAppSettings" @imported="onKnowledgeBaseImported" />
-        <AssistantView v-else-if="currentView === 'assistant'" :messages="chatMessages" :busy="isChatBusy || isChatHistoryMutating" :api-online="apiOnline" :sessions="knowledgeChatSessions" :active-session-id="activeKnowledgeChatSessionId" :sessions-loading="isChatHistoryLoading" :tool-options="chatToolOptions" :tools-available="chatToolsAvailable" @send="sendMessage" @new-chat="startNewChat" @select-session="selectKnowledgeChatSession" @rename-session="renameHistorySession" @delete-session="deleteHistorySession" @delete-sessions="deleteSelectedHistorySessions" @export-session="exportHistorySession" @save-as-note="saveAssistantNoteHandler" @play-media="openCitationMedia" @update:tool-options="updateChatToolOptions" />
+        <AssistantView v-else-if="currentView === 'assistant'" :messages="chatMessages" :busy="isChatBusy || isChatHistoryMutating" :api-online="apiOnline" :sessions="knowledgeChatSessions" :active-session-id="activeKnowledgeChatSessionId" :sessions-loading="isChatSessionListLoading" :history-loading="isChatHistoryLoading" :tool-options="chatToolOptions" :tools-available="chatToolsAvailable" @send="sendMessage" @new-chat="startNewChat" @select-session="selectKnowledgeChatSession" @rename-session="renameHistorySession" @delete-session="deleteHistorySession" @delete-sessions="deleteSelectedHistorySessions" @export-session="exportHistorySession" @save-as-note="saveAssistantNoteHandler" @play-media="openCitationMedia" @update:tool-options="updateChatToolOptions" />
         <AvatarView v-else-if="currentView === 'avatar'" :api-online="apiOnline" @notice="showToast" />
         <JobsView v-else-if="currentView === 'jobs'" :api-online="apiOnline" @notice="showToast" @counts="pendingJobCount = $event" />
         <PluginsView v-else-if="currentView === 'plugins'" :api-online="apiOnline" :knowledge-bases="knowledgeBases" :active-knowledge-base-id="activeKnowledgeBaseId" @notice="showToast" />
