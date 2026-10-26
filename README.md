@@ -189,6 +189,26 @@ curl -X POST http://127.0.0.1:5056/mcp \
 
 完整说明：[`docs/MCP-ACCESS.md`](docs/MCP-ACCESS.md)（速查）· [`docs/MCP-INTEGRATION-MANUAL.md`](docs/MCP-INTEGRATION-MANUAL.md)（整合版）
 
+## 桌面版自动更新
+
+安装包内 `resources/app-update.yml` 指向本仓库的 GitHub Releases（`electron-builder.yml` 的 `publish: provider: github`）。发新版的完整流程：
+
+```powershell
+# 1. 改 desktop-electron\package.json 的 version（例如 1.0.2）
+# 2. 打包（默认在 %TEMP% 构建再拷回 publish\releases，见脚本注释）
+powershell -ExecutionPolicy Bypass -File scripts\Build-ElectronInstaller.ps1
+# 3. 建 GitHub Release 并上传 latest.yml + 安装包 + blockmap
+powershell -ExecutionPolicy Bypass -File scripts\Publish-Release.ps1 -Version 1.0.2
+```
+
+客户端启动 20 秒后自动查一次，之后每 6 小时复查；也可在「设置 → 关于/更新」或菜单「帮助 → 检查更新」手动触发。
+更新源可覆盖（优先级从高到低）：环境变量 `MAF_UPDATE_URL` → 用户数据目录下的 `update-feed.json`（`{"url":"..."}`）→ 安装包内置的 GitHub 地址。
+
+> **国内网络注意**：`github.com` 在部分网络下不可直连（表现为 `net::ERR_CONNECTION_TIMED_OUT`）。
+> 这时可以让客户端走代理启动：`MyFirstMafAgent.exe --proxy-server=http://127.0.0.1:7897`，
+> 或者用 `MAF_UPDATE_URL` 指向任意可访问的静态目录（generic 源，放 latest.yml + 安装包即可）。
+> 注意 `api.github.com` 通常可直连，被墙的是 `github.com` 主站与 raw 域名——所以「能 push 不能更新」是正常现象。
+
 ## 文档
 
 | 文档 | 内容 |
