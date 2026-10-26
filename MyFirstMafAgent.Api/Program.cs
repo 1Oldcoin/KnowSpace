@@ -23,8 +23,32 @@ var listeningUrl = ApiHost.GetListeningUrl(app);
 if (listeningUrl is not null)
     await desktopArguments.WriteReadyFileAsync(listeningUrl);
 
+// 发布运行时发现文件：后台服务先跑起来时，后开的窗口据此直接接管，
+// 不会再拉起第二个后端（两个实例会抢同一个便携 PostgreSQL 与同一份数据）。
+// 桌面宿主生成的令牌也一并落地，窗口关掉再打开时才认得出这个后台。
+var runtimeRoot = DesktopRuntimeFile.ResolveRoot(
+    desktopArguments.DataRoot,
+    MyFirstMafAgent.Api.Infrastructure.AppPaths.ResolveContentRoot());
+if (runtimeRoot is not null && listeningUrl is not null)
+{
+    var effectiveToken = DesktopSecurityOptions
+        .FromConfiguration(app.Configuration)
+        .Token;
+
+    DesktopRuntimeFile.Publish(runtimeRoot, listeningUrl, effectiveToken);
+
+    // 优雅停止（含 Kestrel 收到 /api/desktop/shutdown）之后把发现文件收掉，
+    // 免得下次开窗去连一个已经死掉的端口。
+    app.Services.GetRequiredService<Microsoft.Extensions.Hosting.IHostApplicationLifetime>()
+        .ApplicationStopping.Register(() => DesktopRuntimeFile.RemoveIfOwned(runtimeRoot));
+}
+
 if (ApiHost.ShouldOpenBrowser(app, args))
     ApiHost.OpenBrowser(app);
 
 await app.WaitForShutdownAsync();
+
+if (runtimeRoot is not null)
+    DesktopRuntimeFile.RemoveIfOwned(runtimeRoot);
+
 return 0;

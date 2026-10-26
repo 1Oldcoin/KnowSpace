@@ -23,7 +23,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px
 button { cursor: pointer; }
 
 .app-shell { min-height: 100vh; display: grid; grid-template-columns: 250px minmax(0, 1fr); background: var(--canvas); }
-.sidebar { height: 100vh; position: sticky; top: 0; z-index: 20; display: flex; flex-direction: column; padding: 25px 17px 15px; background: #fbfcfa; border-right: 1px solid #e9ede8; }
+.sidebar { height: 100vh; position: sticky; top: 0; z-index: 20; display: flex; flex-direction: column; padding: 25px 17px 15px; background: #fbfcfa; border-right: 1px solid #e9ede8; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: #d8e3da transparent; }
+.sidebar::-webkit-scrollbar { width: 8px; }
+.sidebar::-webkit-scrollbar-track { background: transparent; }
+.sidebar::-webkit-scrollbar-thumb { border: 2px solid #fbfcfa; border-radius: 8px; background: #dde7df; }
+.sidebar::-webkit-scrollbar-thumb:hover { background: #c4d5c9; }
+/* 窗口不高时压缩垂直留白：1280×860 的默认窗口里，侧栏内容本来就容易超出可视高度。 */
+@media (max-height: 840px) { .workspace-switcher { margin: 18px 0; }.sidebar-section-heading { margin-top: 20px; } }
+@media (max-height: 720px) { .workspace-switcher { margin: 12px 0; }.sidebar-tip { display: none; }.sidebar-spacer { min-height: 12px; }.sidebar-label { margin-bottom: 5px; } }
 .brand-row { height: 38px; display: flex; align-items: center; gap: 10px; padding: 0 4px; }
 .brand-mark { width: 31px; height: 31px; display: grid; place-items: center; color: #fff; background: #397c65; border-radius: 10px 10px 10px 4px; box-shadow: 0 5px 12px #397c6529; }
 .brand-name { color: #283832; font-weight: 700; letter-spacing: -.7px; font-size: 18px; }

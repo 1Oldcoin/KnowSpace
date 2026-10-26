@@ -16,6 +16,7 @@ import {
   type CompanionProfile,
   type CompanionSession,
 } from '../services/api'
+import { confirmAction } from '../services/dialog'
 
 const profiles = ref<CompanionProfile[]>([])
 const selectedProfile = ref<CompanionProfile | null>(null)
@@ -173,7 +174,12 @@ async function createPersona() {
 }
 
 async function removeProfile(profile: CompanionProfile) {
-  if (!window.confirm(`确定删除“${profile.name}”的档案、导入消息和所有陪伴会话吗？此操作不可撤销。`)) return
+  if (!(await confirmAction({
+    title: '删除档案',
+    message: `确定删除“${profile.name}”的档案、导入消息和所有陪伴会话吗？此操作不可撤销。`,
+    confirmText: '删除',
+    tone: 'danger'
+  }))) return
   try {
     await deleteCompanion(profile.id)
     profiles.value = profiles.value.filter(item => item.id !== profile.id)

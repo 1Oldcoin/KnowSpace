@@ -9,24 +9,33 @@ namespace MyFirstMafAgent.Api.Infrastructure;
 /// 为什么需要它：<c>ExternalTools</c> 里放的是**与平台绑定**的二进制
 /// （便携 PostgreSQL、ffmpeg）。同一个发布脚本要能产出
 /// <c>win-x64</c> / <c>linux-x64</c> / <c>osx-arm64</c> 等多份包，
-/// 就必须让「找哪个文件」由运行时决定，而不是在代码和配置里写死
-/// <c>pg0-windows-x86_64.exe</c>。
+/// 就必须让「找哪个文件」由运行时决定，而不是在代码和配置里写死路径。
 /// </para>
 ///
 /// <para>
-/// 目录约定（按优先级，先命中先用）：
+/// 单文件工具（ffmpeg）的目录约定（按优先级，先命中先用）：
 /// <list type="number">
 ///   <item><c>ExternalTools/{tool}/{rid}/{name}{suffix}</c> —— 推荐，多平台可共存。</item>
-///   <item><c>ExternalTools/{tool}/{name}-{rid}{suffix}</c> —— pg0 官方发行包就是这种扁平命名。</item>
-///   <item><c>ExternalTools/{tool}/{name}{suffix}</c> —— 旧版单平台布局（Windows 安装包就长这样），保留兼容。</item>
+///   <item><c>ExternalTools/{tool}/{name}-{rid}{suffix}</c> —— 扁平命名。</item>
+///   <item><c>ExternalTools/{tool}/{name}{suffix}</c> —— 旧版单平台布局，保留兼容。</item>
 /// </list>
 /// 找不到时返回 null，由调用方给出「去下载哪个文件、放哪里」的具体提示。
+/// </para>
+///
+/// <para>
+/// 便携 PostgreSQL 不是单文件，而是整棵目录树（<c>bin</c> / <c>lib</c> / <c>share</c> 相对位置不能拆，
+/// 只拷 exe 会报 <c>0xC0000135</c> 找不到 DLL），所以单独用
+/// <see cref="ResolvePostgresBinDirectory"/> 按“目录”解析，见
+/// <see cref="PortablePostgresFolder"/>。
 /// </para>
 /// </summary>
 public static class PlatformRuntime
 {
-    /// <summary>pg0 官方发行页；缺二进制时的提示会指向这里。</summary>
-    public const string Pg0ReleasesUrl = "https://github.com/vectorize-io/pg0/releases";
+    /// <summary>便携 PostgreSQL 的工具目录（相对内容根）。</summary>
+    public const string PortablePostgresFolder = "ExternalTools/pgSQL";
+
+    /// <summary>PostgreSQL 主程序名（不带后缀）。</summary>
+    public const string PostgresCommand = "postgres";
 
     /// <summary>当前进程的 .NET RID（<c>win-x64</c> / <c>linux-arm64</c> / <c>osx-arm64</c> …）。</summary>
     public static string RuntimeIdentifier { get; } = ComputeRuntimeIdentifier();
@@ -42,35 +51,73 @@ public static class PlatformRuntime
         "osx-x64", "osx-arm64"
     ];
 
-    /// <summary>把一个工具名拼成当前平台的完整文件名，例如 <c>pg0.exe</c> / <c>pg0</c>。</summary>
+    /// <summary>把一个工具名拼成当前平台的完整文件名，例如 <c>pg_ctl.exe</c> / <c>pg_ctl</c>。</summary>
     public static string WithSuffix(string name) =>
         name.EndsWith(ExecutableSuffix, StringComparison.OrdinalIgnoreCase) ? name : name + ExecutableSuffix;
 
+    /// <summary>当前平台 PostgreSQL 主程序的完整文件名，例如 <c>postgres.exe</c> / <c>postgres</c>。</summary>
+    public static string PostgresExecutableName => WithSuffix(PostgresCommand);
+
     /// <summary>
-    /// pg0 官方发行包的原始文件名（按 RID）。
-    ///
+    /// 便携 PostgreSQL 的 <c>bin</c> 目录候选（相对内容根），按优先级排序。
     /// <para>
-    /// 这些名字是上游定的（<c>pg0-linux-x86_64-gnu</c>、<c>pg0-darwin-aarch64</c> …），
-    /// 允许用户**下载后不改名**直接放进 <c>ExternalTools/pgSQL/{rid}/</c>，
-    /// 少一步人工操作就少一种放错位置的可能。
+    /// 首选按 RID 分目录，允许同一份检出里放多个平台的 pgsql 树；
+    /// 其次是不分 RID 的扁平布局（把 <c>dist\pgsql</c> 直接放进 <c>ExternalTools/pgSQL</c> 就长这样）。
     /// </para>
     /// </summary>
-    private static readonly Dictionary<string, string> Pg0AssetNames = new(StringComparer.Ordinal)
-    {
-        ["win-x64"] = "pg0-windows-x86_64.exe",
-        ["linux-x64"] = "pg0-linux-x86_64-gnu",
-        ["linux-arm64"] = "pg0-linux-aarch64-gnu",
-        ["osx-arm64"] = "pg0-darwin-aarch64",
-        ["osx-x64"] = "pg0-darwin-x86_64"
-    };
+    public static IReadOnlyList<string> PostgresBinCandidates() =>
+    [
+        $"{PortablePostgresFolder}/{RuntimeIdentifier}/bin",
+        $"{PortablePostgresFolder}/bin"
+    ];
 
-    /// <summary>当前平台的 pg0 官方文件名；上游未提供该平台时返回 null。</summary>
-    public static string? Pg0VendorFileName =>
-        Pg0AssetNames.TryGetValue(RuntimeIdentifier, out var name) ? name : null;
+    /// <summary>
+    /// 解析便携 PostgreSQL 的 <c>bin</c> 目录（里面必须有 <c>postgres[.exe]</c>）。
+    ///
+    /// <para>
+    /// <paramref name="configuredPath"/> 允许配成 <c>bin</c> 目录本身，也允许配成 pgsql 根目录
+    /// （自动补 <c>bin</c>）——用户从发布包目录里复制路径时两种都可能。配置的路径无效
+    /// （不存在、或目录里没有主程序）时回落到按 RID 自动定位并记日志，而不是直接启动失败。
+    /// </para>
+    /// </summary>
+    /// <param name="contentRoot">应用内容根目录。</param>
+    /// <param name="configuredPath">配置的路径；可为空。</param>
+    /// <param name="log">可选的诊断输出。</param>
+    public static string? ResolvePostgresBinDirectory(
+        string contentRoot, string? configuredPath, Action<string>? log = null)
+    {
+        if (!string.IsNullOrWhiteSpace(configuredPath))
+        {
+            var configured = ToAbsolute(contentRoot, configuredPath);
+            foreach (var candidate in new[] { configured, Path.Combine(configured, "bin") })
+            {
+                if (File.Exists(Path.Combine(candidate, PostgresExecutableName)))
+                {
+                    log?.Invoke($"使用配置的便携 PostgreSQL 目录：{candidate}");
+                    return candidate;
+                }
+            }
+
+            log?.Invoke(
+                $"PortablePostgres:BinDirectory 指向的目录里没有 {PostgresExecutableName}：{configured}，"
+                + $"改按当前平台（{RuntimeIdentifier}）自动定位。");
+        }
+
+        foreach (var candidate in PostgresBinCandidates())
+        {
+            var path = ToAbsolute(contentRoot, candidate);
+            if (!File.Exists(Path.Combine(path, PostgresExecutableName))) continue;
+
+            log?.Invoke($"使用 {RuntimeIdentifier} 对应的便携 PostgreSQL：{path}");
+            return path;
+        }
+
+        return null;
+    }
 
     /// <summary>某个工具的相对候选路径（相对内容根目录），按优先级排序。</summary>
     /// <param name="toolFolder">工具目录，例如 <c>ExternalTools/pgSQL</c>。</param>
-    /// <param name="baseName">不带后缀的程序名，例如 <c>pg0</c>。</param>
+    /// <param name="baseName">不带后缀的程序名，例如 <c>ffmpeg</c>。</param>
     /// <param name="vendorFileName">可选：上游发行包里的原始文件名（用户可不改名直接放进去）。</param>
     public static IReadOnlyList<string> ToolCandidates(
         string toolFolder, string baseName, string? vendorFileName = null)
@@ -83,7 +130,7 @@ public static class PlatformRuntime
             candidates.Add($"{toolFolder}/{RuntimeIdentifier}/{vendorFileName}");
         candidates.Add($"{toolFolder}/{RuntimeIdentifier}/{fileName}");
 
-        // 2) 不分子目录：上游原名，或 px-{rid} 扁平命名（pg0 早期就这么放）。
+        // 2) 不分子目录：上游原名，或 {name}-{rid} 扁平命名。
         if (!string.IsNullOrWhiteSpace(vendorFileName))
             candidates.Add($"{toolFolder}/{vendorFileName}");
         candidates.Add($"{toolFolder}/{baseName}-{RuntimeIdentifier}{ExecutableSuffix}");
@@ -107,7 +154,7 @@ public static class PlatformRuntime
     /// <param name="contentRoot">应用内容根目录（<c>appsettings.json</c> 所在目录）。</param>
     /// <param name="configuredPath">配置里的路径；可为绝对路径、相对内容根的路径或空。</param>
     /// <param name="toolFolder">工具目录，例如 <c>ExternalTools/pgSQL</c>。</param>
-    /// <param name="baseName">不带后缀的程序名，例如 <c>pg0</c>。</param>
+    /// <param name="baseName">不带后缀的程序名，例如 <c>ffmpeg</c>。</param>
     /// <param name="log">可选的诊断输出（会打印「没用配置里的路径，改用哪个」）。</param>
     /// <param name="vendorFileName">可选：上游发行包的原始文件名。</param>
     public static string? ResolveTool(

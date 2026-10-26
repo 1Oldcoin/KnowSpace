@@ -41,11 +41,11 @@ npm start
 ## 启动 / 退出顺序
 
 ```
-启动：pg0 → API → 轮询 ready 文件 → 轮询 /api/health → 创建窗口
+启动：API（便携库由 API 自己的启动流程拉起）→ 轮询 ready 文件 → 轮询 /api/health → 创建窗口
 退出：POST /api/desktop/shutdown → 等待 API 退出（最长 20s）→ 强制结束 → app.exit
 ```
 
-`ApplicationStopping` 只停止**由本次启动**拉起的 pg0，不会误停用户已有的外部 PostgreSQL。
+壳不知道数据库存在：便携 PostgreSQL 的 `initdb`、`pg_ctl start`、`CREATE EXTENSION vector` 全在 API 进程里做。`ApplicationStopping` 只停止**由本次启动**拉起的实例（`PortablePostgres:StopOnExit` 控制），不会误停用户已有的外部 PostgreSQL。
 
 ## 安全边界
 
@@ -95,7 +95,7 @@ resources\api\MyFirstMafAgent.Api.exe --stop-portable-postgres
 
 ### 已在真实安装环境下验证（阶段 10）
 
-静默安装 → 启动（sidecar 从 `resources\api` 拉起、`/api/health` 200、SPA 正常）→ 强杀进程留下 pg0 → 静默卸载：安装目录被删除干净、`postgres.exe` 全部退出、`%LOCALAPPDATA%\MyFirstMafAgentData`（`data`/`logs`/`pgsql`/`tools`）完整保留。
+静默安装 → 启动（sidecar 从 `resources\api` 拉起、`/api/health` 200、SPA 正常）→ 强杀进程留下 `postgres.exe` → 静默卸载：安装目录被删除干净、`postgres.exe` 归零、`%LOCALAPPDATA%\MyFirstMafAgentData`（含 `pgdata`、`pglogs`）完整保留。
 
 ### 已知环境限制（不是安装包的问题）
 
@@ -117,7 +117,7 @@ resources\api\MyFirstMafAgent.Api.exe --stop-portable-postgres
 ### 两个不能改的设计
 
 1. **`autoInstallOnAppQuit = false`**：本应用的 `before-quit` 会 `preventDefault()` 后走 `app.exit(0)`，那条路径**不会**执行安装器。所以只在用户确认后显式 `quitAndInstall(false, true)`。
-2. **安装前必须先停 API**：`installNow()` 的顺序固定为 `await beforeInstall()`（= `stopApi`，连带停 pg0）→ `markQuitting()` → `quitAndInstall()`。安装器要覆盖 `resources\api`，而便携 `postgres.exe` 会锁住目录。`beforeInstall` 抛错时绝不调安装器。
+2. **安装前必须先停 API**：`installNow()` 的顺序固定为 `await beforeInstall()`（= `stopApi`，连带停便携库）→ `markQuitting()` → `quitAndInstall()`。安装器要覆盖 `resources\api`，而随包的 `postgres.exe` 就在 `resources\api\ExternalTools\pgSQL\<rid>\bin` 下运行、会锁住目录。`beforeInstall` 抛错时绝不调安装器。
 
 ### 更新源优先级
 

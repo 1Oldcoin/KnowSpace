@@ -11,7 +11,7 @@ namespace MyFirstMafAgent.Api.Hosting;
 public static class InstallerArguments
 {
     /// <summary>
-    /// 停止便携数据库（pg0）后退出。卸载/升级时 <c>postgres.exe</c> 仍在运行会锁住程序目录，
+    /// 停止便携数据库后退出。卸载/升级时 <c>postgres.exe</c> 仍在运行会锁住程序目录，
     /// 导致安装器删除文件失败或残留。安装器在删除文件之前调用。
     /// </summary>
     public const string StopPortablePostgres = "--stop-portable-postgres";

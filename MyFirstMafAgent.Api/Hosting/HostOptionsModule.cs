@@ -122,14 +122,14 @@ public static class HostOptionsModule
                     && options.PurgeIntervalMinutes is >= 1 and <= 1440),
                 "Jobs: concurrency, lease, attempts, backoff, retention, queue cap and intervals must be valid.")
             .ValidateOnStart();
-        services.AddOptions<PortablePostgresOptions>()            .BindConfiguration(PortablePostgresOptions.SectionName)
+        services.AddOptions<PortablePostgresOptions>()
+            .BindConfiguration(PortablePostgresOptions.SectionName)
             .Validate(options => !options.Enabled
                 || (options.Port is >= 1024 and <= 65535
                     && options.StartupTimeoutSeconds is >= 10 and <= 900
-                    && !string.IsNullOrWhiteSpace(options.InstanceName)
                     && !string.IsNullOrWhiteSpace(options.Username)
                     && !string.IsNullOrWhiteSpace(options.Database)),
-                "PortablePostgres 的端口、超时、实例名、用户名与数据库名必须有效。")
+                "PortablePostgres 的端口、超时、用户名与数据库名必须有效。")
             .ValidateOnStart();
     }
 }

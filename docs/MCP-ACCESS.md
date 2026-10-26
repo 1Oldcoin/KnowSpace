@@ -1,5 +1,7 @@
 # 把本机知识库接给外部智能体（MCP 接入指南）
 
+> 📘 **对外整合版**：`docs/MCP-INTEGRATION-MANUAL.md` §2（含 Cursor / Claude Desktop 配置与排查顺序）。
+
 本文只讲一件事：**怎么让 Cursor、Claude Desktop 或自研 Agent 通过 MCP 使用本机的知识库**，以及它们被允许做什么。
 
 ---

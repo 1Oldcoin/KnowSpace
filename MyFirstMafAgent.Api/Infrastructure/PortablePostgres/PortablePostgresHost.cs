@@ -1,8 +1,9 @@
-using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
+using System.Diagnostics;
 using Microsoft.Extensions.Configuration;
 using MyFirstMafAgent.Api.Options;
 using Npgsql;
@@ -10,31 +11,61 @@ using Npgsql;
 namespace MyFirstMafAgent.Api.Infrastructure.PortablePostgres;
 
 /// <summary>
-/// 便携式 PostgreSQL（pg0）生命周期管理：
-/// 启动子进程 → 等待数据库就绪 → 确保目标数据库存在 → 启用 pgvector → 为 API 提供连接串。
-/// 应用退出时优雅停止数据库。
+/// 便携式 PostgreSQL 生命周期管理（全部在 .NET API 里做完）：
+/// 首次运行 <c>initdb</c> 建集群 → <c>pg_ctl start</c> 拉起 → 等待就绪 → 确保目标数据库存在
+/// → 启用 pgvector → 为 API 提供连接串；应用退出时 <c>pg_ctl stop</c>。
+///
+/// <para>
+/// 桌面壳（Electron）不参与这一步：它只负责启动 <c>MyFirstMafAgent.Api.exe</c>、等
+/// <c>/api/health</c> 返回 200、然后加载页面。数据库起不来时 API 起不来，健康检查也就永远不通过，
+/// 壳只需要把 API 的日志展示给用户。
+/// </para>
+///
+/// <para>
+/// 目录约定：
+/// <list type="bullet">
+///   <item>程序：<c>ExternalTools/pgSQL/{rid}/bin</c>（整棵 pgsql 树，含 <c>lib</c> / <c>share</c>）。</item>
+///   <item>数据：<c>{便携根目录}\pgdata</c>，首次启动时 initdb。</item>
+///   <item>日志：<c>{便携根目录}\pglogs\postgres.log</c>（**不能**放进数据目录，见
+///         <see cref="AppPaths.PostgresLogFolderName"/>）。</item>
+/// </list>
+/// </para>
 /// </summary>
 public sealed class PortablePostgresHost : IAsyncDisposable
 {
-    private readonly string _executablePath;
-    private readonly string _instanceName;
+    /// <summary>随包便携 PostgreSQL 的主版本；数据目录的主版本必须与之一致才能复用。</summary>
+    internal const string ExpectedMajorVersion = "17";
+
+    private const string PgCtlCommand = "pg_ctl";
+    private const string InitDbCommand = "initdb";
+    private const string PgVersionFileName = "PG_VERSION";
+    private const string PidFileName = "postmaster.pid";
+    private const string ServerLogFileName = "postgres.log";
+    private const string StartOutputFileName = "pgctl-start.out";
+    private const string StopOutputFileName = "pgctl-stop.out";
+    private const string InitDbOutputFileName = "pgctl-initdb.out";
+
+    private readonly string _binDirectory;
+    private readonly string _dataDirectory;
+    private readonly string _logDirectory;
     private readonly PortablePostgresOptions _options;
     private readonly Action<string>? _log;
     private readonly bool _startedByUs;
-    private Process? _process;
     private bool _stopped;
 
     private PortablePostgresHost(
-        string executablePath,
-        string instanceName,
+        string binDirectory,
+        string dataDirectory,
+        string logDirectory,
         int port,
         string database,
         PortablePostgresOptions options,
         bool startedByUs,
         Action<string>? log)
     {
-        _executablePath = executablePath;
-        _instanceName = instanceName;
+        _binDirectory = binDirectory;
+        _dataDirectory = dataDirectory;
+        _logDirectory = logDirectory;
         _options = options;
         _startedByUs = startedByUs;
         _log = log;
@@ -49,13 +80,104 @@ public sealed class PortablePostgresHost : IAsyncDisposable
 
     public string Database { get; }
 
+    /// <summary>PostgreSQL 数据目录（集群目录）。</summary>
+    public string DataDirectory => _dataDirectory;
+
+    /// <summary>服务器日志（<c>pg_ctl -l</c> 的输出）。</summary>
+    public string ServerLogPath => Path.Combine(_logDirectory, ServerLogFileName);
+
+    /// <summary>是否由本次进程启动（否则是复用上一次残留的实例，退出时不该停）。</summary>
+    public bool StartedByUs => _startedByUs;
+
     /// <summary>
-    /// 卸载/更新前同步停止便携数据库。安装器删除程序目录时，若 PostgreSQL 子进程仍在运行，
-    /// 会因为文件被占用而残留。此方法不依赖 API 主机，供安装器/卸载脚本直接调用。
-    /// <para>
-    /// 注意：当前应用内没有调用方（旧的 Velopack 钩子已移除），Electron 安装包的卸载钩子
-    /// 需要重新接上它，见 <c>docs/ROADMAP.md</c>。
-    /// </para>
+    /// 根据配置决定是否需要启动便携数据库。已存在外部连接串时直接返回 null。
+    /// </summary>
+    public static async Task<PortablePostgresHost?> StartAsync(
+        IConfiguration configuration,
+        string contentRoot,
+        Action<string>? log = null,
+        CancellationToken cancellationToken = default)
+    {
+        var options = configuration.GetSection(PortablePostgresOptions.SectionName)
+            .Get<PortablePostgresOptions>() ?? new PortablePostgresOptions();
+
+        if (!options.Enabled)
+        {
+            log?.Invoke("便携 PostgreSQL 已禁用。");
+            return null;
+        }
+
+        var configuredConnectionString = configuration.GetConnectionString("KnowledgeBase");
+        if (!string.IsNullOrWhiteSpace(configuredConnectionString) && options.RespectExternalConnectionString)
+        {
+            // 带上脱敏后的连接串：光说“检测到外部连接串”时，用户没法把它和紧接着的
+            // 连接失败对应起来（尤其当连接串来自 user secrets，appsettings 里什么都看不到）。
+            log?.Invoke("检测到外部数据库连接串，跳过便携 PostgreSQL："
+                + Persistence.ConnectionPreflight.Mask(configuredConnectionString));
+            return null;
+        }
+
+        EnsureNotElevated();
+
+        var rootFailures = new List<string>();
+        var portableRoot = ResolvePortableRoot(contentRoot, options, rootFailures)
+            ?? throw new InvalidOperationException(BuildNoWritableRootMessage(rootFailures));
+
+        // 走到「程序目录兜底」说明用户目录整片不可写（安全软件/受控文件夹访问），
+        // 数据因此跟着程序走：覆盖安装/删除程序目录会连带数据，必须让用户知情。
+        if (IsUnder(portableRoot, contentRoot))
+        {
+            log?.Invoke($"警告：用户数据目录不可写，便携数据库改用程序目录下的 {portableRoot}。"
+                + "该位置随程序目录一起被覆盖安装/删除，长期使用请把应用放进纯英文的自定义目录并配置 PortablePostgres:RootDirectory。");
+        }
+
+        var binDirectory = ResolvePostgresBinDirectory(contentRoot, options, log)
+            ?? throw new FileNotFoundException(BuildMissingDistributionMessage(contentRoot, options), options.BinDirectory);
+
+        var dataDirectory = ResolveDataDirectory(options, contentRoot, portableRoot);
+        var logDirectory = Path.Combine(portableRoot, AppPaths.PostgresLogFolderName);
+
+        Directory.CreateDirectory(dataDirectory);
+        Directory.CreateDirectory(logDirectory);
+
+        binDirectory = await EnsureRunnableBinDirectoryAsync(binDirectory, portableRoot, log, cancellationToken);
+
+        WarnAboutLegacyCluster(portableRoot, dataDirectory, log);
+
+        // 上一次进程异常退出时数据库可能仍在运行：优先复用，避免端口冲突和数据目录争用。
+        var runningPort = TryReadRunningInstancePort(dataDirectory);
+        if (runningPort is { } port && await CanConnectAsync(port, "postgres", options, cancellationToken))
+        {
+            log?.Invoke($"检测到已在运行的 PostgreSQL（端口 {port}，数据目录 {dataDirectory}），直接复用。");
+            var reused = new PortablePostgresHost(
+                binDirectory, dataDirectory, logDirectory, port, options.Database, options, startedByUs: false, log);
+            await reused.EnsureDatabaseAndVectorAsync(cancellationToken);
+            return reused;
+        }
+
+        await EnsureClusterInitializedAsync(binDirectory, dataDirectory, logDirectory, options, log, cancellationToken);
+
+        var freePort = FindAvailablePort(options.Port);
+        var host = new PortablePostgresHost(
+            binDirectory, dataDirectory, logDirectory, freePort, options.Database, options, startedByUs: true, log);
+
+        try
+        {
+            await host.StartServerAsync(cancellationToken);
+            await host.EnsureDatabaseAndVectorAsync(cancellationToken);
+            return host;
+        }
+        catch
+        {
+            await host.StopAsync(CancellationToken.None);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// 卸载/更新前同步停止便携数据库。安装器删除程序目录时，若 <c>postgres.exe</c> 仍在运行，
+    /// 会因为文件被占用而残留（Windows 上表现为“拒绝访问”，目录删不干净）。
+    /// 此方法不依赖 API 主机，供 NSIS 卸载钩子通过 <c>--stop-portable-postgres</c> 直接调用。
     /// </summary>
     public static void TryStopForUninstall(string contentRoot)
     {
@@ -64,34 +186,54 @@ public sealed class PortablePostgresHost : IAsyncDisposable
             var options = ReadOptionsFromAppSettings(contentRoot);
             if (options is null || !options.Enabled) return;
 
-            var pg0 = ResolveExecutableForStop(options, contentRoot);
-            if (pg0 is null) return;
+            var binDirectory = PlatformRuntime.ResolvePostgresBinDirectory(contentRoot, options.BinDirectory);
+            if (binDirectory is null)
+            {
+                Console.WriteLine($"[installer] 找不到便携 PostgreSQL（{PlatformRuntime.PortablePostgresFolder}），跳过停止。");
+                return;
+            }
 
-            using var process = new Process
+            var dataDirectory = TryFindExistingDataDirectory(options, contentRoot);
+            if (dataDirectory is null)
             {
-                StartInfo = new ProcessStartInfo
-                {
-                    FileName = pg0,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true
-                }
-            };
-            process.StartInfo.ArgumentList.Add("stop");
-            process.StartInfo.ArgumentList.Add("--name");
-            process.StartInfo.ArgumentList.Add(options.InstanceName);
-            process.Start();
-            process.StandardOutput.ReadToEnd();
-            process.StandardError.ReadToEnd();
-            if (!process.WaitForExit(TimeSpan.FromSeconds(30)))
+                Console.WriteLine("[installer] 没有找到便携 PostgreSQL 数据目录（可能从未启动过），跳过停止。");
+                return;
+            }
+
+            var pgCtl = Path.Combine(binDirectory, PlatformRuntime.WithSuffix(PgCtlCommand));
+            if (!File.Exists(pgCtl))
             {
-                try { process.Kill(entireProcessTree: true); } catch { /* 忽略 */ }
+                Console.WriteLine($"[installer] 缺少 {pgCtl}，跳过停止。");
+                return;
+            }
+
+            // 输出文件放在数据目录旁的 pglogs：%TEMP% 可能被安全软件或重定向策略拦掉。
+            var logDirectory = Path.Combine(Path.GetDirectoryName(dataDirectory)!, AppPaths.PostgresLogFolderName);
+            var outputFile = Path.Combine(logDirectory, "pgctl-uninstall.out");
+            try
+            {
+                Directory.CreateDirectory(logDirectory);
+
+                var result = PgProcessRunner.RunAsync(
+                    pgCtl,
+                    ["stop", "-D", dataDirectory, "-m", "fast", "-w", "-t", "60"],
+                    outputFile,
+                    TimeSpan.FromSeconds(90),
+                    CancellationToken.None).GetAwaiter().GetResult();
+
+                Console.WriteLine(result.Succeeded
+                    ? $"[installer] 便携 PostgreSQL 已停止（数据目录 {dataDirectory}）。"
+                    : $"[installer] pg_ctl stop 返回 {result.ExitCode}: {result.Output.Trim()}");
+            }
+            finally
+            {
+                TryDeleteFile(outputFile);
             }
         }
-        catch
+        catch (Exception exception)
         {
-            // 卸载钩子绝不能让卸载失败。
+            // 卸载钩子绝不能让卸载失败；但原因必须留在安装器日志里，否则现场无从排查。
+            Console.WriteLine($"[installer] 停止便携 PostgreSQL 失败：{exception.GetType().Name}: {exception.Message}");
         }
     }
 
@@ -116,286 +258,154 @@ public sealed class PortablePostgresHost : IAsyncDisposable
         }) ?? new PortablePostgresOptions();
     }
 
-    private static string? ResolveExecutableForStop(PortablePostgresOptions options, string contentRoot)
-    {
-        // 与正常启动走同一条解析链（配置路径 → 按 RID 自动定位），
-        // 否则「升级/卸载时停不掉旧的 pg0」会在非 Windows 平台上静默失效。
-        var resolved = PlatformRuntime.ResolveTool(
-            contentRoot, options.ExecutablePath, Pg0ToolFolder, Pg0BaseName,
-            vendorFileName: PlatformRuntime.Pg0VendorFileName);
-        if (resolved is not null) return resolved;
-
-        // 常规运行时 pg0 已被缓存到用户数据目录（安装目录可能已被升级替换）。
-        foreach (var cached in CachedExecutableCandidates())
-        {
-            if (File.Exists(cached)) return cached;
-        }
-
-        return null;
-    }
-
-    /// <summary>工具目录（相对内容根）。</summary>
-    private const string Pg0ToolFolder = "ExternalTools/pgSQL";
-
-    /// <summary>不带平台后缀的程序名。</summary>
-    private const string Pg0BaseName = "pg0";
-
     /// <summary>
-    /// 用户数据目录里的 pg0 缓存路径。
-    /// 第一个是当前平台的规范名；第二个是旧版（只有一个 Windows 包时）写入的文件名，
-    /// 升级上来的机器仍能复用它，不会重复解压 60 MB。
+    /// PostgreSQL 拒绝在提权进程里运行（<c>initdb</c> / <c>postgres</c> 检测到管理员令牌会直接退出：
+    /// <c>Execution of PostgreSQL by a user with administrative permissions is not permitted</c>）。
+    /// 安装器/快捷方式若带“以管理员身份运行”，数据库就永远起不来，所以在这里提前拦下并说清原因。
     /// </summary>
-    private static IEnumerable<string> CachedExecutableCandidates()
+    private static void EnsureNotElevated()
     {
-        var tools = Path.Combine(AppPaths.UserDataRoot, "tools");
-        yield return Path.Combine(tools, $"pg0-{PlatformRuntime.RuntimeIdentifier}{PlatformRuntime.ExecutableSuffix}");
+        if (!OperatingSystem.IsWindows()) return;
 
-        if (PlatformRuntime.RuntimeIdentifier == "win-x64")
-            yield return Path.Combine(tools, "pg0-windows-x86_64.exe");
-    }
-
-    /// <summary>
-    /// 根据配置决定是否需要启动便携数据库。已存在外部连接串时直接返回 null。
-    /// </summary>
-    public static async Task<PortablePostgresHost?> StartAsync(
-        IConfiguration configuration,
-        string contentRoot,
-        Action<string>? log = null,
-        CancellationToken cancellationToken = default)
-    {
-        var options = configuration.GetSection(PortablePostgresOptions.SectionName)
-            .Get<PortablePostgresOptions>() ?? new PortablePostgresOptions();
-
-        if (!options.Enabled)
-        {
-            log?.Invoke("便携 PostgreSQL 已禁用。");
-            return null;
-        }
-
-        var configuredConnectionString = configuration.GetConnectionString("KnowledgeBase");
-        if (!string.IsNullOrWhiteSpace(configuredConnectionString) && options.RespectExternalConnectionString)
-        {
-            log?.Invoke("检测到外部数据库连接串，跳过便携 PostgreSQL。");
-            return null;
-        }
-
-        var portableRoot = ResolvePortableRoot()
-            ?? throw new InvalidOperationException(
-                "找不到可写的纯英文目录用于运行便携 PostgreSQL。"
-                + AppPaths.BuildLocationAdvice() + "。"
-                + "已尝试的目录：" + string.Join("；", PortableRootFailures)
-                + "。也可以改用外部 PostgreSQL（配置 ConnectionStrings:KnowledgeBase）。");
-
-        var executable = ResolveExecutable(options, contentRoot, portableRoot, log);
-
-        // 上一次进程异常退出时数据库可能仍在运行：优先复用，避免重复解压/占用端口。
-        var running = await TryGetRunningInstanceAsync(executable, options.InstanceName, cancellationToken);
-        if (running is { } instance)
-        {
-            log?.Invoke($"检测到已运行的 PostgreSQL 实例 '{options.InstanceName}'，端口 {instance.Port}。");
-            var reused = new PortablePostgresHost(
-                executable, options.InstanceName, instance.Port, options.Database, options, startedByUs: false, log);
-            await reused.EnsureDatabaseAndVectorAsync(cancellationToken);
-            return reused;
-        }
-
-        var dataDirectory = ResolveDataDirectory(options, contentRoot, portableRoot);
-        Directory.CreateDirectory(dataDirectory);
-
-        var port = FindAvailablePort(options.Port);
-        var process = StartProcess(executable, options, port, dataDirectory, log);
-
-        var host = new PortablePostgresHost(
-            executable, options.InstanceName, port, options.Database, options, startedByUs: true, log)
-        {
-            _process = process
-        };
-
+        bool elevated;
         try
         {
-            await WaitUntilReadyAsync(process, port, options, cancellationToken);
-            await host.EnsureDatabaseAndVectorAsync(cancellationToken);
-            return host;
+            using var identity = WindowsIdentity.GetCurrent();
+            elevated = new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
         }
-        catch
+        catch (Exception exception) when (exception is UnauthorizedAccessException or InvalidOperationException)
         {
-            await host.StopAsync(CancellationToken.None);
-            throw;
+            return;
         }
+
+        if (!elevated) return;
+
+        throw new InvalidOperationException(
+            "当前进程以管理员权限运行，便携 PostgreSQL 无法启动（initdb/postgres 会拒绝提权令牌："
+            + "Execution of PostgreSQL by a user with administrative permissions is not permitted）。"
+            + "请以普通用户身份启动本程序；如果确实需要提权，请改用外部 PostgreSQL 并配置 ConnectionStrings:KnowledgeBase。");
     }
 
-    private static readonly List<string> PortableRootFailures = new();
-
     /// <summary>
-    /// 返回一个纯 ASCII 且可写的产品根目录（pg0 在非 ASCII 路径下无法工作）。
-    /// 依次尝试 %LOCALAPPDATA%\MyFirstMafAgentData、%TEMP%、%ProgramData%、用户主目录。
+    /// 返回一个可写的便携根目录。纯 ASCII 路径优先（PostgreSQL 官方建议数据目录无中文、无空格），
+    /// 顺序见 <see cref="AppPaths.PortableDataRootCandidates"/>：用户数据目录 → 临时目录 →
+    /// 公共程序数据 → 用户主目录 → **程序目录下的 App_Data（便携兜底）**。
+    ///
+    /// <para>
+    /// 配置了 <see cref="PortablePostgresOptions.RootDirectory"/> 时只认配置值，不再回落，
+    /// 否则用户明明指定了目录、程序却悄悄跑到别处，数据会「凭空消失」。
+    /// </para>
     /// </summary>
-    private static string? ResolvePortableRoot()
+    private static string? ResolvePortableRoot(
+        string contentRoot,
+        PortablePostgresOptions options,
+        List<string> failures)
     {
-        var candidates = new[]
+        if (!string.IsNullOrWhiteSpace(options.RootDirectory))
         {
-            AppPaths.UserDataRoot,
-            Path.Combine(Path.GetTempPath(), AppPaths.ProductFolderName),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), AppPaths.ProductFolderName),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "." + AppPaths.ProductFolderName.ToLowerInvariant())
-        };
+            var configured = PlatformRuntime.ToAbsolute(contentRoot, options.RootDirectory);
 
-        foreach (var candidate in candidates)
-        {
-            if (string.IsNullOrWhiteSpace(candidate)) continue;
-            if (!IsAsciiPath(candidate))
+            // 数据目录必须是纯 ASCII（Windows 版 PostgreSQL 的硬限制，见 EnsureAsciiDataPath）。
+            EnsureAsciiDataPath(configured, "PortablePostgres:RootDirectory");
+
+            var configuredError = TryCreateWritableDirectory(configured);
+            if (configuredError is not null)
             {
-                PortableRootFailures.Add($"{candidate}（路径含非 ASCII 字符）");
+                throw new InvalidOperationException(
+                    $"PortablePostgres:RootDirectory 指向的目录不可写：{configured}（{configuredError}）。"
+                    + AppPaths.BuildLocationAdvice() + "。");
+            }
+
+            return configured;
+        }
+
+        foreach (var candidate in AppPaths.PortableDataRootCandidates(contentRoot))
+        {
+            if (!AppPaths.IsAsciiPath(candidate))
+            {
+                failures.Add($"{candidate}（路径含非 ASCII 字符，见下方说明）");
                 continue;
             }
 
             var error = TryCreateWritableDirectory(candidate);
             if (error is null) return candidate;
-            PortableRootFailures.Add($"{candidate}（{error}）");
+
+            failures.Add($"{candidate}（{error}）");
         }
 
         return null;
     }
 
-    private static string ResolveExecutable(
-        PortablePostgresOptions options,
-        string contentRoot,
-        string portableRoot,
-        Action<string>? log)
-    {
-        var source = PlatformRuntime.ResolveTool(
-                contentRoot, options.ExecutablePath, Pg0ToolFolder, Pg0BaseName, log,
-                PlatformRuntime.Pg0VendorFileName)
-            ?? throw new FileNotFoundException(BuildMissingExecutableMessage(contentRoot, options), options.ExecutablePath);
-
-        // pg0 启动的 postgres.exe 会继承工作目录，而 pg0 自身也会在 exe 同目录写入运行文件。
-        // 如果直接使用程序目录里的 pg0：
-        //   1. 安装路径含中文时 pg0 会抛 os error 5；
-        //   2. postgres 子进程会锁住安装目录，导致升级/卸载时报“拒绝访问”。
-        // 因此统一把 pg0 复制到用户数据目录（纯 ASCII、可写）后再运行。
-        var cacheDirectory = Path.Combine(portableRoot, "tools");
-        if (IsUnder(source, cacheDirectory))
-        {
-            PlatformRuntime.EnsureExecutable(source);
-            return source;
-        }
-
-        if (!options.CacheExecutableInLocalAppData)
-        {
-            PlatformRuntime.EnsureExecutable(source);
-            return source;
-        }
-
-        var cacheError = TryCreateWritableDirectory(cacheDirectory);
-        if (cacheError is not null)
-        {
-            throw new InvalidOperationException(
-                $"应用安装路径包含非 ASCII 字符（{source}），pg0 无法在该路径下运行，"
-                + $"且无法建立缓存目录 {cacheDirectory}（{cacheError}）。"
-                + AppPaths.BuildLocationAdvice() + "。"
-                + "也可以改用外部 PostgreSQL（配置 ConnectionStrings:KnowledgeBase）。");
-        }
-
-        var target = Path.Combine(
-            cacheDirectory, $"pg0-{PlatformRuntime.RuntimeIdentifier}{PlatformRuntime.ExecutableSuffix}");
-        var sourceInfo = new FileInfo(source);
-
-        if (!File.Exists(target)
-            || new FileInfo(target).Length != sourceInfo.Length
-            || File.GetLastWriteTimeUtc(target) != sourceInfo.LastWriteTimeUtc)
-        {
-            var temp = target + ".tmp";
-            try
-            {
-                // 用流复制并重试：首次运行时安全软件可能正在扫描 60MB 的 exe，
-                // File.Copy 会立刻抛 UnauthorizedAccessException，稍后重试通常可成功。
-                CopyWithRetry(source, temp, log);
-                File.Move(temp, target, overwrite: true);
-                // Unix 上复制会丢掉 +x 位，不补上的话 Process.Start 直接 Permission denied。
-                PlatformRuntime.EnsureExecutable(target);
-                log?.Invoke($"已将 pg0 缓存到 {target}。");
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-            {
-                TryDelete(temp);
-                if (!File.Exists(target))
-                    throw new InvalidOperationException(
-                        $"无法把 pg0 复制到 {target}，可能被安全软件拦截。"
-                        + AppPaths.BuildLocationAdvice() + "，"
-                        + "或在安全软件中放行本程序后重试。原始路径：" + source,
-                        exception);
-                log?.Invoke($"更新 pg0 缓存失败，继续使用已有缓存：{exception.Message}");
-            }
-        }
-
-        return target;
-    }
-
     /// <summary>
-    /// 缺少 pg0 时的报错文案。
+    /// Windows 版 PostgreSQL 把路径按本地代码页转换，**非 ASCII 的数据目录根本初始化不了**：
+    /// 实测 <c>initdb -D "C:\Word\中文目录\pgdata"</c> 会先把路径打成乱码
+    /// （<c>C:/Word/ͨ���ļ�����/...</c>），然后在 post-bootstrap 阶段报
+    /// <c>FATAL: invalid byte sequence for encoding "UTF8": 0xd3 0xc3</c> 并回滚。
     ///
     /// <para>
-    /// 这里必须写出「当前平台 + 应该放哪个文件 + 去哪里下载」，
-    /// 否则跨平台发布的包一旦漏了二进制，用户只会看到
-    /// “找不到便携数据库程序”，完全不知道要补什么。
+    /// 注意这条限制只针对**数据目录**：便携 PostgreSQL 的程序本体放在中文目录下是可以跑的
+    /// （进程创建走 UTF-16，不经过代码页转换）。Linux / macOS 上 UTF-8 路径正常，不做限制。
     /// </para>
     /// </summary>
-    private static string BuildMissingExecutableMessage(string contentRoot, PortablePostgresOptions options)
+    private static void EnsureAsciiDataPath(string directory, string source)
     {
-        var candidates = PlatformRuntime.ToolCandidates(Pg0ToolFolder, Pg0BaseName, PlatformRuntime.Pg0VendorFileName)
-            .Select(relative => "  - " + PlatformRuntime.ToAbsolute(contentRoot, relative));
+        if (!OperatingSystem.IsWindows()) return;
+        if (AppPaths.IsAsciiPath(directory)) return;
 
-        var configured = string.IsNullOrWhiteSpace(options.ExecutablePath)
-            ? "（未配置，按当前平台自动定位）"
-            : $"（配置值：{options.ExecutablePath}）";
+        throw new InvalidOperationException(
+            $"{source} 必须是纯 ASCII 路径，当前为 {directory}。"
+            + "Windows 版 PostgreSQL 按本地代码页转换路径，非 ASCII 数据目录会在 initdb 阶段报 "
+            + "invalid byte sequence for encoding \"UTF8\"（实测）。"
+            + "请改成纯英文路径（例如 D:\\Apps\\MyFirstMafAgentData），或改用外部 PostgreSQL：ConnectionStrings:KnowledgeBase。");
+    }
 
-        var vendorHint = PlatformRuntime.Pg0VendorFileName is { } vendorName
-            ? $"下载 {vendorName} 后直接放到 {Pg0ToolFolder}/{PlatformRuntime.RuntimeIdentifier}/ （不用改名）"
-            : $"上游暂无 {PlatformRuntime.RuntimeIdentifier} 的发行包，请改用外部 PostgreSQL";
+    /// <summary>所有候选目录都不可用时的报错文案：先讲约束，再逐条列出实测失败原因。</summary>
+    private static string BuildNoWritableRootMessage(IReadOnlyList<string> failures)
+    {
+        var details = string.Join(
+            Environment.NewLine,
+            failures.Select(static failure => "  - " + failure));
 
         return
-            $"找不到便携数据库程序：当前平台 {PlatformRuntime.Describe()}（RID {PlatformRuntime.RuntimeIdentifier}）。"
+            "找不到可写且路径为纯英文的目录来运行便携 PostgreSQL。"
+            + AppPaths.BuildLocationAdvice() + "。"
+            + Environment.NewLine + "已尝试的目录：" + Environment.NewLine + details
+            + Environment.NewLine + "为什么要求纯英文：Windows 版 PostgreSQL 按本地代码页转换路径，"
+            + "中文数据目录在 initdb 阶段就会报 invalid byte sequence for encoding \"UTF8\" 并回滚（实测）。"
+            + Environment.NewLine + "排查建议："
+            + Environment.NewLine + "  1) 把便携数据库的数据目录放到纯英文路径，例如 D:\\Apps\\MyFirstMafAgentData"
+            + "（程序目录可以含中文，数据目录不行）；"
+            + Environment.NewLine + "  2) 目录本身可写但程序仍被拒绝时，通常是安全软件（火绒/360 的文件防护、勒索防护）"
+            + "或 Windows「受控文件夹访问」拦下了未签名 exe：把 MyFirstMafAgent.Api.exe（或整个应用目录）加入白名单后重试；"
+            + Environment.NewLine + "  3) 也可以显式指定一个纯英文可写目录：PortablePostgres:RootDirectory；"
+            + Environment.NewLine + "  4) 或者改用外部 PostgreSQL：配置 ConnectionStrings:KnowledgeBase（容器/已有实例都推荐这种方式）。";
+    }
+
+    private static string? ResolvePostgresBinDirectory(
+        string contentRoot, PortablePostgresOptions options, Action<string>? log)
+        => PlatformRuntime.ResolvePostgresBinDirectory(contentRoot, options.BinDirectory, log);
+
+    /// <summary>
+    /// 缺少便携 PostgreSQL 时的报错文案：写清当前平台、全部候选目录、包里应该有什么、
+    /// 以及「改用外部数据库」的替代方案——而不是一句“找不到文件”。
+    /// </summary>
+    private static string BuildMissingDistributionMessage(string contentRoot, PortablePostgresOptions options)
+    {
+        var candidates = PlatformRuntime.PostgresBinCandidates()
+            .Select(relative => "  - " + PlatformRuntime.ToAbsolute(contentRoot, relative) + Path.DirectorySeparatorChar + PlatformRuntime.PostgresExecutableName);
+
+        var configured = string.IsNullOrWhiteSpace(options.BinDirectory)
+            ? "（未配置，按当前平台自动定位）"
+            : $"（配置值：{options.BinDirectory}）";
+
+        return
+            $"找不到便携 PostgreSQL：当前平台 {PlatformRuntime.Describe()}（RID {PlatformRuntime.RuntimeIdentifier}）。"
             + "已尝试：" + Environment.NewLine + string.Join(Environment.NewLine, candidates) + Environment.NewLine
-            + $"请从 {PlatformRuntime.Pg0ReleasesUrl} {vendorHint}{configured}；"
+            + "便携 PostgreSQL 必须是**整棵目录树**（含 bin / lib / share，相对位置不能拆，"
+            + "只拷 bin 里的 exe 会报 0xC0000135 找不到 DLL）。"
+            + Environment.NewLine + $"请把对应平台的 pgsql 目录放到 {PlatformRuntime.PortablePostgresFolder}/{PlatformRuntime.RuntimeIdentifier}/ 下"
+            + $"（可用 scripts\\Download-ExternalTools.ps1 -Target pgsql 装配）{configured}；"
             + "也可以用 ConnectionStrings__KnowledgeBase 指向已有 PostgreSQL（容器部署推荐这种方式）。";
-    }
-
-    private static void CopyWithRetry(string source, string target, Action<string>? log)
-    {
-        Exception? lastError = null;
-        for (var attempt = 1; attempt <= 3; attempt++)
-        {
-            try
-            {
-                using var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read);
-                using var output = new FileStream(target, FileMode.Create, FileAccess.Write, FileShare.None);
-                input.CopyTo(output);
-                return;
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-            {
-                lastError = exception;
-                if (attempt < 3)
-                {
-                    log?.Invoke($"复制 pg0 第 {attempt} 次失败，稍后重试：{exception.Message}");
-                    Thread.Sleep(800 * attempt);
-                }
-            }
-        }
-
-        throw lastError!;
-    }
-
-    private static void TryDelete(string path)
-    {
-        try
-        {
-            if (File.Exists(path)) File.Delete(path);
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-        {
-            // 清理失败不影响主流程。
-        }
     }
 
     private static string ResolveDataDirectory(
@@ -403,142 +413,362 @@ public sealed class PortablePostgresHost : IAsyncDisposable
         string contentRoot,
         string portableRoot)
     {
-        string directory;
-        if (!string.IsNullOrWhiteSpace(options.DataDirectory))
-        {
-            directory = Path.IsPathRooted(options.DataDirectory)
-                ? options.DataDirectory
-                : Path.GetFullPath(Path.Combine(contentRoot, options.DataDirectory.Replace('/', Path.DirectorySeparatorChar)));
-        }
-        else
-        {
-            directory = Path.Combine(portableRoot, "pgsql", SanitizeName(options.InstanceName));
-        }
+        var directory = string.IsNullOrWhiteSpace(options.DataDirectory)
+            ? Path.Combine(portableRoot, AppPaths.PostgresDataFolderName)
+            : PlatformRuntime.ToAbsolute(contentRoot, options.DataDirectory);
 
-        // pg0 读取中文路径下的运行输出会报 "stream did not contain valid UTF-8"，
-        // 因此数据目录同样必须是纯 ASCII；配置了中文路径时回落到可写根目录。
-        if (!IsAsciiPath(directory))
-        {
-            var fallback = Path.Combine(portableRoot, "pgsql", SanitizeName(options.InstanceName));
-            if (IsAsciiPath(fallback)) return fallback;
-
-            throw new InvalidOperationException(
-                $"便携 PostgreSQL 的数据目录必须是纯英文路径，当前为 {directory}。"
-                + "请修改 PortablePostgres:DataDirectory 或改用外部 PostgreSQL。");
-        }
+        EnsureAsciiDataPath(directory, "PortablePostgres:DataDirectory");
 
         return directory;
     }
 
-    private static Process StartProcess(
-        string executable,
-        PortablePostgresOptions options,
-        int port,
-        string dataDirectory,
-        Action<string>? log)
+    /// <summary>
+    /// 确保 <c>bin</c> 目录位于一个 PostgreSQL 能正常工作的路径上。
+    ///
+    /// <para>
+    /// Windows 版 PostgreSQL 的 <c>initdb</c> 在 post-bootstrap 阶段会把自己所在的路径按**本地代码页**
+    /// 拼进子进程命令行，再由 <c>postgres.exe</c> 按 UTF8 解析。安装目录含中文时这串字节直接非法：
+    /// 实测 <c>initdb</c> 报 <c>FATAL: invalid byte sequence for encoding "UTF8": 0xd3 0xc3</c>
+    /// 并回滚整个集群（0xd3 0xc3 正是“用”的 GBK 编码）。把整棵树放到纯 ASCII 目录后同样的命令一次通过。
+    /// </para>
+    ///
+    /// <para>
+    /// 所以：路径含非 ASCII 时先把整棵 pgsql 树镜像到纯英文的便携根目录再运行。
+    /// 附带好处：<c>postgres.exe</c> 不再锁住安装目录，覆盖安装/升级不会被“文件被占用”挡住
+    /// （旧实现把单个 pg0 复制到 LOCALAPPDATA 也是这个原因）。
+    /// </para>
+    /// </summary>
+    private static async Task<string> EnsureRunnableBinDirectoryAsync(
+        string binDirectory, string portableRoot, Action<string>? log, CancellationToken cancellationToken)
     {
-        var startInfo = new ProcessStartInfo
+        if (!OperatingSystem.IsWindows() || AppPaths.IsAsciiPath(binDirectory)) return binDirectory;
+
+        var sourceRoot = Path.GetDirectoryName(binDirectory.TrimEnd(Path.DirectorySeparatorChar));
+        if (string.IsNullOrEmpty(sourceRoot))
+            throw new InvalidOperationException($"无法从 {binDirectory} 推导便携 PostgreSQL 根目录。");
+
+        var targetRoot = Path.Combine(portableRoot, "pgsql");
+        if (!AppPaths.IsAsciiPath(targetRoot))
         {
-            FileName = executable,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            WorkingDirectory = Path.GetDirectoryName(dataDirectory) ?? Path.GetDirectoryName(executable) ?? AppContext.BaseDirectory
-        };
-        startInfo.ArgumentList.Add("start");
-        startInfo.ArgumentList.Add("--name");
-        startInfo.ArgumentList.Add(options.InstanceName);
-        startInfo.ArgumentList.Add("--port");
-        startInfo.ArgumentList.Add(port.ToString());
-        startInfo.ArgumentList.Add("--data-dir");
-        startInfo.ArgumentList.Add(dataDirectory);
-        startInfo.ArgumentList.Add("--username");
-        startInfo.ArgumentList.Add(options.Username);
-        startInfo.ArgumentList.Add("--password");
-        startInfo.ArgumentList.Add(options.Password);
-        startInfo.ArgumentList.Add("--database");
-        startInfo.ArgumentList.Add(options.Database);
+            throw new InvalidOperationException(
+                $"安装路径含非 ASCII 字符（{binDirectory}），而便携 PostgreSQL 在 Windows 上无法从这样的路径启动"
+                + "（initdb 会报 invalid byte sequence for encoding \"UTF8\"）。"
+                + $"同时便携根目录 {targetRoot} 也不是纯英文，无法用于镜像。"
+                + "请把 PortablePostgres:RootDirectory 配置成纯英文可写目录（例如 D:\\Apps\\MyFirstMafAgentData）。");
+        }
 
-        var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
-        process.OutputDataReceived += (_, e) => LogLine(options, log, e.Data);
-        process.ErrorDataReceived += (_, e) => LogLine(options, log, e.Data);
+        if (!IsMirrorUpToDate(sourceRoot, targetRoot))
+        {
+            log?.Invoke($"安装路径含非 ASCII 字符，正在把便携 PostgreSQL 镜像到纯英文目录 {targetRoot}（首次约 65 MB）...");
+            await MirrorDirectoryAsync(sourceRoot, targetRoot, cancellationToken);
+            log?.Invoke("便携 PostgreSQL 镜像完成。");
+        }
 
-        log?.Invoke($"启动便携 PostgreSQL：端口 {port}，数据目录 {dataDirectory}");
-        if (!process.Start())
-            throw new InvalidOperationException("无法启动便携 PostgreSQL 进程。");
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
-        return process;
+        return Path.Combine(targetRoot, "bin");
     }
 
-    private static void LogLine(PortablePostgresOptions options, Action<string>? log, string? line)
+    /// <summary>用包内 <c>VERSION.txt</c> 当指纹：版本变了才重新镜像，日常启动零拷贝。</summary>
+    private static bool IsMirrorUpToDate(string sourceRoot, string targetRoot)
     {
-        if (string.IsNullOrWhiteSpace(line)) return;
-        log?.Invoke($"pg0: {line}");
+        if (!File.Exists(Path.Combine(targetRoot, "bin", PlatformRuntime.PostgresExecutableName))) return false;
+
+        var sourceVersion = TryReadText(Path.Combine(sourceRoot, "VERSION.txt"), 512);
+        if (sourceVersion is null) return true; // 没有版本戳就认为已镜像，避免每次启动都拷 65 MB。
+
+        return string.Equals(sourceVersion, TryReadText(Path.Combine(targetRoot, "VERSION.txt"), 512), StringComparison.Ordinal);
     }
 
-    private static async Task WaitUntilReadyAsync(
-        Process process,
-        int port,
+    private static async Task MirrorDirectoryAsync(
+        string sourceRoot, string targetRoot, CancellationToken cancellationToken)
+    {
+        foreach (var source in Directory.EnumerateFiles(sourceRoot, "*", SearchOption.AllDirectories))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var relative = Path.GetRelativePath(sourceRoot, source);
+            var target = Path.Combine(targetRoot, relative);
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+
+            var sourceInfo = new FileInfo(source);
+            if (File.Exists(target))
+            {
+                var targetInfo = new FileInfo(target);
+                if (targetInfo.Length == sourceInfo.Length
+                    && targetInfo.LastWriteTimeUtc == sourceInfo.LastWriteTimeUtc)
+                {
+                    continue;
+                }
+            }
+
+            // 安全软件正在扫描时 File.Copy 可能瞬间抛 UnauthorizedAccessException，重试通常能过。
+            for (var attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    File.Copy(source, target, overwrite: true);
+                    break;
+                }
+                catch (Exception exception) when (attempt < 3
+                    && exception is IOException or UnauthorizedAccessException)
+                {
+                    await Task.Delay(300 * attempt, cancellationToken);
+                }
+            }
+        }
+    }
+
+    private static string? TryFindExistingDataDirectory(PortablePostgresOptions options, string contentRoot)
+    {
+        if (!string.IsNullOrWhiteSpace(options.DataDirectory))
+        {
+            var configured = PlatformRuntime.ToAbsolute(contentRoot, options.DataDirectory);
+            return File.Exists(Path.Combine(configured, PgVersionFileName)) ? configured : null;
+        }
+
+        if (!string.IsNullOrWhiteSpace(options.RootDirectory))
+        {
+            var path = Path.Combine(
+                PlatformRuntime.ToAbsolute(contentRoot, options.RootDirectory), AppPaths.PostgresDataFolderName);
+            return File.Exists(Path.Combine(path, PgVersionFileName)) ? path : null;
+        }
+
+        foreach (var root in AppPaths.PortableDataRootCandidates(contentRoot))
+        {
+            var path = Path.Combine(root, AppPaths.PostgresDataFolderName);
+            if (File.Exists(Path.Combine(path, PgVersionFileName))) return path;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// 旧版本（pg0，内置 PostgreSQL 18）留下的数据目录无法被 17.9 读取。
+    /// 不静默忽略：用户会以为“数据丢了”，必须说清是版本不兼容、原数据仍在原处。
+    /// </summary>
+    private static void WarnAboutLegacyCluster(string portableRoot, string dataDirectory, Action<string>? log)
+    {
+        if (File.Exists(Path.Combine(dataDirectory, PgVersionFileName))) return;
+
+        foreach (var legacy in new[]
+                 {
+                     Path.Combine(portableRoot, "pgsql", "myfirstmafagent"),
+                     Path.Combine(portableRoot, "pgsql")
+                 })
+        {
+            if (!File.Exists(Path.Combine(legacy, PgVersionFileName))) continue;
+
+            var version = TryReadText(Path.Combine(legacy, PgVersionFileName), 32) ?? "?";
+            log?.Invoke($"警告：检测到旧版便携数据库的数据目录 {legacy}（PostgreSQL {version}），"
+                + $"它是上一代内置数据库（PostgreSQL 18）的集群，当前随包版本是 {ExpectedMajorVersion}，跨大版本无法直接复用。"
+                + "该目录不会被删除或修改；如需迁移，请用旧版本自带的 pg_dump 导出后导入新库。");
+            return;
+        }
+    }
+
+    private static async Task EnsureClusterInitializedAsync(
+        string binDirectory,
+        string dataDirectory,
+        string logDirectory,
         PortablePostgresOptions options,
+        Action<string>? log,
         CancellationToken cancellationToken)
     {
-        var deadline = DateTime.UtcNow.AddSeconds(Math.Max(10, options.StartupTimeoutSeconds));
+        var versionFile = Path.Combine(dataDirectory, PgVersionFileName);
+        if (File.Exists(versionFile))
+        {
+            var version = (TryReadText(versionFile, 32) ?? string.Empty).Trim();
+            if (!string.Equals(version, ExpectedMajorVersion, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"数据目录 {dataDirectory} 是 PostgreSQL {version} 的集群，而随包便携数据库是 {ExpectedMajorVersion}。"
+                    + "跨大版本不能直接复用（PostgreSQL 没有向下兼容的数据目录格式）。"
+                    + "请改用旧版本迁移（pg_dump 导出 → 新库导入），或把 PortablePostgres:DataDirectory 指到一个空目录。");
+            }
+
+            return;
+        }
+
+        var initDb = Path.Combine(binDirectory, PlatformRuntime.WithSuffix(InitDbCommand));
+        if (!File.Exists(initDb))
+        {
+            throw new FileNotFoundException(
+                $"便携 PostgreSQL 缺少 {InitDbCommand}（{initDb}），无法创建数据库集群。"
+                + "请确认 ExternalTools/pgSQL/<rid> 是完整的 bin / lib / share 目录树。",
+                initDb);
+        }
+
+        if (Directory.EnumerateFileSystemEntries(dataDirectory).Any())
+        {
+            throw new InvalidOperationException(
+                $"数据目录 {dataDirectory} 非空但没有 PG_VERSION，不像是完整的 PostgreSQL 集群。"
+                + "这可能是一次失败的初始化留下的残留；确认里面没有需要的数据后，清空该目录再启动。");
+        }
+
+        log?.Invoke($"首次运行：正在初始化便携 PostgreSQL 集群（{dataDirectory}），通常需要 3~10 秒...");
+
+        // initdb 带 --auth=scram-sha-256 时会交互式要求输入超级用户密码；宿主进程没有 stdin，
+        // 直接跑会永久挂住，所以必须用 --pwfile 传密码，用完立刻删除。
+        // 文件放在日志目录（已确认可写）而不是 %TEMP%：临时目录可能被安全软件或重定向策略拦掉。
+        var passwordFile = Path.Combine(logDirectory, $"pg-initdb-{Guid.NewGuid():N}.pw");
+        try
+        {
+            await File.WriteAllTextAsync(passwordFile, options.Password, new UTF8Encoding(false), cancellationToken);
+
+            var result = await PgProcessRunner.RunAsync(
+                initDb,
+                [
+                    "-D", dataDirectory,
+                    "-U", options.Username,
+                    "--auth=scram-sha-256",
+                    "--encoding=UTF8",
+                    // 便携场景最怕客户端 locale 不一致：--locale=C 保证排序规则跨机器一致，
+                    // 否则 CREATE DATABASE ... TEMPLATE 可能报 collation 不兼容。中文内容照样存（UTF8）。
+                    "--locale=C",
+                    "--pwfile=" + passwordFile
+                ],
+                Path.Combine(logDirectory, InitDbOutputFileName),
+                TimeSpan.FromSeconds(Math.Max(60, options.StartupTimeoutSeconds)),
+                cancellationToken);
+
+            if (!result.Succeeded)
+            {
+                throw new InvalidOperationException(
+                    $"初始化便携 PostgreSQL 集群失败（initdb 退出码 {result.ExitCode}，数据目录 {dataDirectory}）。"
+                    + Environment.NewLine + TrimOutput(result.Output)
+                    + Environment.NewLine + "常见原因：目标目录不可写（安全软件/受控文件夹访问）、路径含特殊字符、"
+                    + "或以管理员权限运行。");
+            }
+
+            log?.Invoke("便携 PostgreSQL 集群初始化完成。");
+        }
+        finally
+        {
+            TryDeleteFile(passwordFile);
+        }
+    }
+
+    private async Task StartServerAsync(CancellationToken cancellationToken)
+    {
+        var pgCtl = Path.Combine(_binDirectory, PlatformRuntime.WithSuffix(PgCtlCommand));
+        if (!File.Exists(pgCtl))
+            throw new FileNotFoundException($"便携 PostgreSQL 缺少 {PgCtlCommand}（{pgCtl}）。", pgCtl);
+
+        _log?.Invoke($"启动便携 PostgreSQL：端口 {Port}，数据目录 {_dataDirectory}");
+        _log?.Invoke($"PostgreSQL 日志：{ServerLogPath}");
+
+        // -w 等就绪、-t 是等待上限；端口与监听地址用 -o 传给 postgres，
+        // 这样不依赖 postgresql.conf 里 initdb 写下的 port=5432（用户机上常被占用）。
+        var result = await PgProcessRunner.RunAsync(
+            pgCtl,
+            [
+                "start",
+                "-D", _dataDirectory,
+                "-l", ServerLogPath,
+                "-w",
+                "-t", Math.Max(30, _options.StartupTimeoutSeconds).ToString(),
+                "-o", $"-p {Port} -c listen_addresses=127.0.0.1"
+            ],
+            Path.Combine(_logDirectory, StartOutputFileName),
+            TimeSpan.FromSeconds(Math.Max(30, _options.StartupTimeoutSeconds) + 30),
+            cancellationToken);
+
+        if (!result.Succeeded)
+            throw new InvalidOperationException(BuildStartFailureMessage(result));
+
+        await WaitUntilReadyAsync(cancellationToken);
+    }
+
+    private string BuildStartFailureMessage(PgProcessRunner.Result result)
+    {
+        var tail = PgProcessRunner.ReadTail(ServerLogPath);
+        var ctlOutput = TrimOutput(result.Output);
+
+        var builder = new StringBuilder();
+        builder.Append(result.TimedOut
+            ? $"启动便携 PostgreSQL 超时（{_options.StartupTimeoutSeconds} 秒，端口 {Port}）。"
+            : $"启动便携 PostgreSQL 失败（pg_ctl 退出码 {result.ExitCode}，端口 {Port}）。");
+
+        if (ctlOutput.Length > 0)
+            builder.Append(Environment.NewLine).Append("pg_ctl 输出：").Append(Environment.NewLine).Append(ctlOutput);
+
+        if (tail.Length > 0)
+            builder.Append(Environment.NewLine).Append("服务器日志末尾：").Append(Environment.NewLine).Append(tail);
+
+        builder.Append(Environment.NewLine)
+            .Append("常见原因：")
+            .Append(Environment.NewLine)
+            .Append("  1) 端口被占用。PostgreSQL 用 SO_EXCLUSIVEADDRUSE 绑端口，此时日志里写的是 "
+                + "\"could not bind IPv4 address \\\"127.0.0.1\\\": Permission denied\" 而**不是** address already in use，"
+                + "先 netstat -ano | findstr :").Append(Port).Append(" 看看谁占着；")
+            .Append(Environment.NewLine)
+            .Append("  2) 以管理员权限运行（PostgreSQL 拒绝提权进程）；")
+            .Append(Environment.NewLine)
+            .Append("  3) 数据目录不可写，或被安全软件的勒索防护锁住；")
+            .Append(Environment.NewLine)
+            .Append("  4) pgsql 目录树不完整（bin / lib / share 必须齐全）。")
+            .Append(Environment.NewLine)
+            .Append($"日志目录：{_logDirectory}");
+
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// <c>pg_ctl -w</c> 已经等到“就绪”，这里再用真实连接确认一次：
+    /// 只有能跑通一条 SQL，才算数据库真的可用。
+    /// </summary>
+    private async Task WaitUntilReadyAsync(CancellationToken cancellationToken)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(Math.Max(10, _options.StartupTimeoutSeconds));
         Exception? lastError = null;
-        int? exitCode = null;
+        var attempts = 0;
 
         while (DateTime.UtcNow < deadline)
         {
             cancellationToken.ThrowIfCancellationRequested();
-
-            // pg0 拉起 PostgreSQL 后会立即退出（数据库转成后台服务），
-            // 因此进程退出本身不代表失败：只有非 0 退出码才是真失败。
-            if (exitCode is null && process.HasExited)
-            {
-                exitCode = process.ExitCode;
-                if (exitCode != 0)
-                {
-                    throw new InvalidOperationException(
-                        $"便携 PostgreSQL 启动失败（pg0 退出码 {exitCode}）。"
-                        + $"pg0 的安装目录为 {Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".pg0")}，"
-                        + "若日志出现 \"os error 5\"，通常是杀毒软件/受控文件夹访问拦截了该目录或数据目录的写入，"
-                        + "也可能是应用安装在非 ASCII（中文）路径下。"
-                        + $"日志目录：{AppPaths.LogsDirectory}",
-                        lastError);
-                }
-            }
+            attempts++;
 
             try
             {
-                var builder = new NpgsqlConnectionStringBuilder(BuildConnectionString(port, "postgres", options))
-                {
-                    Timeout = 3,
-                    Pooling = false
-                };
-                await using var connection = new NpgsqlConnection(builder.ConnectionString);
+                await using var connection = new NpgsqlConnection(BuildProbeConnectionString("postgres"));
                 await connection.OpenAsync(cancellationToken);
                 await using var command = connection.CreateCommand();
                 command.CommandText = "SELECT 1";
                 await command.ExecuteScalarAsync(cancellationToken);
+                _log?.Invoke($"便携 PostgreSQL 已就绪：127.0.0.1:{Port}");
                 return;
             }
             catch (Exception exception) when (exception is NpgsqlException or SocketException or TimeoutException)
             {
                 lastError = exception;
+
+                // 进程已经没了就不用再等到超时：直接把服务器日志的最后几行抛出来。
+                if (attempts > 3 && TryReadRunningInstancePort(_dataDirectory) is null)
+                {
+                    var logTail = PgProcessRunner.ReadTail(ServerLogPath);
+                    throw new InvalidOperationException(
+                        $"便携 PostgreSQL 启动后立即退出（端口 {Port}）。"
+                        + (logTail.Length > 0
+                            ? Environment.NewLine + "服务器日志末尾：" + Environment.NewLine + logTail
+                            : string.Empty)
+                        + Environment.NewLine + $"日志目录：{_logDirectory}",
+                        lastError);
+                }
+
                 await Task.Delay(500, cancellationToken);
             }
         }
 
         throw new TimeoutException(
-            $"等待便携 PostgreSQL 就绪超时（{options.StartupTimeoutSeconds} 秒，端口 {port}）。",
+            $"等待便携 PostgreSQL 就绪超时（{_options.StartupTimeoutSeconds} 秒，端口 {Port}）。"
+            + (PgProcessRunner.ReadTail(ServerLogPath) is { Length: > 0 } tail
+                ? Environment.NewLine + "服务器日志末尾：" + Environment.NewLine + tail
+                : string.Empty),
             lastError);
     }
 
     private async Task EnsureDatabaseAndVectorAsync(CancellationToken cancellationToken)
     {
-        var adminConnectionString = BuildConnectionString(Port, "postgres", _options);
-        await using (var admin = new NpgsqlConnection(adminConnectionString))
+        await using (var admin = new NpgsqlConnection(BuildConnectionString(Port, "postgres", _options)))
         {
             await admin.OpenAsync(cancellationToken);
             await using var exists = admin.CreateCommand();
@@ -566,54 +796,23 @@ public sealed class PortablePostgresHost : IAsyncDisposable
         {
             await EnableVectorExtensionAsync(cancellationToken);
         }
-        catch (PostgresException exception) when (exception.SqlState == "0A000"
-            && exception.MessageText.Contains("vector", StringComparison.OrdinalIgnoreCase))
+        catch (PostgresException exception) when (exception.SqlState == "0A000")
         {
-            // 少数情况下扩展文件尚未安装：调用 pg0 自带安装命令后重试一次。
-            _log?.Invoke("pgvector 尚未安装，尝试调用 pg0 install-extension vector。");
-            await InstallVectorExtensionAsync(cancellationToken);
-            await EnableVectorExtensionAsync(cancellationToken);
+            throw new InvalidOperationException(
+                $"启用 pgvector 失败：数据库报告扩展不可用（{exception.MessageText}）。"
+                + "随包便携 PostgreSQL 应该自带 pgvector（lib/vector.dll 与 share/extension/vector.control）。"
+                + $"请检查 {_binDirectory} 的上一级目录里 lib 与 share 是否完整。", exception);
         }
     }
 
     private async Task EnableVectorExtensionAsync(CancellationToken cancellationToken)
     {
-        var connectionString = BuildConnectionString(Port, Database, _options);
-        await using var connection = new NpgsqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(BuildConnectionString(Port, Database, _options));
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = "CREATE EXTENSION IF NOT EXISTS vector;";
         await command.ExecuteNonQueryAsync(cancellationToken);
         _log?.Invoke($"pgvector 已启用（数据库 {Database}）。");
-    }
-
-    private async Task InstallVectorExtensionAsync(CancellationToken cancellationToken)
-    {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = _executablePath,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true
-        };
-        startInfo.ArgumentList.Add("install-extension");
-        startInfo.ArgumentList.Add("vector");
-        startInfo.ArgumentList.Add("--name");
-        startInfo.ArgumentList.Add(_instanceName);
-
-        using var process = Process.Start(startInfo)
-            ?? throw new InvalidOperationException("无法执行 pg0 install-extension。");
-        var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken);
-        var output = await outputTask;
-        var error = await errorTask;
-        if (process.ExitCode != 0)
-        {
-            throw new InvalidOperationException(
-                $"pg0 install-extension vector 失败（退出码 {process.ExitCode}）：{output}{error}");
-        }
     }
 
     private static string BuildConnectionString(int port, string database, PortablePostgresOptions options) =>
@@ -624,49 +823,80 @@ public sealed class PortablePostgresHost : IAsyncDisposable
             Database = database,
             Username = options.Username,
             Password = options.Password,
+            ApplicationName = "MyFirstMafAgent.Api",
             Pooling = true,
-            MaxPoolSize = 100,
+            MaxPoolSize = 50,
             Timeout = 15,
             CommandTimeout = 120,
+            // 便携库只在 127.0.0.1 上明文跑，协商 SSL 纯属多一个往返。
+            SslMode = SslMode.Disable,
             IncludeErrorDetail = true
         }.ConnectionString;
 
-    private static async Task<(int Port, bool Running)?> TryGetRunningInstanceAsync(
-        string executable,
-        string instanceName,
-        CancellationToken cancellationToken)
-    {
-        var startInfo = new ProcessStartInfo
+    private string BuildProbeConnectionString(string database) =>
+        new NpgsqlConnectionStringBuilder(BuildConnectionString(Port, database, _options))
         {
-            FileName = executable,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true
-        };
-        startInfo.ArgumentList.Add("info");
-        startInfo.ArgumentList.Add("--name");
-        startInfo.ArgumentList.Add(instanceName);
-        startInfo.ArgumentList.Add("--output");
-        startInfo.ArgumentList.Add("json");
+            Timeout = 3,
+            Pooling = false,
+            MaxPoolSize = 1
+        }.ConnectionString;
 
-        using var process = Process.Start(startInfo);
-        if (process is null) return null;
-        var output = await process.StandardOutput.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken);
-        if (process.ExitCode != 0 || string.IsNullOrWhiteSpace(output)) return null;
+    private static async Task<bool> CanConnectAsync(
+        int port, string database, PortablePostgresOptions options, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var builder = new NpgsqlConnectionStringBuilder(BuildConnectionString(port, database, options))
+            {
+                Timeout = 3,
+                Pooling = false,
+                MaxPoolSize = 1
+            };
+            await using var connection = new NpgsqlConnection(builder.ConnectionString);
+            await connection.OpenAsync(cancellationToken);
+            await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT 1";
+            await command.ExecuteScalarAsync(cancellationToken);
+            return true;
+        }
+        catch (Exception exception) when (exception is NpgsqlException or SocketException or TimeoutException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 从 <c>postmaster.pid</c> 里读出正在运行的实例端口。
+    /// 文件格式（每行一项）：PID / 数据目录 / 启动时间 / 端口 / socket 目录 / 监听地址 / shared memory。
+    /// 只有 PID 对应进程确实还活着、并且真的是 postgres 才算数（否则是上次强杀留下的残留文件）。
+    /// </summary>
+    private static int? TryReadRunningInstancePort(string dataDirectory)
+    {
+        var pidFile = Path.Combine(dataDirectory, PidFileName);
+        if (!File.Exists(pidFile)) return null;
+
+        string[] lines;
+        try
+        {
+            lines = File.ReadAllLines(pidFile);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+
+        if (lines.Length < 4) return null;
+        if (!int.TryParse(lines[0].Trim(), out var pid)) return null;
+        if (!int.TryParse(lines[3].Trim(), out var port)) return null;
 
         try
         {
-            using var document = JsonDocument.Parse(output);
-            var root = document.RootElement;
-            if (!root.TryGetProperty("running", out var running) || !running.GetBoolean())
-                return null;
-            if (!root.TryGetProperty("port", out var portElement) || !portElement.TryGetInt32(out var port))
-                return null;
-            return (port, true);
+            using var process = Process.GetProcessById(pid);
+            if (process.HasExited) return null;
+            if (!process.ProcessName.Contains("postgres", StringComparison.OrdinalIgnoreCase)) return null;
+            return port;
         }
-        catch (JsonException)
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
         {
             return null;
         }
@@ -701,19 +931,41 @@ public sealed class PortablePostgresHost : IAsyncDisposable
 
     private static string QuoteIdentifier(string identifier) => $"\"{identifier.Replace("\"", "\"\"")}\"";
 
-    private static string SanitizeName(string name)
+    private static string TrimOutput(string output)
     {
-        var builder = new StringBuilder(name.Length);
-        foreach (var character in name)
-            builder.Append(Path.GetInvalidFileNameChars().Contains(character) ? '_' : character);
-        return builder.Length == 0 ? "default" : builder.ToString();
+        var trimmed = output.Trim();
+        return trimmed.Length > 4000 ? trimmed[^4000..] : trimmed;
     }
 
-    private static bool IsAsciiPath(string path) => path.All(static character => character < 128);
+    private static string? TryReadText(string path, int maxLength)
+    {
+        try
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new StreamReader(stream);
+            var buffer = new char[maxLength];
+            var read = reader.Read(buffer, 0, buffer.Length);
+            return new string(buffer, 0, read);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
 
-    /// <summary>
-    /// 判断路径是否位于指定目录之下（用于识别已经缓存过的 pg0）。
-    /// </summary>
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // 清理失败不影响主流程。
+        }
+    }
+
+    /// <summary>判断路径是否位于指定目录之下。</summary>
     private static bool IsUnder(string path, string directory)
     {
         var parent = Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar);
@@ -734,10 +986,14 @@ public sealed class PortablePostgresHost : IAsyncDisposable
         }
         catch (Exception exception)
         {
-            return exception.Message;
+            return AppPaths.DescribeWriteFailure(exception);
         }
     }
 
+    /// <summary>
+    /// <c>pg_ctl stop -m fast</c>：等待事务回滚、刷盘后干净退出。
+    /// 不用 <c>immediate</c>（等价于断电，下次启动要做崩溃恢复）。
+    /// </summary>
     public async Task StopAsync(CancellationToken cancellationToken)
     {
         if (_stopped) return;
@@ -745,53 +1001,59 @@ public sealed class PortablePostgresHost : IAsyncDisposable
 
         if (!_startedByUs || !_options.StopOnExit)
         {
-            _log?.Invoke("便携 PostgreSQL 由其他进程启动，保留运行。");
+            _log?.Invoke("便携 PostgreSQL 由其他进程启动（或已配置 StopOnExit=false），保留运行。");
             return;
         }
 
         _log?.Invoke("正在停止便携 PostgreSQL...");
+
+        var pgCtl = Path.Combine(_binDirectory, PlatformRuntime.WithSuffix(PgCtlCommand));
         try
         {
-            using var stop = new Process
+            var result = await PgProcessRunner.RunAsync(
+                pgCtl,
+                ["stop", "-D", _dataDirectory, "-m", "fast", "-w", "-t", "60"],
+                Path.Combine(_logDirectory, StopOutputFileName),
+                TimeSpan.FromSeconds(75),
+                cancellationToken);
+
+            if (result.Succeeded)
             {
-                StartInfo = new ProcessStartInfo
-                {
-                    FileName = _executablePath,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true
-                }
-            };
-            stop.StartInfo.ArgumentList.Add("stop");
-            stop.StartInfo.ArgumentList.Add("--name");
-            stop.StartInfo.ArgumentList.Add(_instanceName);
-            stop.Start();
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(TimeSpan.FromSeconds(30));
-            try
-            {
-                await stop.WaitForExitAsync(timeout.Token);
                 _log?.Invoke("便携 PostgreSQL 已停止。");
+                return;
             }
-            catch (OperationCanceledException)
-            {
-                _log?.Invoke("停止 pg0 超时，强制结束进程。");
-            }
+
+            _log?.Invoke($"pg_ctl stop 返回 {result.ExitCode}：{TrimOutput(result.Output)}");
         }
-        catch (Exception exception)
+        catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            _log?.Invoke($"停止 pg0 失败：{exception.Message}");
+            _log?.Invoke($"停止便携 PostgreSQL 失败：{exception.Message}");
         }
 
-        if (_process is { HasExited: false })
-        {
-            try { _process.Kill(entireProcessTree: true); }
-            catch (Exception exception) { _log?.Invoke($"结束 pg0 进程失败：{exception.Message}"); }
-        }
+        KillPostmaster();
+    }
 
-        _process?.Dispose();
-        _process = null;
+    /// <summary>兜底：pg_ctl 停不掉（例如 pid 文件丢失）时直接结束 postmaster 进程树。</summary>
+    private void KillPostmaster()
+    {
+        var pidFile = Path.Combine(_dataDirectory, PidFileName);
+        if (!File.Exists(pidFile)) return;
+
+        try
+        {
+            if (!int.TryParse(File.ReadAllLines(pidFile).FirstOrDefault()?.Trim(), out var pid)) return;
+            using var process = Process.GetProcessById(pid);
+            if (process.HasExited) return;
+
+            process.Kill(entireProcessTree: true);
+            _log?.Invoke($"已强制结束 PostgreSQL 进程（PID {pid}）。");
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or InvalidOperationException or IOException
+                or UnauthorizedAccessException or NotSupportedException)
+        {
+            _log?.Invoke($"强制结束 PostgreSQL 进程失败：{exception.Message}");
+        }
     }
 
     public async ValueTask DisposeAsync()

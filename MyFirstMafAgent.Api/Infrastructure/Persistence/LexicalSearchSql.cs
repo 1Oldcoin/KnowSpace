@@ -6,7 +6,7 @@ namespace MyFirstMafAgent.Api.Infrastructure.Persistence;
 /// <para>
 /// 分词在应用侧完成（<see cref="MyFirstMafAgent.Api.Domain.Knowledge.LexicalTokens"/>），
 /// 数据库只负责把空格分隔的 token 串转成 <c>tsvector</c>。
-/// 因为 pg0 自带的 PostgreSQL 没有 <c>zhparser</c>，默认解析器会把整段中文当成一个词，
+/// 因为随包的 PostgreSQL 没有 <c>zhparser</c>，默认解析器会把整段中文当成一个词，
 /// 所以索引和查询都必须显式走 <c>to_tsvector('simple', …)</c> + 预分词列。
 /// </para>
 ///

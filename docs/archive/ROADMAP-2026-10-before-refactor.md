@@ -4,6 +4,8 @@
 > 每项都写了现状、落点与验收标准，方便一件一件捡起来做，不需要重新调研。
 >
 > 已完成的历史阶段见 `ARCHITECTURE.md` §9 与 `PROJECT_DOCUMENTATION.md`；这里不再重复。
+>
+> **归档文件**：记录的是重构前（数据库仍是 pg0 单文件）的状态与验证过程。文中 `pg0`、`pg0-<rid>[.exe]`、`Pg0VendorFileName`、`PortablePostgres:ExecutablePath` 等描述属于当时的事实，现状以 `ARCHITECTURE.md` / `PROJECT_DOCUMENTATION.md` / `docs/DEPLOYMENT.md` 为准。
 
 ---
 
@@ -193,7 +195,7 @@
 ### ✅ P2-1 混合检索与重排（已完成第一版，2026-10-24）
 
 - **做了什么**：
-  - **中文分词在应用侧做**：PostgreSQL 默认解析器会把整段中文当成一个词，pg0 自带的 PG 也没有 `zhparser` / `pg_jieba`，所以 `Domain/Knowledge/LexicalTokens.cs` 把中文切成二元组、拉丁词转小写，写入新列 `kb_chunks.lexical_tokens`。
+  - **中文分词在应用侧做**：PostgreSQL 默认解析器会把整段中文当成一个词，当时随包的 PG（pg0 内置）也没有 `zhparser` / `pg_jieba`——换成随包的 PostgreSQL 17.9 后这个结论不变——所以 `Domain/Knowledge/LexicalTokens.cs` 把中文切成二元组、拉丁词转小写，写入新列 `kb_chunks.lexical_tokens`。
   - **GIN 表达式索引**：`ix_kb_chunks_lexical ON kb_chunks USING GIN (to_tsvector('simple', coalesce(lexical_tokens, '')))`，启动时 `CREATE INDEX IF NOT EXISTS`。新切片在 `PublishChunksAsync` 就带分词；历史切片由 `LexicalIndexWorker` 后台分批补齐（空转只发一条 `LIMIT 1` 探测）。
   - **词法检索**：`SqlSugarLexicalSearchRepository` + `LexicalSearchSql.SearchSql`，参数化 `to_tsquery('simple', @query)`、`ts_rank` 排序，返回与向量链路同形状的 `RetrievedChunk`（含 `ChunkId` / `ChunkIndex`）。
   - **RRF 融合**：`ReciprocalRankFusion.Fuse`，`score = Σ 1/(k + rank)`，k 默认 60。只吃排名不吃分数——余弦在 0–1、`ts_rank` 常见 0.0x，线性加权必须按语料重新调参。两路都命中的切片标记 `matchSource=hybrid`。

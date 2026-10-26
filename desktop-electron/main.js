@@ -28,9 +28,54 @@ let mainWindow = null;
 let apiProcess = null;
 let apiBaseUrl = null;
 let apiToken = null;
+let apiOwned = false;
 let isQuitting = false;
-let apiLogTail = [];
 let updater = null;
+
+/**
+ * 运行时发现文件与共享令牌，路径与 API 侧 DesktopRuntimeFile 必须一致：
+ * {数据根}/runtime/desktop.json + {数据根}/runtime/token。
+ */
+function runtimeDirectory() {
+  return path.join(userDataRoot(), 'runtime');
+}
+
+function runtimeInfoPath() {
+  return path.join(runtimeDirectory(), 'desktop.json');
+}
+
+function runtimeTokenPath() {
+  return path.join(runtimeDirectory(), 'token');
+}
+
+function readJsonFile(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function prefsPath() {
+  return path.join(app.getPath('userData'), 'desktop-prefs.json');
+}
+
+/** 界面里「关闭所有服务」对应 stopBackendOnExit；默认 false：关窗口不动后台。 */
+function readPrefs() {
+  const stored = readJsonFile(prefsPath()) ?? {};
+  return { stopBackendOnExit: stored.stopBackendOnExit === true };
+}
+
+function writePrefs(patch) {
+  const next = { ...readPrefs(), ...(patch ?? {}) };
+  try {
+    fs.mkdirSync(path.dirname(prefsPath()), { recursive: true });
+    fs.writeFileSync(prefsPath(), JSON.stringify(next, null, 2));
+  } catch (error) {
+    log(`write prefs failed: ${error.message}`);
+  }
+  return next;
+}
 
 function userDataRoot() {
   return process.env.MAF_DATA_ROOT
@@ -68,15 +113,6 @@ function resolveApiExecutable() {
   return null;
 }
 
-function rememberApiOutput(stream) {
-  stream.setEncoding('utf8');
-  stream.on('data', (chunk) => {
-    const lines = chunk.split(/\r?\n/).filter((line) => line.trim().length > 0);
-    apiLogTail = apiLogTail.concat(lines).slice(-40);
-    for (const line of lines) log(`[api] ${line}`);
-  });
-}
-
 function startApi(exePath, readyFile) {
   // 令牌经环境变量传入，不出现在命令行（命令行可被同机其它进程读到）。
   const environment = {
@@ -96,20 +132,22 @@ function startApi(exePath, readyFile) {
     cwd: path.dirname(exePath),
     env: environment,
     windowsHide: true,
-    stdio: ['ignore', 'pipe', 'pipe']
+    // 关窗口不关后台：子进程必须脱离父进程的管道与控制台，
+    // 否则父进程一退出它就会收到 EPIPE。日志由 API 自己写文件。
+    detached: true,
+    stdio: 'ignore'
   });
-
-  rememberApiOutput(child.stdout);
-  rememberApiOutput(child.stderr);
 
   child.on('exit', (code, signal) => {
     log(`API sidecar exited (code=${code}, signal=${signal})`);
-    if (!isQuitting) {
-      const detail = apiLogTail.length > 0 ? `\n\n${apiLogTail.join('\n')}` : '';
-      dialog.showErrorBox('知识库服务已停止', `后端进程意外退出（code=${code}）。${detail}`);
-      app.exit(1);
-    }
+    if (isQuitting) return;
+    dialog.showErrorBox('知识库服务已停止',
+      `后端进程意外退出（code=${code}）。日志：${path.join(userDataRoot(), 'logs')}`);
+    app.exit(1);
   });
+
+  // 让本进程可以退出而不等待子进程；后台服务的生命周期不挂在窗口上。
+  child.unref();
 
   return child;
 }
@@ -145,7 +183,7 @@ async function waitForHealth(baseUrl) {
 
     try {
       const response = await fetch(`${baseUrl}/api/health`, {
-        headers: { [TOKEN_HEADER]: apiToken }
+        headers: apiToken ? { [TOKEN_HEADER]: apiToken } : {}
       });
       if (response.ok) return;
     } catch {
@@ -159,6 +197,9 @@ async function waitForHealth(baseUrl) {
 }
 
 function installTokenHeader(baseUrl) {
+  // 接管已有后台时可能没有令牌（命令行 / 服务方式启动），此时不要发一个空头。
+  if (!apiToken) return;
+
   const filter = { urls: [`${baseUrl}/*`] };
   session.defaultSession.webRequest.onBeforeSendHeaders(filter, (details, callback) => {
     details.requestHeaders[TOKEN_HEADER] = apiToken;
@@ -200,6 +241,24 @@ function createWindow(baseUrl) {
   });
 
   mainWindow.webContents.on('will-attach-webview', (event) => event.preventDefault());
+
+  // 浏览器兜底下载（例如导出知识库包）也要让用户自己选目录：
+  // 不接管的话 Electron 会默默丢进系统下载目录，用户既没选过、也找不到。
+  session.defaultSession.on('will-download', (_event, item) => {
+    const target = dialog.showSaveDialogSync(mainWindow, {
+      title: '保存文件',
+      defaultPath: path.join(app.getPath('downloads'), item.getFilename()),
+      buttonLabel: '保存'
+    });
+
+    if (!target) {
+      item.cancel();
+      return;
+    }
+
+    item.setSavePath(target);
+    item.once('done', (_doneEvent, state) => log(`download ${item.getFilename()} -> ${target} (${state})`));
+  });
 
   mainWindow.once('ready-to-show', () => mainWindow.show());
   mainWindow.on('closed', () => { mainWindow = null; });
@@ -282,14 +341,14 @@ function installMenu() {
 }
 
 async function stopApi() {
-  if (!apiProcess || apiProcess.exitCode !== null) return;
+  if (!apiBaseUrl) return;
 
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 5000);
     await fetch(`${apiBaseUrl}/api/desktop/shutdown`, {
       method: 'POST',
-      headers: { [TOKEN_HEADER]: apiToken },
+      headers: apiToken ? { [TOKEN_HEADER]: apiToken } : {},
       signal: controller.signal
     });
     clearTimeout(timer);
@@ -297,6 +356,9 @@ async function stopApi() {
   } catch (error) {
     log(`shutdown request failed: ${error.message}`);
   }
+
+  // 后台可能不是本窗口拉起的：那种情况下后端自己会退，窗口不等它。
+  if (!apiOwned || !apiProcess || apiProcess.exitCode !== null) return;
 
   const deadline = Date.now() + SHUTDOWN_TIMEOUT_MS;
   while (Date.now() < deadline) {
@@ -308,7 +370,63 @@ async function stopApi() {
   }
 
   log('API sidecar did not stop in time, killing');
-  apiProcess.kill();
+  try {
+    apiProcess.kill();
+  } catch (error) {
+    log(`kill failed: ${error.message}`);
+  }
+}
+
+/**
+ * 探测某个地址上是否有活着的后端。
+ * /api/desktop/info 只在回环来源上应答，所以这里能通基本就能确定是本机后端。
+ */
+async function probeBackend(url, token) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 3000);
+
+  try {
+    const response = await fetch(`${url}/api/desktop/info`, {
+      headers: token ? { [TOKEN_HEADER]: token } : {},
+      signal: controller.signal
+    });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * 后台服务可能早就以命令行 / 系统服务的方式跑着了。
+ * 这时读发现文件、探活一次，通了就直接接管——绝不再拉起第二个后端
+ * （两个实例会抢同一个便携 PostgreSQL、同一份数据目录，还会抢同一个端口）。
+ */
+async function attachExistingBackend() {
+  const info = readJsonFile(runtimeInfoPath());
+  if (!info || typeof info.url !== 'string' || !info.url.startsWith('http://127.0.0.1:')) return null;
+
+  let token = null;
+  try {
+    token = (fs.readFileSync(runtimeTokenPath(), 'utf8') ?? '').trim() || null;
+  } catch {
+    // 命令行 / 服务方式启动时没有令牌文件（也就不需要令牌），属正常情况。
+    token = null;
+  }
+
+  const probe = await probeBackend(info.url, token);
+  if (!probe) {
+    log(`runtime file points at ${info.url} but nothing answered; will start our own backend`);
+    return null;
+  }
+
+  apiBaseUrl = info.url;
+  apiToken = token;
+  apiOwned = false;
+  log(`attached to running API at ${info.url} (pid=${probe.processId})`);
+  return info.url;
 }
 
 async function bootstrap() {
@@ -342,19 +460,21 @@ async function bootstrap() {
   ipcMain.handle('desktop:update-check', () => (updater ? updater.check({ manual: true }) : null));
   ipcMain.handle('desktop:update-download', () => (updater ? updater.download() : null));
 
+  // 后台服务与退出行为（设置页「后台服务」区块用）。
+  ipcMain.handle('desktop:backend-state', () => ({
+    mode: apiOwned ? 'spawned' : 'attached',
+    processId: apiProcess?.pid ?? null,
+    stopBackendOnExit: readPrefs().stopBackendOnExit
+  }));
+
+  ipcMain.handle('desktop:prefs-get', () => readPrefs());
+  ipcMain.handle('desktop:prefs-set', (_event, patch) => writePrefs(patch));
+
   // 安装前会把 API / 便携数据库停掉再退出，这里只负责把结果回传给界面。
   ipcMain.handle('desktop:update-install', async () => {
     if (!updater) return { ok: false, error: '更新组件未加载。' };
     return await updater.installNow();
   });
-
-  const exePath = resolveApiExecutable();
-  if (!exePath) {
-    dialog.showErrorBox('缺少后端服务',
-      '未找到 MyFirstMafAgent.Api.exe。请先执行 scripts\\Publish-Portable.ps1，或设置 MAF_API_EXE 指向已发布的可执行文件。');
-    app.exit(1);
-    return;
-  }
 
   const readyFile = path.join(app.getPath('userData'), 'api-ready.json');
   try {
@@ -363,15 +483,27 @@ async function bootstrap() {
     // 忽略：下次写入会覆盖。
   }
 
-  apiToken = crypto.randomBytes(32).toString('hex');
-  apiProcess = startApi(exePath, readyFile);
-
   try {
-    apiBaseUrl = await waitForReadyFile(readyFile);
+    // 先看有没有已经在跑的后台服务；有就接管，没有才自己拉起。
+    if (!(await attachExistingBackend())) {
+      const exePath = resolveApiExecutable();
+      if (!exePath) {
+        dialog.showErrorBox('缺少后端服务',
+          '未找到 MyFirstMafAgent.Api.exe。请先执行 scripts\\Publish-Portable.ps1，或设置 MAF_API_EXE 指向已发布的可执行文件。');
+        app.exit(1);
+        return;
+      }
+
+      apiToken = crypto.randomBytes(32).toString('hex');
+      apiOwned = true;
+      apiProcess = startApi(exePath, readyFile);
+      apiBaseUrl = await waitForReadyFile(readyFile);
+    }
+
     await waitForHealth(apiBaseUrl);
     installTokenHeader(apiBaseUrl);
     createWindow(apiBaseUrl);
-    log(`API ready at ${apiBaseUrl}`);
+    log(`API ready at ${apiBaseUrl} (${apiOwned ? 'spawned' : 'attached'})`);
 
     // 自动更新：窗口就绪后再启用，避免和首屏抢资源。
     updater = createUpdater({
@@ -385,7 +517,7 @@ async function bootstrap() {
     log(`startup failed: ${error.message}`);
     dialog.showErrorBox('启动失败', error.message);
     isQuitting = true;
-    await stopApi();
+    if (apiOwned) await stopApi();
     app.exit(1);
     return;
   }
@@ -395,7 +527,15 @@ async function bootstrap() {
     event.preventDefault();
     isQuitting = true;
     updater?.dispose();
-    await stopApi();
+
+    // 默认关窗口不关后台：用户可能把它当常驻服务用。
+    // 只有设置页勾了「关闭所有服务」才让后端自己退出（含它启动的便携数据库）。
+    if (readPrefs().stopBackendOnExit) {
+      await stopApi();
+    } else {
+      log('leaving backend running (stopBackendOnExit=false)');
+    }
+
     app.exit(0);
   });
 

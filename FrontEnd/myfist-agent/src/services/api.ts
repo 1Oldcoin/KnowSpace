@@ -965,12 +965,32 @@ export async function exportNotes(knowledgeBaseId: string, noteIds?: string[]): 
 }
 
 export interface KnowledgePackageExportSummary {
-  blob: Blob
   fileName: string
   documents: number
   notes: number
   topics: number
   warnings: number
+  /** 用户在“另存为”对话框里点了取消——不是错误，前端不必提示失败。 */
+  cancelled?: boolean
+  /** 用户选定的文件名；走浏览器兜底下载时为 null。 */
+  savedTo?: string | null
+}
+
+/** File System Access API：浏览器/Electron 都支持，用来让用户自己挑目录。 */
+interface SaveFilePickerOptions {
+  suggestedName?: string
+  types?: Array<{ description?: string; accept: Record<string, string[]> }>
+}
+
+interface SaveFileHandle {
+  name: string
+  createWritable: () => Promise<WritableStream<Uint8Array>>
+}
+
+type SaveFilePicker = (options?: SaveFilePickerOptions) => Promise<SaveFileHandle>
+
+function saveFilePicker(): SaveFilePicker | undefined {
+  return (window as unknown as { showSaveFilePicker?: SaveFilePicker }).showSaveFilePicker
 }
 
 export interface KnowledgePackageImportResult {
@@ -982,7 +1002,14 @@ export interface KnowledgePackageImportResult {
   warnings: string[]
 }
 
-/** 导出整个知识库为可移植包（zip：manifest.json + 原始文件）。 */
+/**
+ * 导出整个知识库为可移植包（zip：manifest.json + 原始文件）。
+ *
+ * 流程刻意做成「服务端边读边发 → 客户端边收边写」：
+ * 1. 先弹“另存为”让用户自己选目录（File System Access API，Electron/Chromium 可用）；
+ * 2. 选好之后把响应体直接管道写进那个文件，全程不进内存、服务端也不落临时文件。
+ * 浏览器不支持该 API 时，退回普通下载（桌面端由 Electron 的 will-download 弹保存框）。
+ */
 export async function exportKnowledgeBasePackage(knowledgeBaseId: string): Promise<KnowledgePackageExportSummary> {
   const response = await fetch(`${apiBaseUrl}/api/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/package`)
   if (!response.ok) throw new Error(await getErrorMessage(response))
@@ -990,19 +1017,53 @@ export async function exportKnowledgeBasePackage(knowledgeBaseId: string): Promi
   const disposition = response.headers.get('Content-Disposition') ?? ''
   const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition)
   const rawName = match?.[1]?.trim()
+  const fileName = rawName ? decodeURIComponent(rawName) : `${knowledgeBaseId}.zjpack.zip`
   const numberHeader = (name: string) => {
     const raw = response.headers.get(name)
     return raw ? Number.parseInt(raw, 10) || 0 : 0
   }
 
-  return {
-    blob: await response.blob(),
-    fileName: rawName ? decodeURIComponent(rawName) : `${knowledgeBaseId}.zjpack.zip`,
+  const summary: KnowledgePackageExportSummary = {
+    fileName,
     documents: numberHeader('X-Package-Documents'),
     notes: numberHeader('X-Package-Notes'),
     topics: numberHeader('X-Package-Topics'),
     warnings: numberHeader('X-Package-Warnings'),
   }
+
+  const picker = saveFilePicker()
+  if (picker && response.body) {
+    let handle: SaveFileHandle | null = null
+    try {
+      handle = await picker({
+        suggestedName: fileName,
+        types: [{ description: '知识库包', accept: { 'application/zip': ['.zip'] } }],
+      })
+    } catch (error) {
+      if ((error as DOMException | undefined)?.name === 'AbortError') {
+        return { ...summary, cancelled: true }
+      }
+      // 其它异常（例如浏览器策略禁用）：退回下面的普通下载。
+      handle = null
+    }
+
+    if (handle) {
+      const writable = await handle.createWritable()
+      await response.body.pipeTo(writable)
+      return { ...summary, savedTo: handle.name }
+    }
+  }
+
+  const blob = await response.blob()
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = fileName
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+  return { ...summary, savedTo: null }
 }
 
 /** 导入知识库包，服务端会新建一个知识库并把资料重新排队解析。 */

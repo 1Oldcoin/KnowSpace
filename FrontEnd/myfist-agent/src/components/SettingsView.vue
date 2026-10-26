@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { Archive, ArrowDownToLine, ArrowUpFromLine, Boxes, Check, Cloud, Cpu, Database, Download, KeyRound, LoaderCircle, Mic, Plug, RefreshCw, RotateCcw, Save, SlidersHorizontal, Sparkles, Trash2, Upload, UserRound } from 'lucide-vue-next'
+import { Archive, ArrowDownToLine, ArrowUpFromLine, Boxes, Check, Cloud, Cpu, Database, Download, KeyRound, LoaderCircle, Mic, Plug, Power, RefreshCw, RotateCcw, Save, Server, SlidersHorizontal, Sparkles, Trash2, Upload, UserRound } from 'lucide-vue-next'
 import { deleteWhisperModel, downloadWhisperModel, exportKnowledgeBasePackage, getWhisperModelStatus, importWhisperModel, importKnowledgeBasePackage } from '../services/api'
 import { getAgentInfo, getMcpStatus, importLocalEmbeddingSpec, listAgentTools, probeEmbeddingSpec, registerCloudEmbeddingSpec } from '../services/api'
 import { normalizeAgentSettings } from '../services/api'
@@ -200,6 +200,9 @@ interface DesktopHostBridge {
   downloadUpdate: () => Promise<{ ok: boolean; error?: string } | null>
   installUpdate: () => Promise<{ ok: boolean; error?: string }>
   onUpdateStatus: (callback: (state: DesktopUpdateState) => void) => () => void
+  getBackendState: () => Promise<{ mode: 'spawned' | 'attached'; processId: number | null; stopBackendOnExit: boolean }>
+  getPrefs: () => Promise<{ stopBackendOnExit: boolean }>
+  setPrefs: (patch: { stopBackendOnExit?: boolean }) => Promise<{ stopBackendOnExit: boolean }>
 }
 
 const desktopHost = (window as unknown as { desktopHost?: DesktopHostBridge }).desktopHost
@@ -289,7 +292,45 @@ async function installDesktopUpdate() {
   }
 }
 
-onMounted(() => { void loadAgentInfo(); void loadWhisperStatus(); void initDesktopUpdate() })
+// ── 桌面版后台服务 ───────────────────────────────────────────────────────
+// 关窗口默认不动后端：它可以被当成常驻服务用。勾上「关闭所有服务」后，
+// 退出时主进程会先给 /api/desktop/shutdown 发一条命令，让后端连同便携数据库优雅退出。
+const backendState = ref<{ mode: 'spawned' | 'attached'; processId: number | null } | null>(null)
+const stopBackendOnExit = ref(false)
+const backendPrefBusy = ref(false)
+const backendError = ref('')
+
+const backendModeLabel = computed(() => {
+  if (!backendState.value) return '—'
+  return backendState.value.mode === 'attached' ? '接管已在运行的后台服务' : '由本窗口启动'
+})
+
+async function initDesktopBackend() {
+  if (!desktopHost) return
+  try {
+    const state = await desktopHost.getBackendState()
+    backendState.value = { mode: state.mode, processId: state.processId }
+    stopBackendOnExit.value = state.stopBackendOnExit
+  } catch (error) {
+    backendError.value = errorText(error)
+  }
+}
+
+async function setStopBackendOnExit(next: boolean) {
+  if (!desktopHost || backendPrefBusy.value) return
+  backendPrefBusy.value = true
+  backendError.value = ''
+  try {
+    const prefs = await desktopHost.setPrefs({ stopBackendOnExit: next })
+    stopBackendOnExit.value = prefs.stopBackendOnExit
+  } catch (error) {
+    backendError.value = errorText(error)
+  } finally {
+    backendPrefBusy.value = false
+  }
+}
+
+onMounted(() => { void loadAgentInfo(); void loadWhisperStatus(); void initDesktopUpdate(); void initDesktopBackend() })
 watch(() => props.apiOnline, online => { if (online) { void loadAgentInfo(); void loadWhisperStatus() } })
 
 watch(() => props.settings, (settings) => {
@@ -518,16 +559,11 @@ async function exportPackage() {
   packageExporting.value = true
   try {
     const result = await exportKnowledgeBasePackage(packageKnowledgeBaseId.value)
-    const url = URL.createObjectURL(result.blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = result.fileName
-    document.body.appendChild(link)
-    link.click()
-    link.remove()
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+    // 用户在“另存为”里点了取消：安静退出，不报错也不提示成功。
+    if (result.cancelled) return
 
-    packageMessage.value = `已导出「${packageKnowledgeBaseName.value}」：资料 ${result.documents} 份、笔记 ${result.notes} 篇、专题 ${result.topics} 个。`
+    const target = result.savedTo ? `到「${result.savedTo}」` : ''
+    packageMessage.value = `已导出${target}「${packageKnowledgeBaseName.value}」：资料 ${result.documents} 份、笔记 ${result.notes} 篇、专题 ${result.topics} 个。`
     if (result.warnings) packageWarnings.value = [`导出过程中有 ${result.warnings} 条内容被跳过（详见包内 manifest.json 的 warnings）。`]
   } catch (error) {
     packageError.value = errorText(error)
@@ -806,6 +842,38 @@ const whisperReady = computed(() => whisperStatus.value?.exists === true)
 
         <p class="settings-hint"><Sparkles :size="13" /> 更新源由安装包或环境变量 <code>MAF_UPDATE_URL</code> 决定；安装前会先停止后端与便携数据库，避免文件被占用。</p>
         <p v-if="updateError" class="settings-hint settings-hint-error">{{ updateError }}</p>
+      </article>
+
+      <article v-if="isDesktop" class="settings-card settings-card-wide">
+        <header class="settings-card-head">
+          <span class="settings-icon settings-icon-blue"><Server :size="18" /></span>
+          <div><h2>后台服务</h2><p>关掉窗口只是关掉界面，后端会继续在后台跑；下次打开窗口会直接接管它，不会再启动第二个后端。</p></div>
+        </header>
+
+        <div class="settings-endpoint settings-endpoint-active">
+          <div class="settings-endpoint-title">
+            <span>服务来源</span>
+            <span class="settings-badge">{{ backendModeLabel }}</span>
+          </div>
+          <div class="settings-endpoint-grid">
+            <label class="settings-field"><span>进程 ID</span><input :value="backendState?.processId ?? '—'" readonly /></label>
+          </div>
+
+          <div class="settings-agent-switches">
+            <label class="settings-switch" @click.prevent="!backendPrefBusy && setStopBackendOnExit(!stopBackendOnExit)">
+              <span class="settings-switch-text">
+                <strong>关闭所有服务</strong>
+                <small v-if="stopBackendOnExit">退出时一并停止后端与便携数据库；下次打开窗口会重新拉起。</small>
+                <small v-else>退出只关窗口，后端与数据库保持运行，适合当常驻服务用。</small>
+              </span>
+              <input class="settings-switch-input" type="checkbox" :checked="stopBackendOnExit" :disabled="backendPrefBusy" @change="setStopBackendOnExit(($event.target as HTMLInputElement).checked)" />
+              <span class="settings-switch-track" :class="{ on: stopBackendOnExit, disabled: backendPrefBusy }" aria-hidden="true"><span></span></span>
+            </label>
+          </div>
+        </div>
+
+        <p class="settings-hint"><Power :size="13" /> 命令行或系统服务方式启动的后端同样会被这个窗口接管（读运行时发现文件后探活），不会重复启动。</p>
+        <p v-if="backendError" class="settings-hint settings-hint-error">{{ backendError }}</p>
       </article>
 
       <article class="settings-card settings-card-wide">

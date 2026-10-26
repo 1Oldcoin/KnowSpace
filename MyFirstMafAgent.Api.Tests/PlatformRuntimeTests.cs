@@ -54,78 +54,81 @@ public sealed class PlatformRuntimeTests : IDisposable
     {
         Assert.Equal(OperatingSystem.IsWindows() ? ".exe" : "", PlatformRuntime.ExecutableSuffix);
         Assert.Equal(
-            OperatingSystem.IsWindows() ? "pg0.exe" : "pg0",
-            PlatformRuntime.WithSuffix("pg0"));
+            OperatingSystem.IsWindows() ? "postgres.exe" : "postgres",
+            PlatformRuntime.PostgresExecutableName);
     }
 
     [Fact]
-    public void Candidates_put_the_rid_folder_first()
+    public void Postgres_bin_candidates_put_the_rid_folder_first()
     {
-        var candidates = PlatformRuntime.ToolCandidates("ExternalTools/pgSQL", "pg0", "pg0-vendor");
+        var candidates = PlatformRuntime.PostgresBinCandidates();
 
-        Assert.Equal($"ExternalTools/pgSQL/{PlatformRuntime.RuntimeIdentifier}/pg0-vendor", candidates[0]);
-        Assert.Equal($"ExternalTools/pgSQL/{PlatformRuntime.RuntimeIdentifier}/pg0{PlatformRuntime.ExecutableSuffix}", candidates[1]);
-        // 旧版单平台布局永远在最后，保证新布局总是优先。
-        Assert.Equal($"ExternalTools/pgSQL/pg0{PlatformRuntime.ExecutableSuffix}", candidates[^1]);
+        // 便携 PostgreSQL 是整棵目录树（bin/lib/share），所以按“目录”而不是“文件”解析。
+        Assert.Equal($"ExternalTools/pgSQL/{PlatformRuntime.RuntimeIdentifier}/bin", candidates[0]);
+        // 扁平布局（把 dist\pgsql 直接放进 ExternalTools/pgSQL）永远在最后。
+        Assert.Equal("ExternalTools/pgSQL/bin", candidates[^1]);
     }
 
     [Fact]
-    public void Vendor_file_name_is_accepted_without_renaming()
+    public void Postgres_bin_resolves_from_the_rid_layout()
     {
-        // 用户把上游 pg0 原名直接丢进 <rid>/，不做任何改名。
-        var ridFolder = Path.Combine(_root, "ExternalTools", "pgSQL", PlatformRuntime.RuntimeIdentifier);
-        Directory.CreateDirectory(ridFolder);
-        var vendor = Path.Combine(ridFolder, "pg0-linux-x86_64-gnu");
-        File.WriteAllText(vendor, "stub");
+        var bin = Touch("ExternalTools", "pgSQL", PlatformRuntime.RuntimeIdentifier, "bin", PlatformRuntime.PostgresExecutableName);
 
-        var resolved = PlatformRuntime.ResolveTool(
-            _root, "", "ExternalTools/pgSQL", "pg0", vendorFileName: "pg0-linux-x86_64-gnu");
+        var resolved = PlatformRuntime.ResolvePostgresBinDirectory(_root, "");
 
-        Assert.Equal(vendor, resolved);
+        Assert.Equal(Path.GetDirectoryName(bin), resolved);
     }
 
     [Fact]
-    public void Legacy_flat_layout_still_resolves()
+    public void Postgres_bin_resolves_from_the_flat_layout()
     {
-        var legacy = Touch("ExternalTools", "pgSQL", "pg0" + PlatformRuntime.ExecutableSuffix);
+        var bin = Touch("ExternalTools", "pgSQL", "bin", PlatformRuntime.PostgresExecutableName);
 
-        var resolved = PlatformRuntime.ResolveTool(_root, "", "ExternalTools/pgSQL", "pg0");
+        var resolved = PlatformRuntime.ResolvePostgresBinDirectory(_root, "");
 
-        Assert.Equal(legacy, resolved);
+        Assert.Equal(Path.GetDirectoryName(bin), resolved);
     }
 
     [Fact]
-    public void Configured_path_wins_when_it_exists()
+    public void Configured_postgres_root_or_bin_directory_both_work()
     {
-        var custom = Touch("custom", "my-pg0" + PlatformRuntime.ExecutableSuffix);
-        Touch("ExternalTools", "pgSQL", "pg0" + PlatformRuntime.ExecutableSuffix);
+        // 用户从资源管理器复制路径时，可能给的是 pgsql 根目录，也可能直接给 bin。
+        var bin = Touch("custom", "pgsql", "bin", PlatformRuntime.PostgresExecutableName);
 
-        var resolved = PlatformRuntime.ResolveTool(
-            _root, "custom/my-pg0" + PlatformRuntime.ExecutableSuffix, "ExternalTools/pgSQL", "pg0");
-
-        Assert.Equal(custom, resolved);
+        Assert.Equal(Path.GetDirectoryName(bin), PlatformRuntime.ResolvePostgresBinDirectory(_root, "custom/pgsql"));
+        Assert.Equal(Path.GetDirectoryName(bin), PlatformRuntime.ResolvePostgresBinDirectory(_root, "custom/pgsql/bin"));
     }
 
     [Fact]
-    public void Stale_configured_path_falls_back_to_the_platform_binary()
+    public void Stale_postgres_bin_path_falls_back_to_the_platform_layout()
     {
-        // 典型场景：把 Windows 包的 appsettings.json 带到 Linux，
-        // 里面还写着 pg0-windows-x86_64.exe。不能因为这个就启动失败。
-        var actual = Touch("ExternalTools", "pgSQL", "pg0" + PlatformRuntime.ExecutableSuffix);
+        // 典型场景：把 Windows 包的 appsettings.json 带到 Linux，里面还写着 win-x64 的目录。
+        var actual = Touch("ExternalTools", "pgSQL", PlatformRuntime.RuntimeIdentifier, "bin", PlatformRuntime.PostgresExecutableName);
+        var messages = new List<string>();
 
-        var resolved = PlatformRuntime.ResolveTool(
-            _root, "ExternalTools/pgSQL/pg0-windows-x86_64.exe", "ExternalTools/pgSQL", "pg0");
+        var resolved = PlatformRuntime.ResolvePostgresBinDirectory(
+            _root, "ExternalTools/pgSQL/no-such-rid/bin", messages.Add);
 
-        Assert.Equal(actual, resolved);
+        Assert.Equal(Path.GetDirectoryName(actual), resolved);
+        Assert.Contains(messages, message => message.Contains("自动定位"));
     }
 
     [Fact]
-    public void Missing_tool_resolves_to_null()
+    public void Missing_postgres_distribution_resolves_to_null()
     {
-        Assert.Null(PlatformRuntime.ResolveTool(_root, "", "ExternalTools/pgSQL", "pg0"));
+        Assert.Null(PlatformRuntime.ResolvePostgresBinDirectory(_root, ""));
         Assert.Null(PlatformRuntime.TryFindTool(_root, "ExternalTools/ffmpeg", "ffmpeg"));
     }
 
+    [Fact]
+    public void Single_file_tool_candidates_still_prefer_the_rid_folder()
+    {
+        // ffmpeg 这类单文件工具继续走 ToolCandidates（便携 PostgreSQL 不再走这条路径）。
+        var candidates = PlatformRuntime.ToolCandidates("ExternalTools/ffmpeg", "ffmpeg");
+
+        Assert.Equal($"ExternalTools/ffmpeg/{PlatformRuntime.RuntimeIdentifier}/ffmpeg{PlatformRuntime.ExecutableSuffix}", candidates[0]);
+        Assert.Equal($"ExternalTools/ffmpeg/ffmpeg{PlatformRuntime.ExecutableSuffix}", candidates[^1]);
+    }
     [Fact]
     public void EnsureExecutable_is_a_noop_off_windows_and_never_throws()
     {

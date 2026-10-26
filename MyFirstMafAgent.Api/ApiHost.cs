@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using MyFirstMafAgent.Api.Hosting;
 using MyFirstMafAgent.Api.Infrastructure;
+using MyFirstMafAgent.Api.Infrastructure.Persistence;
 using MyFirstMafAgent.Api.Infrastructure.PortablePostgres;
 using MyFirstMafAgent.Api.Options;
 
@@ -58,7 +59,8 @@ public static class ApiHost
         HostBootstrap.ConfigureHttp(builder);
         builder.AddValidatedOptions();
 
-        // 便携数据库：没有外部连接串时自动拉起 pg0，并激活 pgvector。
+        // 便携数据库：没有外部连接串时自动拉起随包的便携 PostgreSQL（initdb / pg_ctl 全在这里），
+        // 等它就绪之后再建 Web 主机——Electron 只等 /api/health，拿不到 200 就说明数据库也没起来。
         PortablePostgresHost? portablePostgres = null;
         if (builder.Configuration.GetValue<bool?>($"{PortablePostgresOptions.SectionName}:Enabled") ?? true)
         {
@@ -74,6 +76,28 @@ public static class ApiHost
         var connectionString = builder.Configuration.GetConnectionString("KnowledgeBase");
         if (string.IsNullOrWhiteSpace(connectionString))
             throw new InvalidOperationException("Set ConnectionStrings:KnowledgeBase (for example via ConnectionStrings__KnowledgeBase) before starting the API.");
+
+        // 外部数据库预检：便携库没被拉起时，先用一条真实连接确认它真的能用。
+        // 否则“库没启动/口令错”会在 5 秒后表现为一条 SqlSugar 堆栈，而用户看不出是哪种。
+        if (portablePostgres is null)
+        {
+            var preflightSeconds = builder.Configuration.GetValue<double?>(
+                $"{PortablePostgresOptions.SectionName}:PreflightTimeoutSeconds") ?? 5d;
+            var probe = await ConnectionPreflight.CheckAsync(
+                connectionString, TimeSpan.FromSeconds(preflightSeconds));
+
+            if (!probe.Succeeded)
+            {
+                // 完整诊断（端点 / 原因 / 便携库为何被跳过 / 三种修法）进日志与文件，
+                // 异常本身只留一行：控制台上就不会把同一大段中文打印两遍。
+                var failure = ConnectionPreflight.BuildMessage(probe, connectionString);
+                LogStartup(failure);
+                throw new InvalidOperationException(
+                    $"外部数据库不可用（{probe.Endpoint}）：{probe.Detail} 完整诊断与修法见上方的 [startup] 输出。");
+            }
+
+            LogStartup($"外部数据库连接正常：{probe.Endpoint}");
+        }
 
         builder.Services.AddSqlSugarPersistence(connectionString);
         builder.Services.AddKnowledgeModule();

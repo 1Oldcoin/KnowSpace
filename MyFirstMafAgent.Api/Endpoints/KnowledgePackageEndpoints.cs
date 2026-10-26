@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Http.Features;
 using MyFirstMafAgent.Api.Application.KnowledgePackages;
 
 namespace MyFirstMafAgent.Api.Endpoints;
@@ -17,16 +18,28 @@ public static class KnowledgePackageEndpoints
             HttpContext httpContext,
             CancellationToken cancellationToken) =>
         {
-            var export = await exporter.ExportAsync(knowledgeBaseId, cancellationToken);
+            // 1) 先把数据读齐、算好条数：响应头必须在响应体开始之前发出，之后改不了。
+            var plan = await exporter.PrepareAsync(knowledgeBaseId, cancellationToken);
+
+            var response = httpContext.Response;
+            response.ContentType = "application/zip";
+            // 中文库名不能直接进 header，按 RFC 5987 用 filename*=UTF-8''… 编码。
+            response.Headers.ContentDisposition =
+                $"attachment; filename*=UTF-8''{Uri.EscapeDataString(plan.FileName)}";
             // 统计写进响应头：前端不必再单独请求就能提示“导出了多少条”。
-            httpContext.Response.Headers["X-Package-Documents"] = export.Documents.ToString();
-            httpContext.Response.Headers["X-Package-Notes"] = export.Notes.ToString();
-            httpContext.Response.Headers["X-Package-Topics"] = export.Topics.ToString();
-            httpContext.Response.Headers["X-Package-Warnings"] = export.Warnings.Count.ToString();
-            httpContext.Response.Headers["Access-Control-Expose-Headers"] =
+            response.Headers["X-Package-Documents"] = plan.Documents.Count.ToString();
+            response.Headers["X-Package-Notes"] = plan.Notes.Count.ToString();
+            response.Headers["X-Package-Topics"] = plan.Topics.Count.ToString();
+            response.Headers["X-Package-Warnings"] = plan.Warnings.Count.ToString();
+            response.Headers["Access-Control-Expose-Headers"] =
                 "X-Package-Documents, X-Package-Notes, X-Package-Topics, X-Package-Warnings, Content-Disposition";
-            // 结果流在响应写完时被释放，DeleteOnClose 的临时文件随之清理。
-            return Results.Stream(export.Content, "application/zip", export.FileName);
+
+            // 2) 直接把 zip 流写进响应体：服务端不落临时文件，客户端边收边存。
+            //    注意：ZipArchive 在 Dispose 时同步写中央目录，而 Kestrel 默认禁止同步 IO，
+            //    所以只对这一个请求放开（正文拷贝仍是下面的异步循环完成）。
+            httpContext.Features.Get<IHttpBodyControlFeature>()!.AllowSynchronousIO = true;
+            await exporter.WriteAsync(plan, response.Body, cancellationToken);
+            return Results.Empty;
         });
 
         // 注意：这里不能写 async —— lambda 已经是「直接返回 ApiResults 的 Task」，

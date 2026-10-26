@@ -5,7 +5,7 @@
 > `docs/archive/ROADMAP-2026-10-before-refactor.md`，只在需要考古时看。
 >
 > 最后一次按当前架构重写：2026-10-24。当前形态 = Electron sidecar + ASP.NET Core API
-> + 便携 PostgreSQL(pg0)/pgvector + 插件子进程（JSON-RPC over stdio）。
+> + 随包便携 PostgreSQL 17.9 / pgvector 0.8.7（API 自管生命周期）+ 插件子进程（JSON-RPC over stdio）。
 
 ---
 

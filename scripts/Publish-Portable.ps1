@@ -7,7 +7,7 @@
     2. dotnet publish the API project for the target RID (self-contained by default, no AOT).
     3. Copy dist into <publish>/wwwroot.
     4. Drop native tools that belong to OTHER platforms, then check the ones this
-       platform needs (pg0, embedding model, and optionally ffmpeg).
+       platform needs (portable PostgreSQL, embedding model, and optionally ffmpeg).
 
     Two publish shapes only:
       - console : the API is the application (opens the default browser).
@@ -17,9 +17,16 @@
     Cross-platform note
     -------------------
     `ExternalTools` keeps one sub-folder per RID (`pgSQL/<rid>/`, `ffmpeg/<rid>/`).
-    The API resolves them at runtime from PlatformRuntime.RuntimeIdentifier, so a single
-    appsettings.json works on every platform. Missing binaries are WARNINGS, not errors:
-    a Linux container usually talks to an external PostgreSQL and installs ffmpeg via apt.
+    `pgSQL/<rid>/` holds a COMPLETE portable PostgreSQL tree: `bin/` (initdb, pg_ctl,
+    postgres, psql ...), `lib/` (incl. `vector.dll`, the pgvector extension) and
+    `share/` (incl. `extension/vector.control`). The three directories are one unit and
+    must be copied whole; the API manages the database lifecycle itself with
+    `initdb` / `pg_ctl`, so a lone `bin/` is not enough. A flat `pgSQL/bin/` layout is
+    also accepted. Runtime lookup order: `PortablePostgres:BinDirectory` ->
+    `ExternalTools/pgSQL/<rid>/bin` -> `ExternalTools/pgSQL/bin`, so a single
+    appsettings.json works on every platform. Missing binaries are WARNINGS, not
+    errors: a Linux container usually talks to an external PostgreSQL and installs
+    ffmpeg via apt.
 
     NOTE: keep this file ASCII-only. Windows PowerShell 5.1 misparses UTF-8 sources
     without a BOM, which silently breaks string literals and warnings.
@@ -139,47 +146,15 @@ function Get-PublishFolder([string]$shape) {
     return "$shape-$Runtime"
 }
 
-function Get-Pg0Candidates {
-    switch ($Runtime) {
-        'win-x64' {
-            return @(
-                'ExternalTools\pgSQL\win-x64\pg0-windows-x86_64.exe',
-                'ExternalTools\pgSQL\win-x64\pg0.exe',
-                'ExternalTools\pgSQL\pg0-windows-x86_64.exe',
-                'ExternalTools\pgSQL\pg0-win-x64.exe')
-        }
-        'linux-x64' {
-            return @(
-                'ExternalTools\pgSQL\linux-x64\pg0-linux-x86_64-gnu',
-                'ExternalTools\pgSQL\linux-x64\pg0-linux-x86_64-musl',
-                'ExternalTools\pgSQL\linux-x64\pg0',
-                'ExternalTools\pgSQL\pg0-linux-x86_64-gnu',
-                'ExternalTools\pgSQL\pg0-linux-x64')
-        }
-        'linux-arm64' {
-            return @(
-                'ExternalTools\pgSQL\linux-arm64\pg0-linux-aarch64-gnu',
-                'ExternalTools\pgSQL\linux-arm64\pg0-linux-aarch64-musl',
-                'ExternalTools\pgSQL\linux-arm64\pg0',
-                'ExternalTools\pgSQL\pg0-linux-aarch64-gnu',
-                'ExternalTools\pgSQL\pg0-linux-arm64')
-        }
-        'osx-arm64' {
-            return @(
-                'ExternalTools\pgSQL\osx-arm64\pg0-darwin-aarch64',
-                'ExternalTools\pgSQL\osx-arm64\pg0',
-                'ExternalTools\pgSQL\pg0-darwin-aarch64',
-                'ExternalTools\pgSQL\pg0-osx-arm64')
-        }
-        'osx-x64' {
-            return @(
-                'ExternalTools\pgSQL\osx-x64\pg0-darwin-x86_64',
-                'ExternalTools\pgSQL\osx-x64\pg0',
-                'ExternalTools\pgSQL\pg0-darwin-x86_64',
-                'ExternalTools\pgSQL\pg0-osx-x64')
-        }
-        default { return @() }
-    }
+# Portable PostgreSQL is no longer a single third-party launcher binary: it is a full
+# pgsql directory tree (bin + lib + share) that the API drives with initdb / pg_ctl.
+# So what we probe for is a bin DIRECTORY, not a file name. Paths are relative to the
+# publish output root. Same order as the runtime resolution (PortablePostgres:BinDirectory
+# first, then the RID folder, then the flat layout).
+function Get-PostgresBinCandidates {
+    return @(
+        "ExternalTools\pgSQL\$Runtime\bin",
+        'ExternalTools\pgSQL\bin')
 }
 
 function Assert-RuntimeFiles([string]$output) {
@@ -194,15 +169,43 @@ function Assert-RuntimeFiles([string]$output) {
         }
     }
 
-    $pg0 = (Get-Pg0Candidates) | Where-Object { Test-Path (Join-Path $output $_) } | Select-Object -First 1
-    if ($pg0) {
-        Write-Host "  pg0: $pg0" -ForegroundColor DarkGray
+    # Portable PostgreSQL: a whole pgsql tree, so we look for a real server binary inside
+    # the bin directory. `postgres` is the one file that proves bin/ is actually populated
+    # (an empty placeholder bin/ counts as missing).
+    $postgresBinary = "postgres$exeSuffix"
+    $binCandidates = Get-PostgresBinCandidates
+    $binRelative = $binCandidates |
+        Where-Object { Test-Path (Join-Path (Join-Path $output $_) $postgresBinary) } |
+        Select-Object -First 1
+
+    if ($binRelative) {
+        Write-Host "  postgres: $binRelative" -ForegroundColor DarkGray
+
+        # pgvector is what retrieval depends on; bin/ alone still gives you a database
+        # that cannot do vector search, so say it loudly instead of failing later at
+        # "CREATE EXTENSION vector". Library name differs per platform.
+        $vectorLibrary = 'vector.so'
+        if ($Runtime -like 'win-*') { $vectorLibrary = 'vector.dll' }
+        elseif ($Runtime -like 'osx-*') { $vectorLibrary = 'vector.dylib' }
+
+        $pgRoot = Split-Path (Join-Path $output $binRelative) -Parent
+        $missingPgvector = @()
+        if (-not (Test-Path (Join-Path $pgRoot "lib\$vectorLibrary"))) { $missingPgvector += "lib\$vectorLibrary" }
+        if (-not (Test-Path (Join-Path $pgRoot 'share\extension\vector.control'))) {
+            $missingPgvector += 'share\extension\vector.control'
+        }
+        if ($missingPgvector.Count -gt 0) {
+            Write-Warning "pgvector missing in $binRelative tree ($($missingPgvector -join ', '))."
+            Write-Warning "  Vector/hybrid retrieval will fail at CREATE EXTENSION vector."
+            Write-Warning "  Re-assemble the tree: scripts\Download-ExternalTools.ps1 -Target pgsql -PgSource <dist\pgsql>"
+        }
     }
     else {
-        Write-Warning "No portable PostgreSQL (pg0) binary for $Runtime."
-        Write-Warning "  Runtime will report which candidate paths it tried."
-        Write-Warning "  Fetch it: powershell -ExecutionPolicy Bypass -File scripts\Download-ExternalTools.ps1 -Runtime $Runtime -Target pg0"
-        Write-Warning "  Or point ConnectionStrings__KnowledgeBase at an external PostgreSQL (recommended in Docker)."
+        Write-Warning "No portable PostgreSQL server tree for $Runtime (no $postgresBinary under: $($binCandidates -join ', '))."
+        Write-Warning "  Needs the whole tree ExternalTools\pgSQL\$Runtime\ (bin + lib + share); bin/ alone is not enough."
+        Write-Warning "  Provide it: powershell -ExecutionPolicy Bypass -File scripts\Download-ExternalTools.ps1 -Target pgsql -PgSource <ready dist\pgsql>"
+        Write-Warning "              (or -PgZip <pgsql-portable zip>)"
+        Write-Warning "  Or skip the portable database entirely: set ConnectionStrings__KnowledgeBase to an external PostgreSQL (recommended in Docker)."
     }
 
     $ffmpegCandidates = if ($Runtime -like 'win-*') {
@@ -221,11 +224,46 @@ function Assert-RuntimeFiles([string]$output) {
     }
 }
 
-# Remove native binaries that belong to other platforms: pg0 is 16-60 MB, each ffmpeg 100 MB.
+# A root-level leftover only gets pruned if it really is a platform binary. The old rule
+# was "root-level file without an extension", which also matched README, LICENSE and any
+# other extension-less file someone dropped there. The file header decides instead: PE
+# (MZ), ELF, or Mach-O magic. Everything else is left alone.
+function Test-IsNativeBinary([System.IO.FileInfo]$file) {
+    if ($file.Extension -eq '.exe') { return $true }
+    if (-not ([string]::IsNullOrEmpty($file.Extension))) { return $false }
+    if ($file.Length -lt 4) { return $false }
+
+    $header = New-Object byte[] 4
+    $stream = [System.IO.File]::OpenRead($file.FullName)
+    try {
+        $read = $stream.Read($header, 0, 4)
+    }
+    finally {
+        $stream.Dispose()
+    }
+    if ($read -lt 4) { return $false }
+
+    $isPe = $header[0] -eq 0x4D -and $header[1] -eq 0x5A
+    $isElf = $header[0] -eq 0x7F -and $header[1] -eq 0x45 -and $header[2] -eq 0x4C -and $header[3] -eq 0x46
+    $isMachO = ($header[0] -eq 0xFE -and $header[1] -eq 0xED -and $header[2] -eq 0xFA -and ($header[3] -eq 0xCE -or $header[3] -eq 0xCF)) -or
+               ($header[0] -eq 0xCE -and $header[1] -eq 0xFA -and $header[2] -eq 0xED -and $header[3] -eq 0xFE) -or
+               ($header[0] -eq 0xCF -and $header[1] -eq 0xFA -and $header[2] -eq 0xED -and $header[3] -eq 0xFE) -or
+               ($header[0] -eq 0xCA -and $header[1] -eq 0xFE -and $header[2] -eq 0xBA -and $header[3] -eq 0xBE) -or
+               ($header[0] -eq 0xBE -and $header[1] -eq 0xBA -and $header[2] -eq 0xFE -and $header[3] -eq 0xCA)
+
+    return ($isPe -or $isElf -or $isMachO)
+}
+
+# Remove native binaries that belong to other platforms: one pgsql tree is ~65 MB, each
+# ffmpeg ~100 MB.
 # Rules:
-#   - delete RID sub-folders other than $Runtime;
+#   - delete RID sub-folders other than $Runtime (their VERSION.txt / notices describe that
+#     platform, so they go with it - they are not package-root files);
 #   - non-Windows target: delete root-level *.exe (legacy flat Windows layout);
-#   - Windows target: delete root-level extension-less binaries.
+#   - Windows target: delete root-level extension-less binaries (ELF / Mach-O).
+# Root-level docs (README.md, VERSION.txt, THIRD-PARTY-NOTICES.txt, ...) and everything
+# INSIDE the kept <rid> folder are never touched: the file pass is not recursive and only
+# considers real binaries.
 function Remove-ForeignRids([string]$output) {
     if ($KeepForeignRids) {
         Write-Host '  -KeepForeignRids: keeping other platforms' -ForegroundColor Yellow
@@ -245,13 +283,15 @@ function Remove-ForeignRids([string]$output) {
         }
 
         foreach ($file in Get-ChildItem $toolRoot -File) {
+            # Not a binary (README.md, VERSION.txt, notices, ...): never delete.
+            if (-not (Test-IsNativeBinary $file)) { continue }
+
             $isWindowsBinary = $file.Extension -eq '.exe'
-            $isUnixBinary = [string]::IsNullOrEmpty($file.Extension) -and $file.Name -notlike '*.md'
             if ($Runtime -notlike 'win-*' -and $isWindowsBinary) {
                 Remove-Item $file.FullName -Force
                 $removed++
             }
-            elseif ($Runtime -like 'win-*' -and $isUnixBinary) {
+            elseif ($Runtime -like 'win-*' -and -not $isWindowsBinary) {
                 Remove-Item $file.FullName -Force
                 $removed++
             }

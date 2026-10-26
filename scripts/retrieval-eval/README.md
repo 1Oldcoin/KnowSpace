@@ -146,7 +146,7 @@ There is no threshold that separates the two groups, which is why `Retrieval:Abs
 ## Implementation notes
 
 - 分词在应用侧完成（`Domain/Knowledge/LexicalTokens.cs`，中文二元组 + 拉丁词小写），
-  因为 pg0 自带的 PostgreSQL 没有 `zhparser`，默认解析器会把整段中文当成一个词。
+  因为随包的 PostgreSQL 17.9 没有 `zhparser`，默认解析器会把整段中文当成一个词。
 - 分词结果写入 `kb_chunks.lexical_tokens`，由 GIN 表达式索引
   `ix_kb_chunks_lexical ON kb_chunks USING GIN (to_tsvector('simple', coalesce(lexical_tokens, '')))` 支撑。
 - 历史切片由 `LexicalIndexWorker` 在后台分批补分词（正常空转）。

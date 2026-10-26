@@ -84,7 +84,7 @@ plugins/
 - manifest 的 `capabilities[].permissions` 是**声明**；实际可用集合是"声明 ∩ 已授予"。
 - 默认 `AutoGrantPermissions=false`：声明了 `network`/`file-read`/`file-write`/`clipboard`/`process` 的插件会停在 `PermissionRequired`，必须显式授权。
 - 授权只能授予插件声明过的权限；授予未声明的权限会被拒绝（防止后续升级偷偷提权）。
-- 权限是**声明与授权**机制，不是内核级强制；真正的强制隔离需要受限令牌/容器（未实现）。
+- 权限闸门本身是**准入控制**（决定给不给你启动），真正的强制来自**内核级隔离**：Windows 上插件跑在 AppContainer 里，没授 `network` 就没有出站（详见 §8.1）。两者是两层，缺一不可。
 
 ## 6. 副作用与确认
 
@@ -474,13 +474,18 @@ Stage（只读校验，失败则插件继续正常服务）
 
 ## 15. 仍未实现
 
+> **已实现（不要再看旧结论）**：进程隔离在 **D-1（2026-10-24）已落地**——Windows 上插件运行于
+> AppContainer，网络能力按授权附加，文件系统按 ACL 授予，详见 §8.1 与 `docs/ROADMAP.md` D-1。
+> 下面的表格只列**当前仍然没有**的东西。
+
 | 能力 | 说明 |
 | --- | --- |
-| 受限令牌 / AppContainer / 容器隔离 | 当前子进程与核心同用户同权限，权限闸门只是准入控制 |
+| 非 Windows 平台的等价隔离 | Linux 需 `bwrap`/`unshare -n`，macOS 需 `sandbox-exec`，均未实现；当前这些平台如实报 `unsupported`，`Mode=require` 会拒绝启动 |
 | 跨机器/分布式执行 | 一个 API 进程内的子进程，没有远程插件主机 |
-| 插件市场 / 远程源 | 只支持上传本地 ZIP |
+| 插件市场 / 远程源 | 只支持上传本地 ZIP，没有远程仓库或自动更新 |
 | 跨进程/集群配额 | 并发与队列计数都在进程内；多进程部署时是「每进程上限」 |
 | 手动作 invoke | 界面不提供裸调用调试入口；工具桥（`PluginToolBridge`）按 `agent-tool` 能力自动暴露给 Agent |
 | 签名工作流工具链 | 界面能粘公钥，但没有「生成密钥 → 算摘要 → 签包」的脚本（见 ROADMAP P1-6） |
+| 域名白名单 / CPU·内存配额 | 当前只做「有/无」两档；`limits.maxMemoryMb` 尚未按进程强制 |
 
 这些项的排期、依赖与验收标准见 **`docs/ROADMAP.md`**（P1-6、P3 各节）。

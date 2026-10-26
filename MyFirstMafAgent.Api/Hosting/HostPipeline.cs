@@ -98,9 +98,10 @@ public static class HostPipeline
     {
         app.MapApiEndpoints();
 
-        // 桌面控制面只在宿主托管的进程里存在，控制台模式不暴露。
-        if (desktopSecurity.Enabled)
-            app.MapDesktopEndpoints();
+        // 桌面控制面始终注册：即使这次是命令行/服务方式启动（没有宿主令牌），
+        // 后开的窗口也要能探活（/info）并按设置让服务优雅退出（/shutdown）。
+        // 两个动作都只允许回环来源，见 DesktopEndpoints。
+        app.MapDesktopEndpoints();
 
         if (mcp.Enabled)
             app.MapMcp(mcp.Path);

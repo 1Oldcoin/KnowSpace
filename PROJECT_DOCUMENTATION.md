@@ -48,7 +48,7 @@ MyFirstMafAgent/
 │  ├─ Persistence/                      # SqlSugar Store、表结构和检索
 │  ├─ Hosting/                          # 模块化组合根：选项/持久化/知识/分身/工具/MCP/插件/Worker/管线
 │  ├─ Plugins/                          # 插件 manifest 发现、子进程宿主、生命周期、工具桥接、摄取下沉
-│  ├─ ExternalTools/                    # FFmpeg、Embedding 模型与 pg0 便携 PostgreSQL
+│  ├─ ExternalTools/                    # FFmpeg、Embedding 模型与便携 PostgreSQL 17.9（bin/lib/share）
 │  ├─ wwwroot/                          # Vue 构建产物（发布脚本自动写入）
 │  ├─ App_Data/                         # 上传文件、分块暂存及模型缓存
 │  ├─ ApiHost.cs                        # 业务组合根：启动顺序与生命周期
@@ -57,7 +57,7 @@ MyFirstMafAgent/
 ├─ samples/                             # 示例插件（com.example.sample-platform）
 ├─ desktop-electron/                    # Electron 桌面壳：主进程 + preload + .NET API sidecar
 ├─ MyFirstMafAgent.Api.Tests/           # xUnit 单元测试
-├─ docs/                                # 阶段执行口径：基线、插件作者指南、插件生命周期、MCP 接入指南
+├─ docs/                                # 开发者说明书、插件/MCP 指南、阶段执行口径
 ├─ assets/app.ico                       # 应用图标（exe / 窗口 / 安装包 / 快捷方式共用）
 ├─ scripts/                             # 发布、架构检查、基线与桌面契约脚本
 └─ FrontEnd/myfist-agent/               # Vue 3 + TypeScript + Vite 前端
@@ -67,6 +67,17 @@ MyFirstMafAgent/
 	  ├─ components/                    # 总览、资料、笔记、问答、伴侣等页面
 	  └─ types.ts                       # 前端页面数据类型
 ```
+
+### 开发者文档入口
+
+给第三方开发者看的说明书（从零到发布，含非 C# 语言实现）：
+
+| 文档 | 内容 |
+| --- | --- |
+| `docs/PLUGIN-DEVELOPER-MANUAL.md` | 插件开发说明书：快速开始、manifest、两类能力、权限与沙箱、打包签名、升级排空、排错、Python/Node 实现 |
+| `docs/MCP-INTEGRATION-MANUAL.md` | MCP 接入说明书：把现成 MCP server 当插件载入，以及把本应用当 MCP server 给外部 Agent 用 |
+
+需要更细的运行时内部行为：`docs/PLUGIN-AUTHOR-GUIDE.md`（字段速查）、`docs/PLUGIN-LIFECYCLE.md`（状态机/隔离/审计）、`docs/MCP-ACCESS.md`、`docs/MCP-INTEGRATION.md`。
 
 ### 主要后端文件职责
 
@@ -122,8 +133,10 @@ MyFirstMafAgent/
 | `Application/Chats/ChatHistoryService.cs` | 聊天历史回读用例：来源名规范化（写错报错而非返回空）、条数夹紧、错误说人话。 |
 | `Infrastructure/Persistence/SqlSugarChatHistoryStore.cs` | 用一条 `UNION ALL` 合并三张会话表与导入记录表的只读视图；LIKE 元字符转义、命中处截取上下文。 |
 | `Mcp/ChatHistoryMcpTools.cs` | MCP 工具 `list_chat_sessions` 与 `chat_search_history`（`chat:read`）。 |
-| `Infrastructure/PortablePostgres/PortablePostgresHost.cs` | 启动/停止 pg0 子进程，等待数据库就绪、创建数据库并执行 `CREATE EXTENSION IF NOT EXISTS vector`。 |
-| `Infrastructure/PortablePostgres/PortablePostgresOptions.cs` | 便携数据库配置：实例名、端口、数据目录、账号、超时与 pg0 路径。 |
+| `Infrastructure/PortablePostgres/PortablePostgresHost.cs` | 便携 PostgreSQL 的完整生命周期：定位 `bin`、`initdb` 初始化、`pg_ctl start` 启动、等就绪、创建数据库并执行 `CREATE EXTENSION IF NOT EXISTS vector`、退出时 `pg_ctl stop`。 |
+| `Infrastructure/PortablePostgres/PortablePostgresOptions.cs` | 便携数据库配置：`Enabled`、外部连接串优先策略与预检超时、`bin` 目录、端口、根目录、数据目录、账号、启动/停止超时、退出时是否停止。 |
+| `Infrastructure/PortablePostgres/PgProcessRunner.cs` | 运行 `pg_ctl` / `initdb` 并把输出重定向到文件（不能用管道，否则 `postgres.exe` 继承写端、父进程等不到 EOF），读日志尾部拼进异常信息。 |
+| `Infrastructure/Persistence/ConnectionPreflight.cs` | 启动期外部数据库预检：TCP + 真实连接探测，失败时输出端点、脱敏连接串、失败分类与三条修法（口令永不进日志）。 |
 | `Endpoints/ApiEndpointMappings.cs` | 统一注册业务路由模块。 |
 | `Endpoints/KnowledgeEndpoints.cs` | 知识库、资料、分块上传、检索、问答及问答历史接口。 |
 | `Endpoints/CompanionEndpoints.cs` | 聊天记录导入、档案、风格画像及伴侣会话接口。 |
@@ -209,7 +222,7 @@ ASP.NET Core 10 Minimal API
 
 1. `KnowledgeChatService` 校验会话所属知识库，并读取该会话最近 30 条消息作为对话历史。
 2. `RetrievalRouter` 用本地 ONNX 模型对问题生成向量，按当前知识库和 `Ready` 状态过滤资料块，并跳过指纹/维度不一致的索引。
-3. 检索是**混合**的：向量（pgvector 余弦距离 `<=>`）与词法（PostgreSQL 全文）两路召回，再用 RRF 融合。词法侧的 token 由 `Domain/Knowledge/LexicalTokens.cs` 在应用侧切成中文二元组（PostgreSQL 默认解析器不认中文，pg0 也没有 `zhparser`），写入 `kb_chunks.lexical_tokens` 并由 GIN 表达式索引支持；历史切片由 `LexicalIndexWorker` 后台补分词。融合之后可选一层**重排**（`Application/Knowledge/CoverageReranker.cs` → `Domain/Knowledge/RerankScoring.cs`）：`Score = (1-w)·(0.5×融合名次 + 0.5×归一余弦) + w×idf 覆盖率`，`w=0.65`。默认开启，`Retrieval:RerankEnabled=false` 可回到纯 RRF。
+3. 检索是**混合**的：向量（pgvector 余弦距离 `<=>`）与词法（PostgreSQL 全文）两路召回，再用 RRF 融合。词法侧的 token 由 `Domain/Knowledge/LexicalTokens.cs` 在应用侧切成中文二元组（PostgreSQL 默认解析器不认中文，随包的 PostgreSQL 17.9 也没有 `zhparser`），写入 `kb_chunks.lexical_tokens` 并由 GIN 表达式索引支持；历史切片由 `LexicalIndexWorker` 后台补分词。融合之后可选一层**重排**（`Application/Knowledge/CoverageReranker.cs` → `Domain/Knowledge/RerankScoring.cs`）：`Score = (1-w)·(0.5×融合名次 + 0.5×归一余弦) + w×idf 覆盖率`，`w=0.65`。默认开启，`Retrieval:RerankEnabled=false` 可回到纯 RRF。
 4. 聊天默认取前 5 个片段（**重排开启时**每路召回 60 条再融合，融合后由 `RerankScoring` 重排再截断；关闭时各召回 15 条直接融合）；显式检索接口的结果数限制为 1–20，并可用 `mode` 选 `hybrid` / `vector` / `lexical` / `rerank`。
 5. `ToolCallingAgent` 将资料片段、最近对话和本轮问题组装成上下文交给聊天模型。提示词要求资料不足时明确说明、标记来源，并将检索内容视为不可信引用数据而非系统指令。
 6. API 返回回答和引用元数据；本轮用户消息与助手回答保存到 `knowledge_chat_messages`，会话标题初始为首个问题的前 100 个字符。
@@ -560,13 +573,19 @@ Embedding 与聊天模型采用分离配置：切换本地/云端聊天模型不
 
 | 配置项 | 用途 | 当前默认/要求 |
 | --- | --- | --- |
-| `ConnectionStrings:KnowledgeBase` | PostgreSQL 连接串。 | 可留空：留空时自动启动随包的 pg0（内置 PostgreSQL 18 + pgvector），并自动执行 `CREATE EXTENSION IF NOT EXISTS vector`。填写则优先使用外部数据库。 |
-| `PortablePostgres:ExecutablePath` | pg0 可执行文件路径。 | **默认空 = 自动定位**（Windows/Linux/macOS 各自解析，优先 `ExternalTools/pgSQL/<rid>/`）。填了但在当前平台不存在也会回落自动定位，不会因此启动失败。 |
+| `ConnectionStrings:KnowledgeBase` | PostgreSQL 连接串。 | 可留空：留空时由 API 拉起随包的便携 PostgreSQL 17.9 + pgvector 0.8.7，并自动执行 `CREATE EXTENSION IF NOT EXISTS vector`。填写则优先使用外部数据库。 |
 | `PortablePostgres:Enabled` | 是否启用便携 PostgreSQL。 | 默认 `true`；容器部署建议 `false`（改用外部 PG）。 |
-| `PortablePostgres:RespectExternalConnectionString` | 有外部连接串时是否跳过 pg0。 | 默认 `true`，便于开发机继续使用已有 PostgreSQL。 |
-| `PortablePostgres:Port` | pg0 监听端口。 | 默认 `55432`；端口占用时自动向后寻找可用端口。 |
-| `PortablePostgres:DataDirectory` | pg0 数据目录。 | 留空时使用 `%LOCALAPPDATA%\MyFirstMafAgent\pgsql\{InstanceName}`；该路径必须是纯 ASCII。 |
-| `PortablePostgres:CacheExecutableInLocalAppData` | 安装路径含中文时是否把 pg0 缓存到纯英文目录。 | 默认 `true`，规避 pg0 在非 ASCII 路径下解压失败（`os error 5`）。 |
+| `PortablePostgres:RespectExternalConnectionString` | 有外部连接串时是否跳过便携库。 | 默认 `true`，便于开发机继续使用已有 PostgreSQL。 |
+| `PortablePostgres:PreflightTimeoutSeconds` | 启动时对外部连接串做一次可达性预检的超时（秒）。 | 默认 `5`；`0` = 关闭预检。库正常时只多一次 TCP 连接。 |
+| `PortablePostgres:BinDirectory` | `bin` 目录（`postgres.exe`/`pg_ctl.exe`/`initdb.exe` 所在处）。 | **默认空 = 自动定位**：`ExternalTools/pgSQL/<rid>/bin` → `ExternalTools/pgSQL/bin`。可以填 `bin` 目录，也可以填 `pgsql` 根目录（自动补 `bin`）；填了但不存在会回落自动定位并记日志，不会启动失败。 |
+| `PortablePostgres:Port` | 便携库监听端口。 | 默认 `55432`；被占时向后找空闲端口；若 `pgdata/postmaster.pid` 指向的 `postgres.exe` 还活着，复用它记录的端口，不再起第二个实例。 |
+| `PortablePostgres:RootDirectory` | 便携数据库根目录（数据、日志都放在其下）。 | 默认空 = 自动挑选：`%LOCALAPPDATA%\MyFirstMafAgentData` → `%TEMP%\MyFirstMafAgent` → `%ProgramData%\MyFirstMafAgent` → `%USERPROFILE%\.myfirstmafagent` → **`{程序目录}\App_Data\pgdata`（便携兜底，最后才用）**。显式配置时不回落。 |
+| `PortablePostgres:DataDirectory` | 数据目录（`initdb` 的 `-D`）。 | 默认空 = `{便携根目录}\pgdata`。 |
+| `PortablePostgres:Username` | 便携库超级用户。 | 默认 `postgres`，`initdb -U` 用它。 |
+| `PortablePostgres:Password` | 该用户的密码。 | 默认 `postgres`；首次 `initdb` 经 `--pwfile=<临时文件>` 写入，`scram-sha-256` 认证。 |
+| `PortablePostgres:Database` | 目标数据库名。 | 默认 `myfirstmafagent`；不存在时自动 `CREATE DATABASE`。 |
+| `PortablePostgres:StartupTimeoutSeconds` | 等数据库就绪的上限（秒）。 | 默认 `180`，作为 `pg_ctl start` 的 `-w -t` 超时。 |
+| `PortablePostgres:StopOnExit` | 应用退出时是否停止本次拉起的实例。 | 默认 `true`；外部数据库与不是本进程拉起的实例不受影响。 |
 | `Desktop:OpenBrowser` | 控制台版启动后是否自动打开浏览器。 | 默认 `true`；开发环境默认不打开。 |
 | `Llm:UseCloudApi` | 选择 `Llm:Online` 或 `Llm:Local` 配置。 | `true` 使用在线配置，`false` 使用本地配置。在线密钥不要提交到仓库。 |
 | `Embedding:ModelDirectory` | 本地 ONNX 模型与 tokenizer 目录。 | 默认位于 `ExternalTools/Embedding/bge-small-zh-v1.5`，目录应包含 `model.onnx` 与 `tokenizer.json`。 |
@@ -605,12 +624,16 @@ Embedding 与聊天模型采用分离配置：切换本地/云端聊天模型不
 
 ### 8.2 本地启动
 
-默认无需准备数据库：`ConnectionStrings:KnowledgeBase` 留空时，启动器会自动拉起随包的 pg0（Windows/Linux/macOS 按当前平台在 `ExternalTools/pgSQL/<rid>/` 下查找），创建 `myfirstmafagent` 数据库并启用 pgvector。若要使用已有 PostgreSQL，把连接串配置到用户机密或环境变量即可（默认会跳过 pg0）：
+默认无需准备数据库：`ConnectionStrings:KnowledgeBase` 留空时，API 会拉起随包的便携 PostgreSQL（按当前 RID 解析 `ExternalTools/pgSQL/<rid>/bin`），首次运行 `initdb` 建库、之后 `pg_ctl start` 启动，并确保 `myfirstmafagent` 数据库存在且 `vector` 扩展已启用。若要使用已有 PostgreSQL，把连接串配置到用户机密或环境变量即可（默认会跳过便携库）：
 
 ```powershell
 $env:ConnectionStrings__KnowledgeBase = "Host=localhost;Port=5432;Database=knowledge_base;Username=postgres;Password=<password>"
 dotnet run --project MyFirstMafAgent.Api/MyFirstMafAgent.Api.csproj
 ```
+
+> **外部连接串配了但库没起来时，启动会直接停下并把原因说清楚**（`Infrastructure/Persistence/ConnectionPreflight.cs`）。因为"有连接串就跳过便携库"是既定规则，所以预检会先探一次那条连接，失败时输出端点、脱敏连接串、失败分类和三条修法（启动那台数据库 / 清空连接串改用便携库 / 设 `PortablePostgres:RespectExternalConnectionString=false`）。
+>
+> 典型场景：`dotnet user-secrets` 里留着 `Host=localhost;Port=5432;…`，而本机 PostgreSQL 服务是停止状态。此时要么以管理员身份 `Start-Service postgresql-x64-18`（先用 `Get-Service *postgresql*` 确认服务名），要么 `dotnet user-secrets remove "ConnectionStrings:KnowledgeBase" --project MyFirstMafAgent.Api` 改用便携库。预检超时可用 `PortablePostgres:PreflightTimeoutSeconds` 调整，设为 `0` 关闭。
 
 API 默认地址为 `http://127.0.0.1:5056`。API 启动后检查 `GET /api/health`。前端另开终端运行：
 
@@ -624,9 +647,10 @@ npm run dev
 
 便携数据库的运行文件：
 
-- 数据目录：`%LOCALAPPDATA%\MyFirstMafAgentData\pgsql\myfirstmafagent`
-- pg0 的 PostgreSQL 安装目录：`%USERPROFILE%\.pg0\installation`（pg0 自身约定）
-- 日志：`%LOCALAPPDATA%\MyFirstMafAgentData\logs`
+- 便携 PostgreSQL 程序：随包目录 `ExternalTools/pgSQL/<rid>/`（`bin/`、`lib/`、`share/` 三块，`VERSION.txt` 记版本）
+- 数据目录：`%LOCALAPPDATA%\MyFirstMafAgentData\pgdata`
+- 服务器日志：`%LOCALAPPDATA%\MyFirstMafAgentData\pglogs\postgres.log`（`pg_ctl -l`）；`pg_ctl` 自身的输出在同一个目录的 `pgctl-start.out`
+- 应用日志：`%LOCALAPPDATA%\MyFirstMafAgentData\logs`
 
 ### 8.3 打包为桌面版 / 控制台便携版
 
@@ -637,7 +661,7 @@ npm run dev
 | 桌面版 | `desktop-electron/` + `MyFirstMafAgent.Api` | Electron 窗口 + 作为 sidecar 的 API 子进程（不再有 Photino / Velopack） |
 | 控制台版 | `MyFirstMafAgent.Api` | 启动本地 Kestrel，自动用默认浏览器打开界面 |
 
-一键发布（构建前端 → `dotnet publish` → 复制 `wwwroot` → 校验 pg0/模型）：
+一键发布（构建前端 → `dotnet publish` → 复制 `wwwroot` → 校验便携 PostgreSQL 目录/模型）：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/Publish-Portable.ps1 -Target all
@@ -694,13 +718,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Evaluate-Retrieval.p
 
 ### 8.4 跨平台与容器
 
-同一份后端代码支持 `win-x64` / `linux-x64` / `linux-arm64` / `osx-arm64` / `osx-x64`（`win-arm64` 无上游便携数据库发行包）。
+同一份后端代码支持 `win-x64` / `linux-x64` / `linux-arm64` / `osx-arm64` / `osx-x64`；便携 PostgreSQL 目前只随包 `win-x64`，其它平台要先按同构装配好该平台的 `ExternalTools/pgSQL/<rid>/`（`win-arm64` 无便携库）。
 
 ```powershell
 # 按平台发布（默认会清掉其它平台的原生二进制）
 powershell -ExecutionPolicy Bypass -File scripts\Publish-Portable.ps1 -Target console -Runtime linux-x64
-# 补上该平台的原生工具（需能访问 GitHub）
-powershell -ExecutionPolicy Bypass -File scripts\Download-ExternalTools.ps1 -Runtime linux-x64 -Target all
+# 补上该平台的 ffmpeg（需能访问 GitHub）
+powershell -ExecutionPolicy Bypass -File scripts\Download-ExternalTools.ps1 -Runtime linux-x64 -Target ffmpeg
+# 便携 PostgreSQL 不从网络下载：给它一份该平台的现成 pgsql 树（含 bin/lib/share）或 zip
+powershell -ExecutionPolicy Bypass -File scripts\Download-ExternalTools.ps1 -Runtime linux-x64 -Target pgsql -PgSource D:\PG\dist\pgsql
 ```
 
 ```bash
@@ -708,21 +734,23 @@ powershell -ExecutionPolicy Bypass -File scripts\Download-ExternalTools.ps1 -Run
 docker compose up -d --build
 ```
 
-原生工具查找规则、pg0 发行包对照表、容器环境变量、镜像内含/不含什么、已验证/未验证清单：见 **`docs/DEPLOYMENT.md`**。要点：
+原生工具查找规则、便携库目录结构、容器环境变量、镜像内含/不含什么、已验证/未验证清单：见 **`docs/DEPLOYMENT.md`**。要点：
 
-- `ExternalTools/pgSQL/<rid>/` 与 `ExternalTools/ffmpeg/<rid>/` 放**上游原始文件名**即可，不需要改名；配置项留空自动定位。
+- `ExternalTools/pgSQL/<rid>/` 必须**整树**分发（`bin/`、`lib/`、`share/` 的相对位置不能拆，只拷 exe 会 `0xC0000135` 找不到 DLL）；`ExternalTools/ffmpeg/<rid>/` 放上游原始文件名即可。配置项留空自动定位。
 - 容器里必须用 `--urls http://0.0.0.0:5056` 覆盖，因为 `appsettings.json` 的 `Urls` 会盖掉 `ASPNETCORE_URLS`。
-- 本机尚未装 Docker，也没在 Linux/macOS 真机上跑过；非 Windows 的 pg0/ffmpeg 二进制因网络受限未下载（目录已建好，README 里有逐条下载命令）。
+- 本机尚未装 Docker，也没在 Linux/macOS 真机上跑过；非 Windows 的便携 PostgreSQL/ffmpeg 二进制尚未装配（目录已建好，README 里写了同构装配的做法）。
 
 发布要点：
 
 - 静态文件采用外置 `wwwroot`（发布脚本写入），不使用嵌入资源；不启用 AOT，因此不受嵌入文件提供程序限制。
 - 应用图标统一放在仓库根 `assets/app.ico`（ICO 格式，含 16/32/48/64/128/256 六种尺寸）：Electron 主进程用它作为窗口图标，打包器用它生成 exe 与快捷方式图标；前端 `public/favicon.ico` 是同一文件的副本。**替换图标：覆盖 `assets/app.ico` 并同步 `FrontEnd/myfist-agent/public/favicon.ico`，再重新发布即可。**
 - 桌面版窗口加载 `http://127.0.0.1:<随机端口>/`，API 是独立子进程：令牌经环境变量传入、由主进程通过 `X-Api-Token` 请求头注入；退出时先 `POST /api/desktop/shutdown`，超时再强杀。
-- pg0 随应用启动，退出时通过 `pg0 stop` 优雅停止；异常退出后下次启动会复用已运行实例。
-- pg0 始终从 `%LOCALAPPDATA%\MyFirstMafAgentData\tools` 运行（首次启动复制一次，按当前平台命名为 `pg0-<rid>[.exe]`），工作目录设在 `...\pgsql` 下：这样 `postgres.exe` 子进程不会锁住安装目录，升级/覆盖安装才不会报“拒绝访问”。
-- **文件夹版不要放在桌面、文档或下载目录**：Windows「受控文件夹访问」会限制从这些位置启动的未签名程序写入用户目录，导致便携数据库无法初始化（表现为 `Access is denied` / `os error 5`）。推荐 `D:\Apps\MyFirstMafAgent`。
-- 应用目录可以包含中文：启动器会把 pg0 复制到纯 ASCII 的 `%LOCALAPPDATA%\MyFirstMafAgentData\tools` 后运行。
+- 便携库随 API 启动，退出时走 `pg_ctl stop -D <pgdata> -m fast -w -t 60` 优雅停止；异常退出后下次启动会读 `pgdata/postmaster.pid`，若那个 `postgres.exe` 还活着就直接复用它的端口，不再起第二个实例。
+- 便携库**就地**从发布目录的 `ExternalTools/pgSQL/<rid>/` 运行（不再复制到 `%LOCALAPPDATA%`），数据与日志写在 `%LOCALAPPDATA%\MyFirstMafAgentData` 下的 `pgdata`/`pglogs`：所以升级/卸载必须先把 `postgres.exe` 停掉，否则它占住安装目录——`MyFirstMafAgent.Api.exe --stop-portable-postgres` 就是给安装器用的。
+- **文件夹版不要放在桌面、文档或下载目录**：安全软件（火绒/360 的文件防护）与 Windows「受控文件夹访问」会拦截从这些位置启动的未签名程序写入用户目录，便携数据库因此初始化失败（表现为 `Access is denied`）。推荐 `D:\Apps\MyFirstMafAgent`。
+- **同一个约束也适用于开发**：仓库在桌面目录下时，VS 里 F5 启动的 `bin\Debug\...\MyFirstMafAgent.Api.exe` 无法写入 `%LOCALAPPDATA%` / `%TEMP%` / `%ProgramData%` / 用户主目录 / `%APPDATA%` 中的任何一个（实测：同一个探针程序只有自己的目录可写）。此时有三条路：**把仓库移到非受保护目录**（如 `C:\Dev\MyFirstMafAgent`）、**在安全软件里放行该 exe/目录**、或**配置 `PortablePostgres:RootDirectory` 指向一个已存在的可写目录**。注意：`PortablePostgres:DataDirectory` 救不了这种情况——它是在选根目录之后才被读取的。
+- 自动选目录的**最后一档**是 `{程序目录}\App_Data\pgdata`（便携兜底）：用户目录整片不可写时才用，日志会打一条警告，因为覆盖安装/删除程序目录会连带数据。
+- 应用目录**可以**包含中文，但靠的是一层镜像，不是 `initdb` 天生支持：Windows 下 `initdb` 会把程序路径按 ANSI 代码页塞进启动 `postgres.exe` 的命令行，非 ASCII 目录会得到 `FATAL: invalid byte sequence for encoding "UTF8"`（实测：`C:\Word\通用文件服务\...` 下初始化必失败，同一份文件搬到 `C:\pgspike\pgsql` 立即成功）。所以当 `ExternalTools/pgSQL/<rid>/bin` 位于非 ASCII 路径时，`PortablePostgresHost.EnsureRunnableBinDirectoryAsync` 先把整棵树镜像到 `{便携根目录}\pgsql`（首次约 65 MB，之后靠 `VERSION.txt` 指纹判断是否最新，不再复制），再从镜像里跑 `initdb`/`pg_ctl`。**数据目录则必须是纯 ASCII**（`EnsureAsciiDataPath` 强制校验，否则直接报错并给出改法）：这一条同时解决了升级时 `postgres.exe` 锁住中文安装目录的问题。
 - 文件夹版应用目录需可写（会在其下创建 `App_Data`），不要放在 `Program Files`。
 - 应用未签名，Windows SmartScreen 首次运行会提示“未知发布者”；分发前建议配置代码签名（届时在 electron-builder 里配置）。
 
@@ -737,8 +765,8 @@ docker compose up -d --build
 - 上述尚未实现的能力（含代码签名、插件隔离、多用户认证等）已整理成待办清单，见 **`docs/ROADMAP.md`**。
 - 问答历史导出为 Markdown，助手消息下会附上引用资料（序号 / 段落 / 相关度 / 片段）与网页来源；引用元数据存于 `knowledge_chat_messages.citations` 与 `answer_meta`，历史会话重开时同样呈现。
 - 分身是模仿而非本人：记忆不足时问答接口直接返回 400 提示先投喂，不会硬编回答；记忆、向量、洞察与会话均与知识库表完全隔离，不参与知识库检索，也不会被当作事实引用。若使用云端聊天模型或云端向量模型，投喂文本、记忆与人格洞察会发送给服务商；这些数据不属于医疗、法律或投资建议。
-- 便携数据库首次启动会把 PostgreSQL 18 与 pgvector 释放到 `%USERPROFILE%\.pg0`，数据写入 `%LOCALAPPDATA%\MyFirstMafAgentData\pgsql`，首次解压通常需要 10~60 秒。
-- 便携数据库对路径有硬约束（pg0 自身限制）：**可执行文件路径与数据目录必须是纯 ASCII**。启动器统一把 pg0 复制到 `%LOCALAPPDATA%\MyFirstMafAgentData\tools`，数据目录固定在 `%LOCALAPPDATA%` 下，因此中文安装目录可用；若这些都不可写（例如文件夹版放在桌面），请改用安装包、移出受保护目录或在安全软件中放行。
+- 便携数据库首次启动要 `initdb` 建一个全新的集群（`PostgreSQL 17.9` + `pgvector 0.8.7`），数据写入 `%LOCALAPPDATA%\MyFirstMafAgentData\pgdata`；几十秒量级，之后启动只等 `pg_ctl` 就绪。
+- 便携库的平台约束（都已进实现）：`pg_ctl` 的 stdout/stderr 不能重定向成管道（`postgres.exe` 继承写端，父进程等不到 EOF），所以输出落文件、`-l` 日志另用一个文件；不能以管理员权限运行（`initdb`/`postgres` 拒绝提权令牌）；端口被占时日志报 `Permission denied` 而不是 `address already in use`；- `ExternalTools/pgSQL` 必须整树分发（`bin`/`lib`/`share` 三块，只拷 exe 会 `0xC0000135`）。`PortablePostgres:RootDirectory` 可显式指定根目录；**数据目录必须是纯 ASCII**（`initdb` 在非 ASCII 数据目录下必失败），程序目录可以含中文但要靠上面的镜像。
 - 桌面版是 Electron 壳 + API 子进程，不再依赖 WebView2/Photino。启动诊断：Electron 侧写入 `%APPDATA%\myfirstmafagent-desktop\logs\electron-shell.log`（含 `starting API sidecar`、`API sidecar ready` 与 API 输出尾巴），后端写入 `%LOCALAPPDATA%\MyFirstMafAgentData\logs`。排查“窗口空白 / 白屏”时先看 sidecar 是否成功拉起、`/api/health` 是否 200。
 - 安装包未做代码签名，SmartScreen 会提示未知发布者；正式分发前建议配置签名证书。
 

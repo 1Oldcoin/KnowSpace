@@ -239,14 +239,20 @@ API 启动时通过 SqlSugar CodeFirst 实体幂等创建知识库、资料、�
 > 因此规则是：**可空列的值来自变量时，不用 `SetColumns`**——要么写实体驱动的 `UpdateColumns`，要么写显式 SQL 加 `CAST(... AS timestamptz)`。已按此修正 `avatar_ingestions` 的三条状态语句（显式 SQL）与 `UpdateMemoriesAsync` / `UpdateSimulationAsync` / `UpdateEvalRunAsync`（`UpdateColumns`）。回归测试：`AvatarIngestionUpdateCommandTests`、`NullableColumnBindingTests`。
 
 
-默认情况下不需要外部数据库：`ConnectionStrings:KnowledgeBase` 留空时，`PortablePostgresHost` 会启动随应用发布的 `ExternalTools/pgSQL/pg0-windows-x86_64.exe`（内置 PostgreSQL 18 + pgvector），创建目标数据库并执行 `CREATE EXTENSION IF NOT EXISTS vector`。数据目录默认在 `%LOCALAPPDATA%\MyFirstMafAgent\pgsql`，应用退出时自动 `pg0 stop`。
+默认情况下不需要外部数据库：`ConnectionStrings:KnowledgeBase` 留空时，`PortablePostgresHost` 会拉起随应用发布的**便携 PostgreSQL 目录**（`ExternalTools/pgSQL/<rid>/`，PostgreSQL 17.9 + pgvector 0.8.7，EDB Windows x64 二进制，`bin/`、`lib/`、`share/` 整树分发）。首次运行执行 `initdb -D <pgdata> -U postgres --auth=scram-sha-256 --encoding=UTF8 --locale=C --pwfile=<临时文件>`；之后每次启动执行 `pg_ctl start -D <pgdata> -l <postgres.log> -w -t <StartupTimeoutSeconds> -o "-p <port> -c listen_addresses=127.0.0.1"`；就绪后确保目标数据库存在并执行 `CREATE EXTENSION IF NOT EXISTS vector`（vector 随包，不需要下载或安装扩展）。数据目录默认 `{便携根目录}/pgdata`，服务器日志写 `{便携根目录}/pglogs/postgres.log`，应用退出时执行 `pg_ctl stop -D <pgdata> -m fast -w -t 60`。数据库生命周期完全由 API 负责，桌面壳不知道数据库存在。
 
-如需使用已有 PostgreSQL，通过环境变量或用户机密提供连接串（默认会跳过 pg0）；运行 API 的用户需有创建扩展/表/约束的权限，不要把真实密码写入配置文件：
+如需使用已有 PostgreSQL，通过环境变量或用户机密提供连接串（默认会跳过便携库）；运行 API 的用户需有创建扩展/表/约束的权限，不要把真实密码写入配置文件：
 
 ```powershell
 $env:ConnectionStrings__KnowledgeBase = "Host=localhost;Port=5432;Database=knowledge_base;Username=postgres;Password=<your-password>"
 dotnet run --project MyFirstMafAgent.Api/MyFirstMafAgent.Api.csproj
 ```
+
+**跳过便携库之后必须先确认那条连接串真的能用**（`Infrastructure/Persistence/ConnectionPreflight.cs`）。「有连接串就跳过便携库」这条规则本身是对的，但它把两类失败混成了一条消息：库没启动、口令/库名不对。没有预检时两者都要等 SqlSugar 初始化才炸，而炸出来的是 `SqlSugarException: … Failed to connect to 127.0.0.1:5432 DbType="PostgreSQL";ConfigId=""` ——这里面没有库名、也没有"便携库是被跳过而不是坏了"这个因果，用户只能自己猜。
+
+所以启动顺序改成：解析连接串 → **TCP + 一条真实 Npgsql 连接**探一次（`PortablePostgres:PreflightTimeoutSeconds`，默认 5 秒，0 = 关闭）→ 通过才注册 SqlSugar。失败时把人话写进 `[startup]` 日志后直接抛，内容固定包含四段：端点（`host:port/database`）、脱敏连接串（`Password=***`，口令永不进日志）、失败分类（主机名解析失败 / TCP 连不上 / 握手超时 / 服务器拒绝 / 对端不是 PostgreSQL / 连接串解析失败）、以及三条互斥修法（启动那台数据库 / 清空连接串改用便携库 / 设 `PortablePostgres:RespectExternalConnectionString=false` 强制走便携库）。分类比错误原文重要：**"被拒绝"要引导去启动服务，"认证失败"要引导去改口令**，混在一起给的修法必然有一半是错的。
+
+这条路被真实踩过：开发机 `dotnet user-secrets` 里留着 `Host=localhost;Port=5432;Database=knowledge_base`，而本机 PostgreSQL 18 的 Windows 服务（`D:\PgSQL`，启动类型为自动）处于停止状态，于是每次 F5 都只看到 SqlSugar 堆栈。现在同一条命令输出的第一行就是 `检测到外部数据库连接串，跳过便携 PostgreSQL：Host=localhost;Port=5432;…;Password=***`，紧跟着完整的诊断块。回归测试：`ConnectionPreflightTests`（16 项，含"口令不泄漏"与"非 PostgreSQL 端口不得判成功"）。
 
 聊天模型通过 OpenAI-compatible 接口配置。`Llm:UseCloudApi=true` 选择 `Llm:Online`，`false` 选择 `Llm:Local`。Embedding 使用 API 内的 ONNX Runtime；`Embedding:ModelDirectory` 指向包含 `model.onnx` 和 `tokenizer.json` 的目录，当前 BGE 配置为 512 维。更换模型或维度后不要混用旧向量，需重新导入/向量化已有资料。
 
@@ -254,9 +260,13 @@ PDF 和 DOCX 在 API 进程内提取文字；图片描述走当前选择的聊�
 
 前端使用 `cd FrontEnd/myfist-agent; npm run dev` 启动；API 默认地址为 `http://127.0.0.1:5056`。前端默认使用同源请求，Vite 通过 `server.proxy` 把 `/api`、`/mcp` 转发到 5056，因此不再需要设置 `VITE_API_BASE_URL`。先启动并确认 `/api/health` 返回数据库已连接，再上传资料。API 路由按领域定义在 `MyFirstMafAgent.Api/Endpoints/`；`/api/search` 提供显式相似度检索，`/api/chat` 会自动检索并返回引用。知识库问答历史支持会话重命名、单条/批量删除和 Markdown 导出，具体路由见前端 README。
 
-发布形态有两种：`MyFirstMafAgent.Api`（控制台 + 自动打开浏览器）与 Electron 桌面壳（`desktop-electron/`，把同一份 API 当作 sidecar 子进程拉起）。前端 `vite.config.ts` 使用 `base: './'`，构建产物由 `ApiHost` 通过 `wwwroot` 托管；`scripts/Publish-Portable.ps1` 负责构建前端、`dotnet publish`（self-contained win-x64，非 AOT）、复制 `wwwroot` 并校验 pg0/Embedding 模型——`-Target desktop` 发布的就是 **API 本体**，放到 `publish/desktop`，Electron 从那里拉起 sidecar。安装包由 electron-builder（NSIS）生成：壳只打 `main.js`/`preload.js`，后端通过 `extraResources` 整体放到 `resources/api`；`scripts/Build-ElectronInstaller.ps1` 一把梭（发布 + 打包），产物在 `publish/releases`。便携数据库统一从 `%LOCALAPPDATA%\MyFirstMafAgentData\tools` 运行、工作目录设在 `pgsql` 下，避免 `postgres.exe` 锁住安装目录导致升级失败。
+发布形态有两种：`MyFirstMafAgent.Api`（控制台 + 自动打开浏览器）与 Electron 桌面壳（`desktop-electron/`，把同一份 API 当作 sidecar 子进程拉起）。前端 `vite.config.ts` 使用 `base: './'`，构建产物由 `ApiHost` 通过 `wwwroot` 托管；`scripts/Publish-Portable.ps1` 负责构建前端、`dotnet publish`（self-contained win-x64，非 AOT）、复制 `wwwroot` 并校验便携 PostgreSQL 目录/Embedding 模型——`-Target desktop` 发布的就是 **API 本体**，放到 `publish/desktop`，Electron 从那里拉起 sidecar。安装包由 electron-builder（NSIS）生成：壳只打 `main.js`/`preload.js`，后端通过 `extraResources` 整体放到 `resources/api`；`scripts/Build-ElectronInstaller.ps1` 一把梭（发布 + 打包），产物在 `publish/releases`。便携库**就地**从发布目录的 `ExternalTools/pgSQL/<rid>/` 运行（安装路径含中文时镜像到 `%LOCALAPPDATA%\MyFirstMafAgentData\pgsql` 再跑，见下），数据与日志落在 `%LOCALAPPDATA%\MyFirstMafAgentData` 下；`postgres.exe` 因此会占住安装目录（非 ASCII 安装目录除外，那时它跑的是镜像副本），升级/卸载必须先停掉它（§9.8 的 `--stop-portable-postgres` 就是干这个的）。
 
-发布目录**不能放在桌面/文档/下载**：Windows「受控文件夹访问」会阻止从这些位置启动的未签名程序写入用户目录，便携数据库会启动失败。应用目录本身可以含中文，`PortablePostgresHost` 会把 pg0 复制到 `%LOCALAPPDATA%\MyFirstMafAgent\tools` 后运行（pg0 要求可执行路径与数据目录均为纯 ASCII）。
+
+发布目录**不能放在桌面/文档/下载**：安全软件的文件防护与 Windows「受控文件夹访问」会阻止从这些位置启动的未签名程序写入用户目录，便携数据库初始化会失败。`PortablePostgresHost` 按用户数据目录 → 临时目录 → 公共程序数据 → 用户主目录 → `{程序目录}\App_Data`（便携兜底）的顺序挑一个可写的根目录，且**数据与日志路径必须是纯 ASCII**——`initdb` 在非 ASCII 数据目录下必然报 `FATAL: invalid byte sequence for encoding "UTF8"`，因为 Windows 下它把路径按 ANSI 代码页塞进启动 `postgres.exe` 的命令行。校验不通过时直接报错并给出改法，不会带着坏路径硬跑（顺带保住了"升级时 `postgres.exe` 不锁中文安装目录"）。也可用 `PortablePostgres:RootDirectory` 直接指定。
+
+应用目录本身**可以**含中文，但靠的是一层镜像而不是 `initdb` 天生支持：当 `ExternalTools/pgSQL/<rid>/bin` 落在非 ASCII 路径时（典型的 `C:\Word\通用文件服务\...`，实测必挂），先把整棵树镜像到 `{便携根目录}\pgsql`（首次约 65 MB，之后按 `VERSION.txt` 指纹跳过），再从镜像里跑 `initdb`/`pg_ctl`。
+
 
 ### 9.1 宿主分层：模块化组合根
 
@@ -300,9 +310,11 @@ Electron.NET 现阶段不能作为基线：`ElectronNET.Core` 最新为 `0.6.0`�
 | 控制面 | `Endpoints/DesktopEndpoints.cs` | `GET /api/desktop/info`、`POST /api/desktop/shutdown`（仅桌面模式注册） |
 | 渲染安全 | `ApiHost` + `DESKTOP_STRICT_CSP=1` | 严格 CSP 响应头；`contextIsolation`/`sandbox` 开启、`nodeIntegration` 关闭 |
 
-启动顺序：pg0 → API（`http://127.0.0.1:0`）→ 轮询 ready 文件 → 轮询 `/api/health` → 创建窗口。退出顺序：`POST /api/desktop/shutdown` → 等待 API 退出（≤20s）→ 强制结束；`ApplicationStopping` 只停止本次启动的 pg0。
+启动顺序：API（`http://127.0.0.1:0`，便携库由 API 在自己的启动流程里拉起）→ 轮询 ready 文件 → 轮询 `/api/health` → 创建窗口。退出顺序：`POST /api/desktop/shutdown` → 等待 API 退出（≤20s）→ 强制结束；`ApplicationStopping` 只停止本次启动的便携库实例，外部 PostgreSQL 不受影响。
 
 令牌不入 URL、日志、ready 文件或渲染进程；主进程用 `webRequest.onBeforeSendHeaders` 注入请求头，因此前端 `api.ts` 无需改动。
+
+**渲染进程不能用 `window.prompt` / `window.confirm`**：Electron 的 `window_setup.cc` 直接让 `prompt()` 抛错（`prompt() is and will not be supported`），异常发生在业务 `try/catch` 之外，表现为"点了没反应"——新建专题、重命名专题、新建知识库、重命名对话、分身纠错都栽在这上面。`confirm()` 虽有实现，但它是同步的原生弹窗，样式与产品脱节，也无法区分危险操作。因此前端统一走 `src/services/dialog.ts` 的 `promptText()` / `confirmAction()`（Promise 化），由 `src/components/AppDialogHost.vue` 在 `App.vue` 根部渲染应用内对话框；新增交互时**不要再引入任何原生 `prompt/confirm/alert`**。
 
 契约验证（不需要 Electron）：
 
@@ -530,9 +542,9 @@ Embedding 使用 `Microsoft.ML.OnnxRuntime` 和 `Microsoft.ML.Tokenizers` NuGet 
 
 阶段 9 删掉了 Photino 壳与 Velopack。桌面端从"能跑"到"能交付"只差打包，本阶段补上：
 
-**打包只做一件事：把已发布的 API 原样塞进安装包**。`electron-builder.yml` 里 `files` 只含 `main.js`/`preload.js`/`package.json`，后端通过 `extraResources` 从 `../publish/desktop` 映射到 `resources\api`——**不能打进 asar**，asar 内的 exe 无法作为子进程启动。`main.js` 本来就按 `process.resourcesPath/api` 找 exe，所以代码零改动。产物 `MyFirstMafAgent-<version>-setup.exe` 约 310 MB，大头是自包含 .NET 运行时与 pg0；NSIS 再用 LZMA 压到同一体积量级，因此首次安装需要十几秒。
+**打包只做一件事：把已发布的 API 原样塞进安装包**。`electron-builder.yml` 里 `files` 只含 `main.js`/`preload.js`/`package.json`，后端通过 `extraResources` 从 `../publish/desktop` 映射到 `resources\api`——**不能打进 asar**，asar 内的 exe 无法作为子进程启动。`main.js` 本来就按 `process.resourcesPath/api` 找 exe，所以代码零改动。产物 `MyFirstMafAgent-<version>-setup.exe` 约 310 MB，大头是自包含 .NET 运行时与便携 PostgreSQL 目录（`bin`/`lib`/`share` 三块必须整树带上，只拷 exe 会 `0xC0000135` 找不到 DLL）；NSIS 再用 LZMA 压到同一体积量级，因此首次安装需要十几秒。
 
-**卸载钩子曾经是"有实现、没调用方"的死代码**。`PortablePostgresHost.TryStopForUninstall` 从 Velopack 时代就存在，删工程时唯一的调用点（`OnBeforeUninstallFastCallback`）一起没了，于是变成"文档说要接、代码没人调"。本阶段的接法刻意做得极薄：给 API 加一个一次性参数 `--stop-portable-postgres`，在 `Program.cs` **构建 Host 之前**处理（只调 `TryStopForUninstall(AppContext.BaseDirectory)` 然后 `return 0`），NSIS 的 `customUnInstall` 用 `nsExec::ExecToLog` 调它。这样安装器不需要知道 pg0 的实例名/数据目录/连接串，**这些全部仍由 appsettings 决定**，避免两处配置漂移；用 `nsExec` 而不是 `ExecWait`，是为了卸载向导里不闪控制台窗口。
+**卸载钩子曾经是"有实现、没调用方"的死代码**。`PortablePostgresHost.TryStopForUninstall` 从 Velopack 时代就存在，删工程时唯一的调用点（`OnBeforeUninstallFastCallback`）一起没了，于是变成"文档说要接、代码没人调"。本阶段的接法刻意做得极薄：给 API 加一个一次性参数 `--stop-portable-postgres`，在 `Program.cs` **构建 Host 之前**处理（只调 `TryStopForUninstall(AppContext.BaseDirectory)` 然后 `return 0`），NSIS 的 `customUnInstall` 用 `nsExec::ExecToLog` 调它。这样安装器不需要知道便携库的数据目录/端口/连接串，**这些全部仍由 appsettings 决定**，避免两处配置漂移；用 `nsExec` 而不是 `ExecWait`，是为了卸载向导里不闪控制台窗口。
 
 **顺序很重要**：`customUnInstall` 在 electron-builder 的 `un.install` 段里排在"删除已安装文件"之前（`uninstaller.nsh` 的 `!insertmacro customUnInstall` 紧跟 `setLinkVars`）。electron-updater 的升级也是先静默跑旧版卸载器，所以升级路径自动覆盖。实测：强杀 API 与 Electron 留下 10 个 `postgres.exe`，静默卸载后归零、安装目录删干净、`%LOCALAPPDATA%\MyFirstMafAgentData` 完好。
 
@@ -549,16 +561,25 @@ Embedding 使用 `Microsoft.ML.OnnxRuntime` 和 `Microsoft.ML.Tokenizers` NuGet 
 
 | 绑定 | 旧写法 | 现写法 |
 | --- | --- | --- |
-| 便携 PostgreSQL | `ExternalTools/pgSQL/pg0-windows-x86_64.exe` 写死 | `PlatformRuntime.ResolveTool` 按 RID 解析，`Pg0VendorFileName` 直接映射上游文件名 |
+| 便携 PostgreSQL | 写死 `ExternalTools/pgSQL/pg0-windows-x86_64.exe`（pg0 单文件，已移除） | `PlatformRuntime.ResolvePostgresBinDirectory` 按 RID 解析 `ExternalTools/pgSQL/<rid>/bin` |
 | FFmpeg | `Media:FfmpegPath` 默认 `ffmpeg.exe` | 默认空 → 按 RID 找，最后回落 PATH |
 | 插件入口 | 以 `.exe` 后缀判定"原生程序 vs 宿主命令" | `PluginEntryCommand.IsHostCommand`：不含路径分隔符、不是已知脚本扩展名、包内无同名文件 → 宿主命令 |
 
-`Infrastructure/PlatformRuntime.cs` 是这套抽象的**唯一入口**，只做四件事：算 RID、列出候选路径、解析、补可执行位。
+`Infrastructure/PlatformRuntime.cs` 是这套抽象的**唯一入口**：算 RID、列出候选路径、解析、补可执行位。
 
-- **查找顺序（先命中先用）**：`<tool>/<rid>/<上游原名>` → `<tool>/<rid>/<工具名><后缀>` → `<tool>/<上游原名>` → `<tool>/<工具名>-<rid><后缀>` → `<tool>/<工具名><后缀>`。前两级是"多平台共存"，后三级是**向历史布局兼容**（老用户把 `ffmpeg.exe` 直接放根下，不能因为升级就找不到）。
-- **"配置即覆盖，而不是配置即唯一"**：`PortablePostgres:ExecutablePath` / `Media:FfmpegPath` 显式填写且文件存在 → 用它；填写但不存在 → **回落自动定位并记日志**，不抛异常。这条规则的动机来自一个很具体的场景：把 Windows 的 appsettings 同步到 Linux 服务器后，写死的 `pg0-windows-x86_64.exe` 会让服务直接起不来，而实际上 `linux-x64/` 下就有可用的二进制。
+- **便携 PostgreSQL 要的是目录，不是文件**：`ResolvePostgresBinDirectory` 只看两级——`ExternalTools/pgSQL/<rid>/bin` → `ExternalTools/pgSQL/bin`（扁平布局兼容）；`PortablePostgres:BinDirectory` 可以填 `bin` 目录，也可以填 `pgsql` 根目录（自动补 `bin`），配了但不存在则回落自动定位并记日志。
+- **其它工具的查找顺序（先命中先用）**：`<tool>/<rid>/<上游原名>` → `<tool>/<rid>/<工具名><后缀>` → `<tool>/<上游原名>` → `<tool>/<工具名>-<rid><后缀>` → `<tool>/<工具名><后缀>`。前两级是"多平台共存"，后三级是**向历史布局兼容**（老用户把 `ffmpeg.exe` 直接放根下，不能因为升级就找不到）。
+- **"配置即覆盖，而不是配置即唯一"**：`PortablePostgres:BinDirectory` / `Media:FfmpegPath` 显式填写且存在 → 用它；填写但不存在 → **回落自动定位并记日志**，不抛异常。这条规则的动机来自一个很具体的场景：把 Windows 的 appsettings 同步到 Linux 服务器后，写死的工具路径会让服务直接起不来，而实际上对应 RID 目录下就有可用的二进制。
 - **可执行位**：`cp`/`unzip` 会丢 `+x`，而 `Process.Start` 在 Linux 上会直接 `Permission denied`。`EnsureExecutable` 在 Unix 上 `chmod 0755`，且**永不抛**（只读挂载时不至于让启动崩掉）。
-- **失败要可操作**：找不到 pg0 时，错误信息列出平台、**全部 5 条候选路径**、上游文件该放哪里、下载地址，以及"改用外部数据库"的替代方案——而不是一句"找不到文件"。
+- **失败要可操作**：找不到便携 PostgreSQL 时会报出配置值、两条自动定位路径、`bin` 里应该有什么（`postgres.exe`/`pg_ctl.exe`/`initdb.exe`）、以及"改用外部数据库"的替代方案——而不是一句"找不到文件"。
+
+**便携 PostgreSQL 的五个平台坑**（都已经写进实现，动它之前先读）：
+
+- `pg_ctl` 的 stdout/stderr 不能重定向成管道：`postgres.exe` 会继承 pg_ctl 的标准句柄，只要它还活着管道写端就不关，父进程永远等不到 EOF——命令不返回、进程管理器里 `postgres.exe` 活得好好的、日志显示启动成功。`PgProcessRunner` 因此走 `cmd /d /s /c "... > out 2>&1"`（Unix 走 `/bin/sh -c`），重定向发生在创建子进程之前，句柄落在文件上。Electron 拉起 API 时 API 的 stdio 本身就是管道，这里必须绕开。
+- `pg_ctl` 自己的输出文件与 `-l` 的服务器日志不能是同一个文件，否则 Windows 报 "The process cannot access the file because it is being used by another process"。
+- 不能以管理员权限运行：`initdb` 与 `postgres` 直接拒绝提权令牌。
+- 端口被占时日志报的是 `Permission denied` 而不是 `address already in use`；看到它就先去查那个端口，别按字面意思改权限。
+- 日志必须写在数据目录之外（`{便携根目录}/pglogs`）：数据目录会被 `initdb` 当作自己的地盘，日志混进去反而添乱。
 
 **容器口径**：Electron 不进镜像（容器里没有渲染需求），API 以框架依赖方式跑（运行镜像已有 .NET 运行时），ffmpeg 用 `apt` 装而**不随镜像塞副本**——正好由"回落 PATH"这条规则支撑。容器里必须用命令行 `--urls http://0.0.0.0:5056`，因为 `appsettings.json` 的 `Urls` 优先级高于 `ASPNETCORE_URLS`，环境变量压不住。
 
@@ -595,7 +616,7 @@ Embedding 使用 `Microsoft.ML.OnnxRuntime` 和 `Microsoft.ML.Tokenizers` NuGet 
 
 | 决策 | 选择 | 为什么 |
 | --- | --- | --- |
-| 中文怎么分词 | 应用侧二元组（`Domain/Knowledge/LexicalTokens.cs`），写进 `kb_chunks.lexical_tokens` | PostgreSQL 的 `simple` 解析器会把整段中文当一个词；pg0 的 PG 不带 `zhparser`/`pg_jieba`，装扩展就得要求用户装数据库插件 |
+| 中文怎么分词 | 应用侧二元组（`Domain/Knowledge/LexicalTokens.cs`），写进 `kb_chunks.lexical_tokens` | PostgreSQL 的 `simple` 解析器会把整段中文当一个词；随包的 PostgreSQL 17.9 不带 `zhparser`/`pg_jieba`，装扩展就得要求用户自己装数据库插件 |
 | 索引怎么建 | `CREATE INDEX … USING GIN (to_tsvector('simple', coalesce(lexical_tokens, '')))` 表达式索引 | 表达式索引让写入保持"普通的 SqlSugar 批量插入"，不需要为 `tsvector` 手拼 SQL；查询必须用完全相同的表达式才吃得到索引（有单测盯着） |
 | 老数据怎么办 | `LexicalIndexWorker` 分批补 `lexical_tokens` | 分词只能在应用侧做，塞进启动流程会让大库启动卡几分钟；空转时只发一条 `LIMIT 1` |
 | 怎么融合 | RRF，`Σ 1/(k+rank)`，k=60 | 余弦在 0–1、`ts_rank` 常见 0.0x，线性加权必须按语料重新调参；RRF 只看排名，免疫量纲 |

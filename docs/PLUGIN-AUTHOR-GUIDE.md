@@ -1,9 +1,14 @@
-# 插件作者指南（阶段 3–5 口径）
+# 插件作者指南（速查）
+
+> 第一次写插件？先看 **`docs/PLUGIN-DEVELOPER-MANUAL.md`**（对外整合版：从零到发布，含非 C# 语言实现与故障对照表）。
+> 仓库内的分阶段教程是 `docs/PLUGIN-DEVELOPMENT-GUIDE.md`。
+> 本文是写代码时要摊在手边的**速查**：清单字段、协议方法、错误码、沙箱边界。
+> 想知道运行时怎么管你（状态机、四道闸门、审计、隔离），看 `docs/PLUGIN-LIFECYCLE.md`。
 
 本文描述**已经实现**的插件契约。安装/升级/回滚/卸载、配置、授权、审计、摘要/签名校验、
 平台条目映射与去重、撤回删除、同步游标、知识库作用域与配额均已落地；
 两种对话方言（自有协议 `plugin/*` 与标准 **MCP**）都可用，见 §3.2；
-内核级隔离（受限令牌/容器）尚未实现，文中以「未实现」明确标注。
+**内核级隔离已在 Windows 落地**（AppContainer，D-1 2026-10-24，见 §7.1），其它平台尚未实现、如实标 `unsupported`。
 
 ## 1. 心智模型
 
@@ -32,6 +37,10 @@ return await PluginServer.RunAsync(new MyPlugin(), args);
 ```
 
 ```csharp
+using System.Text.Json.Nodes;
+using MyFirstMafAgent.Plugins.Sdk;
+using MyFirstMafAgent.Plugins.Sdk.Rpc;   // PluginRpcException 在这里
+
 internal sealed class MyPlugin : PluginBase
 {
     public override string Id => "com.example.my";       // 必须与 manifest.id 一致

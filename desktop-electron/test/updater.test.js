@@ -155,7 +155,7 @@ test('install stops the API BEFORE handing over to the installer', async () => {
   const result = await updater.installNow();
 
   assert.strictEqual(result.ok, true);
-  // 顺序是关键：先停 API/pg0，再放行退出，最后才交安装器。
+  // 顺序是关键：先停 API（含便携 PostgreSQL），再放行退出，最后才交安装器。
   assert.deepStrictEqual(order, ['stopApi', 'markQuitting']);
   assert.deepStrictEqual(stubs.calls.quitAndInstall, [[false, true]]);
 });

@@ -97,10 +97,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Measure-VectorIndex.
 - [x] API 仅监听 `127.0.0.1` 的随机端口（`--urls http://127.0.0.1:0`），窗口在 API 可用后创建。
 - [x] 本机 API 鉴权：一次性随机令牌经环境变量传入，只走 `X-Api-Token` 请求头；不写入 URL、日志、ready 文件与渲染进程。
 - [x] ready 文件契约只含 `url`/`pid`，且为原子替换写入。
-- [x] 退出顺序：`POST /api/desktop/shutdown` → 等待 API 退出 → 由 `ApplicationStopping` 停止本次启动的 pg0；外部 PostgreSQL 不受影响。
+- [x] 退出顺序：`POST /api/desktop/shutdown` → 等待 API 退出 → 由 `ApplicationStopping` 停止本次启动的便携数据库；外部 PostgreSQL 不受影响。
 - [x] Renderer：`contextIsolation=true`、`nodeIntegration=false`、`sandbox=true`、严格 CSP 响应头；外链与 `window.open` 受限。
 - [x] 回滚路径保留：控制台入口可独立启动（**变更**：Photino 桌面壳与 Velopack 打包已按阶段 9 要求整工程删除，桌面端只保留 Electron）。
-- [x] 真实 Windows 安装环境下的窗口显示与卸载保留数据（阶段 10：NSIS 安装包静默安装 → 启动 → 强杀进程留下 pg0 → 静默卸载，安装目录清空、`postgres.exe` 归零、`%LOCALAPPDATA%\MyFirstMafAgentData` 完整保留）。
+- [x] 真实 Windows 安装环境下的窗口显示与卸载保留数据（阶段 10：NSIS 安装包静默安装 → 启动 → 强杀进程留下 `postgres.exe` → 静默卸载，安装目录清空、`postgres.exe` 归零、`%LOCALAPPDATA%\MyFirstMafAgentData` 完整保留）。
 - [ ] 覆盖升级（依赖 electron-updater，见 `docs/ROADMAP.md` P0-3）。
 - [x] ONNX / Whisper / FFmpeg 原生依赖在 Electron 打包产物中加载（阶段 10 实测：安装后跑资料导入 → `Ready` + 4 个分块，日志有 `Creating embedding generator ... onnx-local/bge-small-zh-v1.5`；用包内 `ExternalTools\ffmpeg\ffmpeg.exe` 生成视频并上传，转写阶段跑通。详见 `docs/ROADMAP.md` P0-4）。
 

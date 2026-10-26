@@ -42,6 +42,7 @@ import {
   type AvatarMemory,
   type AvatarOverview,
 } from '../services/api'
+import { promptText } from '../services/dialog'
 
 const props = defineProps<{ apiOnline: boolean }>()
 const emit = defineEmits<{ notice: [message: string] }>()
@@ -502,7 +503,14 @@ async function sendFeedback(message: AvatarChatMessage, type: AvatarFeedbackType
 }
 
 async function correctMessage(message: AvatarChatMessage) {
-  const text = window.prompt('正确的内容是什么？我会把它当成新的投喂，修正相关记忆。')
+  const text = await promptText({
+    title: '纠正这条回答',
+    message: '正确的内容是什么？我会把它当成新的投喂，修正相关记忆。',
+    label: '正确内容',
+    placeholder: '写下正确的说法',
+    maxLength: 500,
+    confirmText: '提交纠正'
+  })
   if (!text?.trim()) return
   if (message.id <= 0 || feedbackSending.value === message.id) return
 

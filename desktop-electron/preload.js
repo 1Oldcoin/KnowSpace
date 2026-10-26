@@ -23,6 +23,14 @@ contextBridge.exposeInMainWorld('desktopHost', {
   installUpdate: () => ipcRenderer.invoke('desktop:update-install'),
 
   /**
+   * 后台服务：本窗口是自己拉起的（spawned）还是接管了已在运行的服务（attached），
+   * 以及关闭程序时是否连后端一起停（stopBackendOnExit）。
+   */
+  getBackendState: () => ipcRenderer.invoke('desktop:backend-state'),
+  getPrefs: () => ipcRenderer.invoke('desktop:prefs-get'),
+  setPrefs: (patch) => ipcRenderer.invoke('desktop:prefs-set', patch),
+
+  /**
    * 订阅更新状态推送。返回取消订阅函数，组件卸载时务必调用，
    * 否则每次重新挂载都会多一个监听器。
    */

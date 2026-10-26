@@ -4,6 +4,7 @@ import { Bell, CircleHelp, Search, Sparkles, X } from 'lucide-vue-next'
 import { assignDocumentTopic, checkApiHealth, checkInStudy, createKnowledgeBase as createKnowledgeBaseApi, createKnowledgeChatSession, createNote as createNoteApi, createTopic as createTopicApi, deleteDocument as deleteDocumentApi, deleteKnowledgeChatSession as deleteKnowledgeChatSessionApi, deleteKnowledgeChatSessions, deleteNote as deleteNoteApi, deleteTopic as deleteTopicApi, downloadDocument, exportKnowledgeChatSession, exportNotes as exportNotesApi, getAgentInfo, getAppSettings, getJobCounts, getStudySummary, listDocuments, listKnowledgeBases, listKnowledgeChatMessages, listKnowledgeChatSessions, listNotes, listTopics, renameKnowledgeChatSession as renameKnowledgeChatSessionApi, retryDocument as retryDocumentApi, saveAppSettings, searchKnowledgeBase, sendKnowledgeChatMessage, setNotePinned as setNotePinnedApi, updateNote as updateNoteApi, updateTopic as updateTopicApi, uploadDocument } from './services/api'
 import type { AgentSettings, AppSettings, ChatToolOptions, KnowledgeBase, KnowledgeChatSession, NoteInput, NoteRecord, NoteSourceRecord, SaveSettingsPayload, SemanticSearchResult, StudySummary, Topic } from './services/api'
 import { defaultChatToolOptions } from './services/api'
+import { confirmAction, promptText } from './services/dialog'
 import AssistantView from './components/AssistantView.vue'
 import AvatarView from './components/AvatarView.vue'
 import CompanionView from './components/CompanionView.vue'
@@ -16,6 +17,7 @@ import SearchOverlay from './components/SearchOverlay.vue'
 import SettingsView from './components/SettingsView.vue'
 import SidebarNav from './components/SidebarNav.vue'
 import TopicsView from './components/TopicsView.vue'
+import AppDialogHost from './components/AppDialogHost.vue'
 import DocumentReaderModal from './components/DocumentReaderModal.vue'
 import MediaPlayerModal from './components/MediaPlayerModal.vue'
 import type { AssistantMessage, MaterialItem, NoteDraft, NoteItem, ViewName } from './types'
@@ -302,7 +304,14 @@ async function requestCreateTopic() {
     showToast('请先选择一个知识库。')
     return
   }
-  const name = window.prompt('请输入新专题名称')?.trim()
+  const name = (await promptText({
+    title: '新建专题',
+    message: '把散落的资料收进一个主题里。',
+    label: '专题名称',
+    placeholder: '例如：插件体系',
+    maxLength: 50,
+    confirmText: '创建'
+  }))?.trim()
   if (!name) return
   if (name.length > 50) {
     showToast('专题名称不能超过 50 个字符。')
@@ -322,7 +331,13 @@ async function requestCreateTopic() {
 async function renameTopic(topic: Topic) {
   const knowledgeBaseId = activeKnowledgeBaseId.value
   if (!knowledgeBaseId) return
-  const name = window.prompt('请输入新的专题名称', topic.name)?.trim()
+  const name = (await promptText({
+    title: '重命名专题',
+    label: '专题名称',
+    value: topic.name,
+    maxLength: 50,
+    confirmText: '保存'
+  }))?.trim()
   if (name === undefined) return
   if (!name || name.length > 50) {
     showToast('专题名称必填且不能超过 50 个字符。')
@@ -341,7 +356,12 @@ async function renameTopic(topic: Topic) {
 async function removeTopic(topic: Topic) {
   const knowledgeBaseId = activeKnowledgeBaseId.value
   if (!knowledgeBaseId) return
-  if (!window.confirm(`确定删除专题“${topic.name}”吗？其中的资料会移回“未分类”，不会被删除。`)) return
+  if (!(await confirmAction({
+    title: '删除专题',
+    message: `确定删除“${topic.name}”吗？其中的资料会移回“未分类”，不会被删除。`,
+    confirmText: '删除',
+    tone: 'danger'
+  }))) return
   try {
     await deleteTopicApi(knowledgeBaseId, topic.id)
     if (knowledgeBaseId !== activeKnowledgeBaseId.value) return
@@ -507,7 +527,12 @@ async function updateNoteHandler(noteId: string, draft: NoteDraft) {
 async function deleteNoteHandler(note: NoteItem) {
   const knowledgeBaseId = activeKnowledgeBaseId.value
   if (!knowledgeBaseId) return
-  if (!window.confirm(`确定删除笔记“${note.title}”吗？此操作不可恢复。`)) return
+  if (!(await confirmAction({
+    title: '删除笔记',
+    message: `确定删除笔记“${note.title}”吗？此操作不可恢复。`,
+    confirmText: '删除',
+    tone: 'danger'
+  }))) return
   notesSaving.value = true
   try {
     await deleteNoteApi(knowledgeBaseId, note.id)
@@ -777,7 +802,14 @@ async function openKnowledgeChatSession(sessionId: string) {
 }
 
 async function requestNewKnowledgeBase() {
-  const name = window.prompt('请输入新知识库名称')?.trim()
+  const name = (await promptText({
+    title: '新建知识库',
+    message: '知识库之间互相隔离：资料、笔记、专题、对话都不会串。',
+    label: '知识库名称',
+    placeholder: '例如：工作笔记',
+    maxLength: 100,
+    confirmText: '创建'
+  }))?.trim()
   if (!name) return
   if (name.length > 100) {
     showToast('知识库名称不能超过 100 个字符。')
@@ -882,7 +914,12 @@ async function retryProcessing(documentId: string) {
 }
 
 async function deleteMaterial(item: MaterialItem) {
-  if (!window.confirm(`确定删除“${item.title}”吗？该资料及其解析内容将被移除，此操作不可恢复。`)) return
+  if (!(await confirmAction({
+    title: '删除资料',
+    message: `确定删除“${item.title}”吗？该资料及其解析内容将被移除，此操作不可恢复。`,
+    confirmText: '删除',
+    tone: 'danger'
+  }))) return
   try {
     await deleteDocumentApi(item.id)
     materials.value = materials.value.filter(material => material.id !== item.id)
@@ -1006,7 +1043,13 @@ async function renameHistorySession(sessionId: string) {
   const session = knowledgeChatSessions.value.find(item => item.id === sessionId)
   if (!knowledgeBaseId || !session || isChatHistoryMutating.value) return
 
-  const title = window.prompt('请输入新的对话名称', session.title)
+  const title = await promptText({
+    title: '重命名对话',
+    label: '对话名称',
+    value: session.title,
+    maxLength: 100,
+    confirmText: '保存'
+  })
   if (title === null) return
   const normalizedTitle = title.trim()
   if (!normalizedTitle || normalizedTitle.length > 100) {
@@ -1033,7 +1076,12 @@ async function deleteHistorySession(sessionId: string) {
   const knowledgeBaseId = activeKnowledgeBaseId.value
   const session = knowledgeChatSessions.value.find(item => item.id === sessionId)
   if (!knowledgeBaseId || !session || isChatHistoryMutating.value) return
-  if (!window.confirm(`确定删除“${session.title}”及其全部消息吗？此操作不可恢复。`)) return
+  if (!(await confirmAction({
+    title: '删除对话',
+    message: `确定删除“${session.title}”及其全部消息吗？此操作不可恢复。`,
+    confirmText: '删除',
+    tone: 'danger'
+  }))) return
 
   isChatHistoryMutating.value = true
   try {
@@ -1054,7 +1102,12 @@ async function deleteSelectedHistorySessions(sessionIds: string[]) {
   const knowledgeBaseId = activeKnowledgeBaseId.value
   const selectedIds = [...new Set(sessionIds)].filter(id => knowledgeChatSessions.value.some(session => session.id === id))
   if (!knowledgeBaseId || selectedIds.length === 0 || isChatHistoryMutating.value) return
-  if (!window.confirm(`确定删除选中的 ${selectedIds.length} 条对话及其全部消息吗？此操作不可恢复。`)) return
+  if (!(await confirmAction({
+    title: '批量删除对话',
+    message: `确定删除选中的 ${selectedIds.length} 条对话及其全部消息吗？此操作不可恢复。`,
+    confirmText: '删除',
+    tone: 'danger'
+  }))) return
 
   isChatHistoryMutating.value = true
   try {
@@ -1192,5 +1245,6 @@ async function exportHistorySession(sessionId: string) {
       :api-online="apiOnline"
       @close="playingMedia = null"
     />
+    <AppDialogHost />
   </div>
 </template>

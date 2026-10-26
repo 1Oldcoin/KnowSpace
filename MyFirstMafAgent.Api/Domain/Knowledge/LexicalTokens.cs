@@ -7,7 +7,7 @@ namespace MyFirstMafAgent.Api.Domain.Knowledge;
 ///
 /// <para>
 /// PostgreSQL 自带的 <c>simple</c> 解析器不理解中文：一段没有空格的中文会被切成一个词，
-/// "插件协议" 与 "插件" 之间永远匹配不上；而 pg0 自带的 PG 并不包含 <c>zhparser</c> / <c>pg_jieba</c>。
+/// "插件协议" 与 "插件" 之间永远匹配不上；而随包的 PostgreSQL 并不包含 <c>zhparser</c> / <c>pg_jieba</c>。
 /// 因此这里在应用侧把中文切成 <b>二元组（bigram）</b> 并用空格分隔后写入
 /// <c>kb_chunks.lexical_tokens</c>，再由 PostgreSQL 的 <c>to_tsvector('simple', …)</c> 建 GIN 索引。
 /// </para>
