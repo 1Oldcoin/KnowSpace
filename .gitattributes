@@ -4,6 +4,9 @@
 #   ffplay.exe 102.0 MB / ffmpeg.exe 100.5 MB / ffprobe.exe 100.3 MB
 # 因此必须走 LFS；普通 git 对象会被服务端直接拒绝（pre-receive hook 报错）。
 #
+# 注意：GitHub 免费额度是 1 GB 存储 + 1 GB/月流量，这三个文件约 303 MB，
+# 完整 clone 一次就消耗约 303 MB 流量。Gitee 免费仓库**不能**用 LFS。
+#
 # 克隆前先装 git-lfs：
 #   winget install GitHub.GitLFS   或   https://git-lfs.com
 # 克隆时若没装 LFS，这几个 exe 只会是几十字节的指针文件，
@@ -15,6 +18,12 @@ MyFirstMafAgent.Api/ExternalTools/ffmpeg/*.exe filter=lfs diff=lfs merge=lfs -te
 *.ps1 text eol=crlf
 *.cmd text eol=crlf
 *.bat text eol=crlf
+
+# Linux 交付物必须保持 LF：CRLF 的 "#!/usr/bin/env bash" 会报 bad interpreter，
+# systemd 读带 \r 的 EnvironmentFile 会把 \r 当值的一部分。
+*.sh text eol=lf
+*.service text eol=lf
+*.env.example text eol=lf
 
 # 运行时数据与第三方工具目录：完全按原始字节存取。
 # 特别注意 App_Data/pgdata —— PostgreSQL 的 PG_VERSION 等文件不允许任何换行改写

@@ -208,6 +208,7 @@
 
 | 项 | 说明 |
 | --- | --- |
+| **审计/行为表没有保留期（已决定暂不做，2026-10-27）** | `agent_client_calls`、`oauth_auth_events`、`avatar_feed_entries` 三张表**只进不出**——代码里只有写入与查询端点，没有任何删除/清理逻辑。单机桌面版无害（每天几百行，十年也就百万级）；**云端多租户是唯一可能堆到亿级的地方**。将来要做时照抄 `JobScheduler` 里 `jobs` 的 purge 套路即可：加配置 `Server:AuditRetentionDays`（默认 90，`0` = 永不清理）+ 一个日级后台任务分批 `DELETE ... WHERE occurred_at < cutoff LIMIT n`。**触发线（可测，不用猜）**：任一张表 > 1000 万行，或 `pg_relation_size` > 10 GB；到那时同批一起做按月声明式分区，把清理从 `DELETE` 换成 `DROP PARTITION`（避免上亿死元组压死 autovacuum）。取舍与量级估算见 `ARCHITECTURE.md` §5.3 |
 | `publish/` 目录 | `console` / `desktop` / `releases` 都是构建产物，可随时删除重建（安装包约 310 MB） |
 | 根目录临时文件 | `probe-out.txt`、`probe-out2.txt`、`rowdump.txt`、`api.ts` 是早期排查残留，确认无用可删 |
 | `App_Data/probeB` | 旧探针数据库目录，确认无用可删 |

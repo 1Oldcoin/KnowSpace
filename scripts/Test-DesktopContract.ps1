@@ -15,7 +15,7 @@
     The token never appears in the ready file, on the command line, or in this script's output.
 
 .PARAMETER ApiExe
-    Published MyFirstMafAgent.Api.exe. Required.
+    Published Zhijian.Api.exe. Required.
 
 .PARAMETER Environment
     ASPNETCORE_ENVIRONMENT for the child process. Default Development (loads user secrets,
@@ -23,7 +23,7 @@
 
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Test-DesktopContract.ps1 `
-        -ApiExe C:\Temp\mafapi\MyFirstMafAgent.Api.exe
+        -ApiExe C:\Temp\mafapi\Zhijian.Api.exe
 #>
 [CmdletBinding()]
 param(

@@ -34,6 +34,9 @@ public static class StudyCalculator
     public const int MaxMinutesPerDay = 1440;
     public const int MaxNoteLength = 500;
 
+    /// <summary>日历查询一次最多取多少天：够翻一整年，又不给「from=1970」这种请求开口子。</summary>
+    public const int MaxRangeDays = 400;
+
     public static StudyStatistics Summarize(IReadOnlyList<StudyRecord> records, DateOnly today, int rangeDays)
     {
         var range = Math.Clamp(rangeDays, 7, 365);
@@ -86,6 +89,31 @@ public static class StudyCalculator
             thisWeekMinutes,
             recent,
             week);
+    }
+
+    /// <summary>
+    /// 取 [from, to] 内**确实有打卡记录**的日期，按日期升序。
+    ///
+    /// <para>
+    /// 刻意不补零：日历要把「已打卡」和「没打卡」区分开，补零会让两种状态在数据层就分不出来；
+    /// 而且未来日期补零等于凭空捏造「当天学习了 0 分钟」。只返回存在的记录，缺的那天由前端判空。
+    /// </para>
+    /// </summary>
+    public static IReadOnlyList<StudyDay> Range(IReadOnlyList<StudyRecord> records, DateOnly from, DateOnly to)
+    {
+        if (to < from)
+            throw new StudyValidationException("结束日期不能早于开始日期。");
+        if (to.DayNumber - from.DayNumber > MaxRangeDays)
+            throw new StudyValidationException($"日期跨度不能超过 {MaxRangeDays} 天。");
+
+        return records
+            .Where(record => record.Date >= from && record.Date <= to)
+            .GroupBy(record => record.Date)
+            .OrderBy(group => group.Key)
+            // 同一日期理论上只有一行（有唯一索引兜底），重复时取最后一条，与 Summarize 保持一致。
+            .Select(group => group.Last())
+            .Select(record => new StudyDay(record.Date.ToString("yyyy-MM-dd"), record.Minutes, record.Note))
+            .ToList();
     }
 
     public static StudyRecord Validate(int minutes, string? note, DateOnly date)

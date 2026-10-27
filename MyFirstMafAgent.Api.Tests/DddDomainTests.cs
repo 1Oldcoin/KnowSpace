@@ -68,6 +68,54 @@ public sealed class StudyCalculatorTests
         var empty = StudyCalculator.Validate(0, "   ", new DateOnly(2026, 10, 18));
         Assert.Null(empty.Note);
     }
+
+    // ---- 日历区间（打卡记录弹窗的数据源）----
+
+    [Fact]
+    public void Range_returns_only_checked_in_days_in_ascending_order()
+    {
+        var records = new List<StudyRecord>
+        {
+            new(new DateOnly(2026, 10, 20), 45, "第二十天"),
+            new(new DateOnly(2026, 10, 1), 30, null),
+            new(new DateOnly(2026, 9, 30), 60, "上个月"),
+            new(new DateOnly(2026, 11, 2), 15, "下个月")
+        };
+
+        var days = StudyCalculator.Range(records, new DateOnly(2026, 10, 1), new DateOnly(2026, 10, 31));
+
+        Assert.Equal(2, days.Count);
+        Assert.Equal("2026-10-01", days[0].Date);
+        Assert.Equal("2026-10-20", days[1].Date);
+        Assert.Equal("第二十天", days[1].Note);
+        // 区间是闭区间：边界日必须被包含，否则月底那天的打卡会「消失」。
+        var edges = StudyCalculator.Range(records, new DateOnly(2026, 9, 30), new DateOnly(2026, 10, 1));
+        Assert.Equal(new[] { "2026-09-30", "2026-10-01" }, edges.Select(day => day.Date).ToArray());
+    }
+
+    [Fact]
+    public void Range_does_not_fill_gaps_with_zero_days()
+    {
+        var records = new List<StudyRecord> { new(new DateOnly(2026, 10, 5), 30, null) };
+
+        var days = StudyCalculator.Range(records, new DateOnly(2026, 10, 1), new DateOnly(2026, 10, 31));
+
+        // 只返回真正有记录的那一天；「没打卡」由前端判空，不能靠 minutes=0 伪装
+        // （否则「打卡 0 分钟」和「完全没打卡」在数据层就分不开了）。
+        Assert.Single(days);
+        Assert.Equal("2026-10-05", days[0].Date);
+    }
+
+    [Fact]
+    public void Range_rejects_inverted_and_oversized_windows()
+    {
+        var records = Array.Empty<StudyRecord>();
+
+        Assert.Throws<StudyValidationException>(() =>
+            StudyCalculator.Range(records, new DateOnly(2026, 10, 18), new DateOnly(2026, 10, 1)));
+        Assert.Throws<StudyValidationException>(() =>
+            StudyCalculator.Range(records, new DateOnly(2020, 1, 1), new DateOnly(2026, 10, 18)));
+    }
 }
 
 public sealed class NoteAggregateTests
@@ -161,11 +209,17 @@ public sealed class NoteServiceTests
     private sealed class AlwaysExistsDirectory : IKnowledgeBaseDirectory
     {
         public Task<bool> ExistsAsync(Guid knowledgeBaseId, CancellationToken cancellationToken) => Task.FromResult(true);
+
+        public Task<IReadOnlyList<KnowledgeBaseSummary>> ListAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<KnowledgeBaseSummary>>([]);
     }
 
     private sealed class NeverExistsDirectory : IKnowledgeBaseDirectory
     {
         public Task<bool> ExistsAsync(Guid knowledgeBaseId, CancellationToken cancellationToken) => Task.FromResult(false);
+
+        public Task<IReadOnlyList<KnowledgeBaseSummary>> ListAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<KnowledgeBaseSummary>>([]);
     }
 
     private sealed class InMemoryNoteRepository : INoteRepository

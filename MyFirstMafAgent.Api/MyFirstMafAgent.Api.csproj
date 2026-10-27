@@ -5,6 +5,15 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UserSecretsId>a456929d-2232-47e0-acf4-730f85728684</UserSecretsId>
+    <!--
+      产物名（Zhijian.Api.exe / .dll）与项目目录名、命名空间 deliberately 不一致：
+        · 项目目录与命名空间 MyFirstMafAgent.Api 是源码组织，给开发看的，改动会波及几百个 using；
+        · 产物名是用户与部署脚本看到的（任务管理器、Dockerfile ENTRYPOINT、systemd ExecStart），
+          必须跟产品名一致。
+      RootNamespace 显式钉住，避免新建文件默认落到 Zhijian.Api.* 造成两套命名空间。
+    -->
+    <AssemblyName>Zhijian.Api</AssemblyName>
+    <RootNamespace>MyFirstMafAgent.Api</RootNamespace>
     <!-- exe / 任务栏图标（共享 assets 目录） -->
     <ApplicationIcon>..\assets\app.ico</ApplicationIcon>
   </PropertyGroup>

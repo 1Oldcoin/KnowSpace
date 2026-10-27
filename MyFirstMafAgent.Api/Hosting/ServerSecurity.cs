@@ -70,6 +70,33 @@ public static class ServerSecurity
     }
 
     /// <summary>
+    /// <c>Server:EnableMdns</c> 目前只是配置项，没有真正的 DNS-SD 广播器。
+    ///
+    /// <para>
+    /// <b>为什么必须报警而不是静默</b>：一个能改却没有任何效果的开关是「假契约」——
+    /// 用户填 true、重启、期待局域网能自动发现，结果什么都不会发生，也不会有人告诉他为什么。
+    /// 这比「本版本不支持」更糟，因为排障时没有任何线索。
+    /// </para>
+    /// <para>
+    /// 顺带把边界说清：mDNS 是<b>发现</b>协议不是<b>授权</b>协议，即使将来实现，
+    /// 也不会替代 <c>maf_</c> 客户端密钥或 OAuth；而且 Cursor / Claude Desktop 这两个主流
+    /// MCP 客户端目前都不做 mDNS 发现，它们只认一条写死的 URL 或 stdio 命令。
+    /// 真正的入口是 <c>/api/mcp/local-config</c> 与 <c>/.well-known/mcp/server-card.json</c>。
+    /// </para>
+    /// </summary>
+    public static void WarnUnimplementedMdns(this WebApplication app, ServerSecurityOptions options)
+    {
+        if (!options.EnableMdns) return;
+
+        app.Logger.LogWarning(
+            "Server:EnableMdns=true，但本版本未实现 mDNS/DNS-SD 广播：服务名 '{ServiceName}' 不会出现在局域网上，" +
+            "本次启动也不会有任何发现行为。请改用 GET /api/mcp/local-config 或 " +
+            "GET /.well-known/mcp/server-card.json 获取客户端配置。若确实需要局域网自动发现，" +
+            "请提需求而不是改这个开关。",
+            options.MdnsServiceName);
+    }
+
+    /// <summary>
     /// 给所有响应补安全头。只补缺、不覆盖，避免和已有的严格 CSP 打架。
     /// </summary>
     public static void UseSecurityHeaders(this WebApplication app, ServerSecurityOptions options)

@@ -4,7 +4,7 @@
     Measure cold-start latency of the published API sidecar.
 
 .DESCRIPTION
-    Starts MyFirstMafAgent.Api.exe exactly the way the Electron shell does
+    Starts Zhijian.Api.exe exactly the way the Electron shell does
     (random-ish loopback port, --desktop-ready-file, --no-browser), then records:
 
       t1 = process start -> ready file appears   (DB + schema + plugins + Kestrel done)
@@ -15,7 +15,7 @@
     the number users actually feel.
 
 .PARAMETER ApiExe
-    Path to MyFirstMafAgent.Api.exe. Defaults to publish\desktop (then bin\Debug).
+    Path to Zhijian.Api.exe. Defaults to publish\desktop (then bin\Debug).
 
 .PARAMETER Runs
     How many times to measure. Default 3.
@@ -35,15 +35,15 @@ $root = Split-Path -Parent $PSScriptRoot
 
 if (-not $ApiExe) {
     $candidates = @(
-        (Join-Path $root 'publish\desktop\MyFirstMafAgent.Api.exe'),
-        (Join-Path $root 'MyFirstMafAgent.Api\bin\Release\net10.0\MyFirstMafAgent.Api.exe'),
-        (Join-Path $root 'MyFirstMafAgent.Api\bin\Debug\net10.0\MyFirstMafAgent.Api.exe')
+        (Join-Path $root 'publish\desktop\Zhijian.Api.exe'),
+        (Join-Path $root 'MyFirstMafAgent.Api\bin\Release\net10.0\Zhijian.Api.exe'),
+        (Join-Path $root 'MyFirstMafAgent.Api\bin\Debug\net10.0\Zhijian.Api.exe')
     )
     $ApiExe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 }
 
 if (-not $ApiExe -or -not (Test-Path $ApiExe)) {
-    throw "MyFirstMafAgent.Api.exe not found. Run scripts\Publish-Portable.ps1 -Target desktop first."
+    throw "Zhijian.Api.exe not found. Run scripts\Publish-Portable.ps1 -Target desktop first."
 }
 
 Write-Host "API: $ApiExe"

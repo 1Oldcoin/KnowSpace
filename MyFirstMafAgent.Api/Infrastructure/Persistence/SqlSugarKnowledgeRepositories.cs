@@ -100,10 +100,21 @@ internal sealed class ChunkRow
     public string Content { get; set; } = string.Empty;
 }
 
-/// <summary>知识库存在性校验的 SqlSugar 实现。</summary>
+/// <summary>知识库存在性校验与目录列举的 SqlSugar 实现。</summary>
 public sealed class SqlSugarKnowledgeBaseDirectory(SqlSugarScope database) : IKnowledgeBaseDirectory
 {
     public Task<bool> ExistsAsync(Guid knowledgeBaseId, CancellationToken cancellationToken) =>
         database.Queryable<KnowledgeBaseSchemaEntity>()
             .AnyAsync(item => item.Id == knowledgeBaseId, cancellationToken);
+
+    public async Task<IReadOnlyList<KnowledgeBaseSummary>> ListAsync(CancellationToken cancellationToken)
+    {
+        var rows = await database.Queryable<KnowledgeBaseSchemaEntity>()
+            .OrderBy(item => item.Name, OrderByType.Asc)
+            .ToListAsync(cancellationToken);
+
+        return rows
+            .Select(row => new KnowledgeBaseSummary(row.Id, string.IsNullOrWhiteSpace(row.Name) ? row.Id.ToString("D") : row.Name))
+            .ToList();
+    }
 }

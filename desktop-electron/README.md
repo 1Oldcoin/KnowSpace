@@ -1,8 +1,8 @@
-﻿# MyFirstMafAgent 桌面壳（Electron sidecar）
+﻿# 知间-本地知识库 桌面壳（Electron sidecar）
 
 原生 Electron 主进程 + .NET API sidecar。**不**使用 Electron.NET：`ElectronNET.Core` 目前只有 0.6.0 预览重写版，`ElectronNET.API` 仍停留在 Electron 23，均无法作为 .NET 10 + 现代 Electron 的稳定基线（详见 `docs/PHASE0-BASELINE.md`）。sidecar 方案保持 REST/MCP 契约不变。
 
-> 这是项目**唯一**的桌面壳。旧的 Photino 桌面工程（`MyFirstMafAgent.Desktop`）与 Velopack 打包已删除；“回滚路径”现在只剩下控制台入口（`MyFirstMafAgent.Api.exe`）。
+> 这是项目**唯一**的桌面壳。旧的 Photino 桌面工程（`MyFirstMafAgent.Desktop`）与 Velopack 打包已删除；“回滚路径”现在只剩下控制台入口（`Zhijian.Api.exe`）。
 
 ## 职责划分
 
@@ -32,9 +32,9 @@ npm start
 `main.js` 按以下顺序查找 API 可执行文件：
 
 1. 环境变量 `MAF_API_EXE`
-2. `resources/api/MyFirstMafAgent.Api.exe`（打包后）
-3. `../publish/desktop/MyFirstMafAgent.Api.exe`
-4. `../publish/console/MyFirstMafAgent.Api.exe`
+2. `resources/api/Zhijian.Api.exe`（打包后）
+3. `../publish/desktop/Zhijian.Api.exe`
+4. `../publish/console/Zhijian.Api.exe`
 
 用户数据固定在 `%LOCALAPPDATA%\MyFirstMafAgentData`（可用 `MAF_DATA_ROOT` 覆盖），安装目录更新不会影响上传文件、模型与插件。
 
@@ -77,7 +77,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Measure-Startup.ps1 
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Test-DesktopContract.ps1 `
-    -ApiExe C:\Temp\mafapi\MyFirstMafAgent.Api.exe
+    -ApiExe C:\Temp\mafapi\Zhijian.Api.exe
 ```
 
 检查项：随机回环端口、ready 文件不含令牌、无令牌 401、错误令牌 401、正确令牌 200、`/mcp` 无令牌 401、静态首页 200、严格 CSP 头存在、`POST /api/desktop/shutdown` 后进程自行退出。
@@ -95,17 +95,30 @@ npm run dist:full
 npm run dist
 ```
 
-产物在 `publish\releases\MyFirstMafAgent-<version>-setup.exe`（约 310 MB，未压缩的自包含 .NET 后端占大头）。
+产物在 `publish\releases\Zhijian-<version>-setup.exe`（约 310 MB，未压缩的自包含 .NET 后端占大头）。
 
-**安装**：双击向导，或静默安装 `<installer> /S` → 默认装到 `%LOCALAPPDATA%\Programs\MyFirstMafAgent`（每用户，不需要管理员）。
-**卸载**：`"%LOCALAPPDATA%\Programs\MyFirstMafAgent\Uninstall MyFirstMafAgent.exe" /S`。
+**命名分两层**（见 `electron-builder.yml`）：
+
+| | 值 | 出现在哪里 |
+| --- | --- | --- |
+| `productName` | `知间-本地知识库` | 控制面板卸载项、开始菜单、窗口标题、安装包文件名 |
+| `executableName` | `Zhijian` | 磁盘路径：`%LOCALAPPDATA%\Programs\Zhijian\Zhijian.exe` |
+
+路径用 ASCII、显示名用中文：国内安全软件与解压/搬运工具对中文路径的支持并不一致，而显示名必须让人一眼认出是什么软件。
+
+**安装包文件名同样是 ASCII**（`Zhijian-<version>-setup.exe`），不是 `知间-…`。这是被验证逼出来的：`artifactName` 写 `${productName}` 时，electron-builder 在 GitHub 发布源下会把 `latest.yml` 里的 `path`/`url` 换成 `computeSafeArtifactName()` 的结果（退化成 `myfirstmafagent-desktop-setup-<version>.exe`），而磁盘上的文件仍是中文名——两边对不上，自动更新就 404。`scripts/Publish-Release.ps1` 里有一道校验会拦下这种情况，但根治的办法就是 artifactName 别用中文。
+
+> ⚠️ **从旧包升级要手动卸一次**：`appId` 没动，所以 NSIS 会把新包装进**旧目录**（`HKCU\Software\<UUID(appId)>` 里存着 `InstallLocation`），留下旧的 `MyFirstMafAgent.exe`。要得到一个干净的 `Programs\Zhijian`，先静默卸载旧版：`"%LOCALAPPDATA%\Programs\MyFirstMafAgent\Uninstall MyFirstMafAgent.exe" /currentuser /S`。数据目录 `%LOCALAPPDATA%\MyFirstMafAgentData` 不受影响。
+
+**安装**：双击向导，或静默安装 `<installer> /S` → 默认装到 `%LOCALAPPDATA%\Programs\Zhijian`（每用户，不需要管理员）。
+**卸载**：`"%LOCALAPPDATA%\Programs\Zhijian\Uninstall 知间-本地知识库.exe" /S`。
 
 ### 卸载/升级前停便携数据库
 
 `build/installer.nsh` 在 NSIS 的 `customUnInstall` 阶段执行：
 
 ```
-resources\api\MyFirstMafAgent.Api.exe --stop-portable-postgres
+resources\api\Zhijian.Api.exe --stop-portable-postgres
 ```
 
 该参数由 `InstallerArguments` 识别，在 `Program.cs` 最前面处理：只调用 `PortablePostgresHost.TryStopForUninstall` 就退出，**不会**启动 Web 主机。electron-updater 的升级也是先静默运行旧版卸载器，因此升级同样覆盖到了。
@@ -142,7 +155,7 @@ resources\api\MyFirstMafAgent.Api.exe --stop-portable-postgres
 2. 用户数据目录 `%APPDATA%\myfirstmafagent-desktop\update-feed.json` 里的 `{ "url": "https://.../updates" }`（用户可自行改，不必重打包）
 3. 安装包内 `app-update.yml`（即 `electron-builder.yml` 的 `publish.url`）
 
-更新源目录需要同时提供：`latest.yml`、`MyFirstMafAgent-<version>-setup.exe`、对应的 `.blockmap`。
+更新源目录需要同时提供：`latest.yml`、`Zhijian-<version>-setup.exe`、对应的 `.blockmap`。
 
 ### 发布一个新版本
 

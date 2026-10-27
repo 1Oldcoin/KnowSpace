@@ -47,6 +47,10 @@ internal static class PgProcessRunner
         Directory.CreateDirectory(Path.GetDirectoryName(outputFile)!);
         TryTruncate(outputFile);
 
+        // Unix 上补偿 +x：从 zip/tar 解出来、或跨平台复制的 postgres 二进制会丢可执行位，
+        // 否则这里只会在 /bin/sh 里报一句 Permission denied，看不出是权限问题。Windows 上是空操作。
+        PlatformRuntime.EnsureExecutable(executable);
+
         var startInfo = CreateShellStartInfo(executable, arguments, outputFile);
         using var process = new Process { StartInfo = startInfo };
 

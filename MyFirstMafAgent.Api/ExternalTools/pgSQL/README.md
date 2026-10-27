@@ -69,7 +69,7 @@ FATAL:  invalid byte sequence for encoding "UTF8": 0xd3 0xc3
 | 端口被占时报 `Permission denied` 而不是 `address already in use` | Windows 上 PostgreSQL 用 `SO_EXCLUSIVEADDRUSE`，冲突表现为拒绝访问 | 先按 `postmaster.pid` 复用已有实例，否则 `FindAvailablePort` 逐个试；不要靠错误文案判断端口冲突 |
 | `initdb` 抱怨 `invalid byte sequence` | 程序路径非 ASCII（见上一节） | 镜像到纯英文目录后再执行 |
 | 以管理员身份运行时 `initdb`/`postgres` 直接拒绝 | PostgreSQL 不允许提权令牌 | `EnsureNotElevated` 在启动前拦下并给出提示 |
-| 升级/卸载时文件删不掉 | `postgres.exe` 占住安装目录（ASCII 安装路径下） | `MyFirstMafAgent.Api.exe --stop-portable-postgres` 由安装器在删文件前调用 |
+| 升级/卸载时文件删不掉 | `postgres.exe` 占住安装目录（ASCII 安装路径下） | `Zhijian.Api.exe --stop-portable-postgres` 由安装器在删文件前调用 |
 
 ## 和旧方案的区别
 

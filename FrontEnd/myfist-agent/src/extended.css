@@ -36,6 +36,15 @@
 
 /* —— 总览：学习打卡 —— */
 .stat-study-card { min-height: 152px; }
+/* 整卡可点开打卡日历：鼠标、触摸、键盘三种入口都要有反馈，
+   否则用户以为只有下面那个小按钮能点。 */
+.stat-study-card-clickable { cursor: pointer; transition: border-color .16s, box-shadow .16s; }
+.stat-study-card-clickable:hover { border-color: #d9e7db; box-shadow: 0 10px 26px #2f4a3a14; }
+.stat-study-card-clickable:focus-visible { outline: 2px solid #7fb894; outline-offset: 2px; }
+.stat-study-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 9px; }
+.stat-study-foot .checkin-button { margin-top: 0; }
+.stat-study-link { display: inline-flex; align-items: center; gap: 3px; color: #adb7b0; font-size: 8px; white-space: nowrap; }
+.stat-study-card-clickable:hover .stat-study-link { color: #4f8667; }
 .checkin-button {
   min-height: 23px;
   display: inline-flex;
@@ -88,6 +97,87 @@
 .checkin-modal-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; }
 .checkin-modal-foot > span { color: #a7afa9; font-size: 8px; }
 .checkin-modal-foot > div { display: flex; gap: 7px; }
+
+/* —— 总览：打卡日历弹窗 —— */
+.checkin-calendar-modal {
+  width: min(100%, 452px);
+  max-height: calc(100vh - 40px);
+  display: flex;
+  flex-direction: column;
+  padding: 18px;
+  overflow-y: auto;
+  border: 1px solid #e6ece5;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 24px 60px #20342a2b;
+}
+.checkin-calendar-bar { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
+.checkin-calendar-bar strong { color: #3c4a42; font-size: 12px; font-weight: 600; letter-spacing: .2px; }
+.checkin-calendar-today {
+  margin-left: auto;
+  padding: 5px 9px;
+  border: 1px solid #e0ebe2;
+  border-radius: 7px;
+  color: #4f8667;
+  background: #f4faf4;
+  font-size: 9px;
+}
+.checkin-calendar-today:hover:not(:disabled) { background: #eaf4ec; }
+.checkin-calendar-today:disabled { color: #b3bdb6; border-color: #eef2ee; background: #fafcfa; }
+.checkin-calendar-weekdays { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; margin-bottom: 5px; }
+.checkin-calendar-weekdays span { color: #a3ada6; font-size: 9px; text-align: center; }
+.checkin-calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; transition: opacity .15s; }
+.checkin-calendar-grid.loading { opacity: .45; }
+.checkin-day {
+  position: relative;
+  min-height: 46px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 4px 0;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  color: #5d6b63;
+  background: #fafcfa;
+  font: inherit;
+  transition: background .15s, border-color .15s;
+}
+.checkin-day.blank { background: transparent; }
+.checkin-day:disabled { color: #b9c2bb; background: #fbfcfb; }
+.checkin-day.done { color: #3f7a58; border-color: #d8e8db; background: #f0f8f1; }
+.checkin-day.done:hover { background: #e6f3e8; }
+.checkin-day.today { box-shadow: inset 0 0 0 1.5px #8dbf9d; }
+.checkin-day.picked { border-color: #4f8667; background: #e3f1e6; }
+.checkin-day.future { color: #c4ccc6; background: transparent; }
+.checkin-day-number { font-size: 12px; font-weight: 600; line-height: 1; }
+.checkin-day-minutes { font-size: 8px; color: #7ba389; line-height: 1; }
+.checkin-day-dot {
+  width: 4px;
+  height: 4px;
+  display: inline-block;
+  border-radius: 50%;
+  background: #5a9c74;
+}
+.checkin-calendar-state { display: flex; align-items: center; gap: 6px; margin-top: 12px; color: #98a29b; font-size: 9px; }
+.checkin-calendar-error { color: #a54848; }
+.checkin-calendar-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; color: #8d9a92; font-size: 8px; }
+.checkin-calendar-legend > span { display: inline-flex; align-items: center; gap: 4px; }
+.checkin-calendar-legend strong { color: #4f8667; font-weight: 600; }
+.checkin-calendar-hint { margin-left: auto; color: #a9b3ac; }
+.checkin-calendar-detail {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid #e6efe7;
+  border-radius: 10px;
+  background: #f7fbf7;
+}
+.checkin-calendar-detail > div { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.checkin-calendar-detail strong { color: #3c4a42; font-size: 10px; }
+.checkin-calendar-detail > div span { color: #5a8f6e; font-size: 9px; }
+.checkin-calendar-detail p { margin: 7px 0 0; color: #62706a; font-size: 9px; line-height: 1.65; white-space: pre-wrap; word-break: break-word; }
+.checkin-calendar-detail-empty { color: #a9b3ac !important; font-style: italic; }
 
 /* —— 资料页：专题筛选 —— */
 .topic-filter-chip {

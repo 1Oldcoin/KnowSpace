@@ -1,6 +1,7 @@
 using ModelContextProtocol.Protocol;
 using MyFirstMafAgent.Api.Application.Agents;
 using MyFirstMafAgent.Api.Mcp;
+using MyFirstMafAgent.Api.OAuth;
 using MyFirstMafAgent.Api.Options;
 
 namespace MyFirstMafAgent.Api.Hosting;
@@ -25,6 +26,15 @@ public static class McpModule
         // 鉴权失败闸门：按来源 IP 计，防无上限的密钥重试与日志刷屏。
         services.AddSingleton<AgentAuthThrottle>();
 
+        // 协议层诊断：记录每个 /mcp 请求是 initialize(Legacy) 还是 server/discover(Modern)。
+        services.AddSingleton<McpProtocolDiagnostics>();
+
+        // OAuth 2.1：资源服务器 + 内置授权服务器（同源，降低 Cursor 的兼容性问题）。
+        services.Configure<McpOAuthOptions>(configuration.GetSection(McpOAuthOptions.SectionName));
+        services.AddSingleton<OAuthTokenService>();
+        services.AddSingleton<CimdClientMetadataResolver>();
+        services.AddSingleton<OAuthService>();
+
         var enabled = configuration.GetValue<bool?>($"{McpOptions.SectionName}:EnableServer") ?? true;
         var path = configuration.GetValue<string?>($"{McpOptions.SectionName}:ServerPath");
         if (string.IsNullOrWhiteSpace(path)) path = "/mcp";
@@ -34,7 +44,9 @@ public static class McpModule
             services
                 .AddMcpServer(options => options.ServerInfo = new Implementation
                 {
-                    Name = "MyFirstMafAgent.Knowledge",
+                    // 这是客户端（Cursor / Claude Desktop）工具列表里显示的名字，属于「用户可见的
+                    // 产品标识」，跟安装包/exe 的命名保持一致；不要写成项目目录名。
+                    Name = "zhijian-knowledge",
                     Version = "1.0.0"
                 })
                 .WithHttpTransport(options => options.Stateless = true)

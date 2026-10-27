@@ -113,7 +113,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Measure-VectorIndex.
 自动化契约检查（不需要 Electron）：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Test-DesktopContract.ps1 -ApiExe <published>\MyFirstMafAgent.Api.exe
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Test-DesktopContract.ps1 -ApiExe <published>\Zhijian.Api.exe
 ```
 
 它验证：随机端口、ready 文件不含令牌、无令牌/错误令牌 401、正确令牌 200、`/mcp` 401、静态首页 200、严格 CSP 头、shutdown 后进程自行退出。

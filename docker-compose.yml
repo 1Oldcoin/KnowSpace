@@ -1,25 +1,76 @@
-# 知间（MyFirstMafAgent）容器部署
+# 知间（MyFirstMafAgent）容器部署 —— 两种形态，二选一
 #
-#   docker compose up -d --build
-#   浏览器打开 http://localhost:5056
+#   ┌─ 一体（默认）   docker compose up -d --build
+#   │   一个容器：API + 前端 + PostgreSQL 17 + pgvector
+#   │   数据库由 API 进程自己 initdb/pg_ctl 拉起，数据在 maf-app-data 卷里
+#   │
+#   └─ 外部库     docker compose --profile external up -d --build
+#       两个容器：api（不含数据库）+ db（pgvector 官方镜像）
+#       适合：要独立备份/扩容、要跑多副本、或已有托管 PostgreSQL
 #
-# 组成：
-#   db  — 外部 PostgreSQL + pgvector（容器内**不**启动便携数据库）
-#   api — ASP.NET Core 后端 + 前端静态文件（wwwroot），不含 Electron
+#   浏览器打开 http://127.0.0.1:5056
 #
-# 注意：
-#   - 默认只绑 127.0.0.1。对外请用反向代理上 TLS 与认证，并配好 MAF_SERVER_TOKEN，
-#     否则 /api 是不鉴权的（它原本只服务于 Electron 窗口）。详见 docs/CLOUD-DEPLOYMENT.md。
-#   - 密码只是本地开发的默认值，对外暴露前务必用 .env 覆盖 PG_PASSWORD。
-#   - Whisper 模型（141 MB ~ 3 GB）不随镜像分发：首次使用会按需下载到
-#     maf-data 卷里；离线环境把 Media__AutoDownloadWhisperModel 设为 false，
-#     再从「设置 → 语音转写」导入本地 ggml 文件。
+# 三条安全前提（对外暴露前必读 docs/CLOUD-DEPLOYMENT.md）：
+#   1. 端口默认只绑 127.0.0.1。对外请用 nginx/Caddy 上 TLS 再反代，别直接把 5056 映射到 0.0.0.0。
+#   2. 一体模式下 PG 只监听容器内的 127.0.0.1:55432，不对外；但默认口令是 postgres，
+#      务必要用 .env 里的 PG_PASSWORD 覆盖。
+#   3. MAF_SERVER_TOKEN 保护 /api。置空时 /api 不鉴权（仅适合「只映射回环地址的自用部署」）；
+#      一旦要走公网，必须设它，并由反代注入 X-Api-Token。
+#
+# Whisper 模型（141 MB ~ 3 GB）不随镜像分发：首次使用会按需下载到 maf-app-data 卷；
+# 离线环境把 Media__AutoDownloadWhisperModel 设为 false，再从「设置 → 语音转写」导入本地 ggml 文件。
 
 services:
+  # ════════════════════════════════════════════════════════════════
+  # 一体模式（默认）
+  # ════════════════════════════════════════════════════════════════
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: myfirstmafagent:integrated
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${APP_PORT:-5056}:5056"
+    environment:
+      # --- 身份与对外地址 ---
+      # 保护 /api（openssl rand -hex 32）。置空 = /api 不鉴权。
+      MAF_SERVER_TOKEN: "${MAF_SERVER_TOKEN:-}"
+      # 放行未鉴权的 /api/health，给 HEALTHCHECK / 监控探活用。
+      Server__AllowAnonymousHealth: "true"
+      # 只影响「一键复制」生成的 MCP 配置地址（不参与鉴权）。
+      # 未开 OAuth 时填上，否则生成的是 http://127.0.0.1:5056/mcp，别人本机连不上。
+      Server__PublicBaseUrl: "${PUBLIC_BASE_URL:-}"
+      # 反代与 API 不同机时必填，否则按 IP 封禁会把代理地址当客户端（一个人爆破全体连坐）。
+      Server__TrustForwardedHeaders: "${TRUST_FORWARDED_HEADERS:-false}"
+      # --- 内置数据库 ---
+      PortablePostgres__Password: "${PG_PASSWORD:-postgres}"
+      # --- 聊天模型（OpenAI 兼容；也可在「设置」页里改）---
+      Llm__UseCloudApi: "true"
+      Llm__Online__Endpoint: "${LLM_ENDPOINT:-https://api.deepseek.com/v1}"
+      Llm__Online__Model: "${LLM_MODEL:-deepseek-chat}"
+      Llm__Online__ApiKey: "${LLM_API_KEY:-}"
+      # 离线部署：设 false，再从设置页导入 ggml 模型。
+      Media__AutoDownloadWhisperModel: "${AUTO_DOWNLOAD_WHISPER:-true}"
+    volumes:
+      # 上传的资料、日志、OAuth 签名私钥、pgdata、Whisper 模型都在这里。
+      - maf-app-data:/app/App_Data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:5056/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      # 首次启动要 initdb（3~10 秒）+ 全量建表，给足。
+      start_period: 90s
+
+  # ════════════════════════════════════════════════════════════════
+  # 外部库模式（--profile external）：api + db
+  # ════════════════════════════════════════════════════════════════
   db:
-    # pgvector 官方镜像。若该 tag 在你的环境里不存在，换成 pg17 / pg16 亦可
-    # （知识库只依赖 vector 扩展，不依赖 PG 18 特性）。
-    image: pgvector/pgvector:pg18
+    profiles: ["external"]
+    # 与一体模式内置的版本对齐（代码里便携库大版本硬编码为 17）。
+    # pgvector/pgvector 也提供 pg18 等 tag，但本项目按 17 验证。
+    image: pgvector/pgvector:pg17
     restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
@@ -33,47 +84,46 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
-    # 默认不对外暴露数据库端口；需要本机用 psql 连的时候再放开。
+    # 默认不对外暴露数据库端口；需要本机 psql 连接时再放开。
     # ports:
-    #   - "55432:5432"
+    #   - "127.0.0.1:55432:5432"
 
   api:
+    profiles: ["external"]
     build:
       context: .
       dockerfile: Dockerfile
+    image: myfirstmafagent:integrated
     restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
     ports:
-      # 默认只绑回环：对外请用 nginx/Caddy 做 TLS + 认证后再反代，
-      # 不要直接把 5056 映射到 0.0.0.0——容器里的 /api 默认不鉴权。
-      - "127.0.0.1:5056:5056"
+      - "127.0.0.1:${APP_PORT:-5056}:5056"
     environment:
-      # 关键：填了连接串就不会启动便携 PostgreSQL。
-      ConnectionStrings__KnowledgeBase: "Host=db;Port=5432;Database=myfirstmafagent;Username=postgres;Password=${PG_PASSWORD:-postgres}"
+      # 关键：关掉内置数据库，并给出外部连接串。
       PortablePostgres__Enabled: "false"
-      Desktop__OpenBrowser: "false"
-      # --- 安全（对外暴露前必读 docs/CLOUD-DEPLOYMENT.md）---
-      # 服务端长期 API 令牌：保护 /api（否则扫到端口就能读写全部资料）。
-      # 生成：openssl rand -hex 32
+      ConnectionStrings__KnowledgeBase: "Host=db;Port=5432;Database=myfirstmafagent;Username=postgres;Password=${PG_PASSWORD:-postgres}"
       MAF_SERVER_TOKEN: "${MAF_SERVER_TOKEN:-}"
-      # 放行未鉴权的 /api/health，给 LB / HEALTHCHECK / 监控探活用。
       Server__AllowAnonymousHealth: "true"
-      # 放在反向代理后面时必开，否则审计来源 IP 全变 127.0.0.1，
-      # 且 /api/desktop/shutdown 的回环校验会被代理骗过。
-      Server__TrustForwardedHeaders: "${TRUST_FORWARDED_HEADERS:-true}"
-      # 聊天模型（OpenAI 兼容）。也可以在「设置」页里改。
+      Server__PublicBaseUrl: "${PUBLIC_BASE_URL:-}"
+      Server__TrustForwardedHeaders: "${TRUST_FORWARDED_HEADERS:-false}"
       Llm__UseCloudApi: "true"
       Llm__Online__Endpoint: "${LLM_ENDPOINT:-https://api.deepseek.com/v1}"
       Llm__Online__Model: "${LLM_MODEL:-deepseek-chat}"
       Llm__Online__ApiKey: "${LLM_API_KEY:-}"
-      # 离线部署：设为 false，然后从设置页导入 ggml 模型。
       Media__AutoDownloadWhisperModel: "${AUTO_DOWNLOAD_WHISPER:-true}"
     volumes:
-      # 上传的资料、日志、Whisper 模型、插件安装目录都在这里。
-      - maf-data:/app/App_Data
+      # 这里不存 pgdata（在 db 容器里），只存资料/日志/模型/签名私钥。
+      - maf-api-data:/app/App_Data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:5056/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
 
 volumes:
+  maf-app-data:
   maf-pgdata:
-  maf-data:
+  maf-api-data:

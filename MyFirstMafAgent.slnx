@@ -3,9 +3,6 @@
   <Project Path="MyFirstMafAgent.Api.Tests/MyFirstMafAgent.Api.Tests.csproj" />
   <Project Path="MyFirstMafAgent.Plugins.Sdk/MyFirstMafAgent.Plugins.Sdk.csproj" />
   <Folder Name="/App_Data/" />
-  <Folder Name="/App_Data/tmp-hello/">
-    <Project Path="App_Data/tmp-hello/MyFirstPlugin.csproj" />
-  </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/MyFirstMafAgent.Plugin.SamplePlatform/MyFirstMafAgent.Plugin.SamplePlatform.csproj" />
   </Folder>

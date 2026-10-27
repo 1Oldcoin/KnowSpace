@@ -114,7 +114,7 @@ $init = Mcp $readerKey @{
     params = @{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'e2e'; version = '1.0.0' } }
 }
 $initJson = McpJson $init
-Check 'initialize' ($init.Status -eq 200 -and $initJson.result.serverInfo.name -eq 'MyFirstMafAgent.Knowledge') ("status=" + $init.Status + " server=" + $initJson.result.serverInfo.name)
+Check 'initialize' ($init.Status -eq 200 -and $initJson.result.serverInfo.name -eq 'zhijian-knowledge') ("status=" + $init.Status + " server=" + $initJson.result.serverInfo.name)
 
 $notified = Mcp $readerKey @{ jsonrpc = '2.0'; method = 'notifications/initialized'; params = @{} }
 Write-Host ("notify status=" + $notified.Status)

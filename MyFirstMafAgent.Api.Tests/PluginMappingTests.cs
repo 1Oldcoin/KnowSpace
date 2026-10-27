@@ -837,5 +837,9 @@ public sealed class PluginScopePolicyTests
             Queries++;
             return Task.FromResult(known.Contains(knowledgeBaseId));
         }
+
+        public Task<IReadOnlyList<KnowledgeBaseSummary>> ListAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<KnowledgeBaseSummary>>(
+                known.Select(id => new KnowledgeBaseSummary(id, id.ToString("D"))).ToList());
     }
 }

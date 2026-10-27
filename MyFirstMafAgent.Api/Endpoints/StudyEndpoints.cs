@@ -14,6 +14,18 @@ public static class StudyEndpoints
             ApiResults.ExecuteAsync(async () =>
                 Results.Ok(await study.GetStatisticsAsync(days ?? 30, cancellationToken))));
 
+        // 日历弹窗：按显式日期区间取「有打卡的那些天」。
+        // 与 /checkins?days=N 的区别是这里有上界（MaxRangeDays）而不是「最近 N 天」，
+        // 所以可以自由翻月；不传参时默认返回当月。
+        routes.MapGet("/checkins/range", (DateOnly? from, DateOnly? to, StudyService study, CancellationToken cancellationToken) =>
+            ApiResults.ExecuteAsync(async () =>
+            {
+                var today = DateOnly.FromDateTime(DateTime.Today);
+                var start = from ?? new DateOnly(today.Year, today.Month, 1);
+                var end = to ?? new DateOnly(today.Year, today.Month, 1).AddMonths(1).AddDays(-1);
+                return Results.Ok(await study.GetRangeAsync(start, end, cancellationToken));
+            }));
+
         routes.MapPost("/checkins", (StudyCheckinRequest request, StudyService study, AvatarActivityRecorder activity, CancellationToken cancellationToken) =>
             ApiResults.ExecuteAsync(async () =>
             {

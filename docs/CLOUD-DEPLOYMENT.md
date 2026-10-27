@@ -52,6 +52,7 @@ MCP 数据面（`/mcp`）的授权模型是完整的：密钥 + 能力 + 工具�
 | 客户端数量上限 | `Mcp:MaxAgentClients`（50） | 防无限注册 |
 | 调用审计 | `IAgentCallLogStore` | 审计写失败只丢该条，不阻断调用 |
 | 可读错误码 | JSON-RPC `-32001/-32003/-32004/-32006` | 让模型看到可读原因而不是传输错误 |
+| **OAuth 端点抽水防护** | `OAuthEndpoints.MapAbuseGuard` | `/oauth/token`、`/oauth/register` 与 `/mcp` 共用按 IP 的失败闸门（30 次/分钟 → 封 300 秒），封禁时返 `429` + `Retry-After` |
 
 ### 2.2 REST 数据面
 
@@ -156,11 +157,57 @@ ports:
 `docker-compose.yml` 里的 `POSTGRES_PASSWORD` 也是 `postgres`。
 云端务必改成强口令，并只在容器网络内可达（compose 默认已不映射 5432）。
 
+### 3.5 启用 OAuth（可选，面向普通用户）
+
+想让用户“浏览器点一下同意”而不是复制粘贴密钥时：
+
+```jsonc
+"Mcp": {
+  "OAuth": {
+    "Enabled": true,
+    "Issuer": "https://knowspace.example.com"   // 必须与公网地址完全一致
+  }
+},
+"Server": {
+  // 只影响「一键复制」生成的地址（不参与鉴权）。开了 OAuth 时可以省略（Issuer 优先）。
+  "PublicBaseUrl": "https://knowspace.example.com"
+}
+```
+
+五个硬要求：
+
+1. **同源**：`/mcp` 与 `/oauth/*`、`/.well-known/*` 必须在同一域名下（Cursor 在跨源时无法完成 OAuth）。本实现天然同源。
+2. **`Issuer` 不能猜**：它写进令牌的 `iss`/`aud`。反代后面要么直接配公网地址，要么开 `Server:TrustForwardedHeaders` 并确保 `X-Forwarded-Proto/Host` 可信。
+3. **反代不要给 `/oauth/*`、`/.well-known/*` 加 Basic 认证**：客户端在这之前没有凭据。同时要透传 `Authorization`、`Accept: application/json, text/event-stream`、`Mcp-Method`、`MCP-Protocol-Version` 四个头。
+4. **`maf_` 密钥通道继续保留**：Cursor 的刷新令牌有已知问题，OAuth 失效时切回密钥配置。
+5. **确认 `/oauth/token` 与 `/oauth/register` 的 IP 闸门看到的是真实客户端 IP**。这两个端点默认 30 次失败/分钟 → 封 300 秒（`Server:FailedAuthLimitPerMinute` / `FailedAuthBlockSeconds`）。在反代后面如果 `RemoteIpAddress` 永远是代理地址，一个人爆破会把所有用户一起封——所以 `Server:TrustForwardedHeaders=true` 与 `Server:KnownProxies` 是**必配项**，不是可选项。
+
+Caddy 示例（不需要额外规则，但要确保不拦截 `/.well-known`）：
+
+```
+knowspace.example.com {
+    reverse_proxy 127.0.0.1:5056
+}
+```
+
+部署后自检：
+
+```powershell
+# 元数据是否可匿名访问
+curl.exe -s https://knowspace.example.com/.well-known/oauth-authorization-server
+# 全流程（DCR → 授权 → 换令牌 → 调 /mcp → 撤销）
+powershell -NoProfile -File scripts\Test-McpOAuth.ps1 -BaseUrl https://knowspace.example.com -VerifyRevocation
+```
+
+细节与风险清单见 [`MCP-OAUTH.md`](MCP-OAUTH.md)。
+
 ---
 
 ## 4. 三种部署形态
 
 ### 4.1 Docker Compose（Linux 云主机，推荐）
+
+默认是**一体形态**：一个容器里跑 API + 前端 + PostgreSQL 17 + pgvector。
 
 ```bash
 git clone <repo> && cd MyFirstMafAgent
@@ -168,51 +215,85 @@ cat > .env <<'EOF'
 LLM_API_KEY=sk-xxxx
 MAF_SERVER_TOKEN=<openssl rand -hex 32 的输出>
 PG_PASSWORD=<强口令>
+PUBLIC_BASE_URL=https://knowspace.example.com
 EOF
 docker compose up -d --build
+docker compose exec app bash /app/scripts/Test-IntegratedStack.sh --pg-password "$PG_PASSWORD"
 ```
 
-再在 `docker-compose.yml` 的 `api.environment` 里补：
+`docker-compose.yml` 里两个已经接好的环境变量：
 
-```yaml
-      MAF_SERVER_TOKEN: "${MAF_SERVER_TOKEN}"
-      Server__AllowAnonymousHealth: "true"
-      Server__TrustForwardedHeaders: "true"
-      PortablePostgres__Password: "${PG_PASSWORD}"
-      ConnectionStrings__KnowledgeBase: "Host=db;Port=5432;Database=myfirstmafagent;Username=postgres;Password=${PG_PASSWORD}"
+| 变量 | 作用 |
+| --- | --- |
+| `Server__PublicBaseUrl` | 只影响「一键复制」生成的 MCP 地址（不参与鉴权）；不填会生成 `http://127.0.0.1:5056/mcp`，别人本机连不上 |
+| `Server__TrustForwardedHeaders` | 反代后面**必开**，否则审计 IP 全变 `127.0.0.1`，且按 IP 封禁会把代理当成客户端（一个人爆破全体连坐） |
+
+反代与 API **不同机**时还要加 `Server__KnownProxies__0=<代理真实 IP>`（多个用 `__1` 递增）。
+
+要改成「API + 独立数据库」（适合独立备份/扩容/多副本）：
+
+```bash
+docker compose --profile external up -d --build
 ```
 
-容器内不启动便携数据库（`PortablePostgres__Enabled=false`），用 `db` 服务的 PostgreSQL + pgvector。
+它用 `pgvector/pgvector:pg17` 另起一个 `db` 容器，并把
+`PortablePostgres__Enabled=false` + `ConnectionStrings__KnowledgeBase` 注入给 `api`。
+两个形态的数据卷不同（`maf-app-data` vs `maf-api-data`+`maf-pgdata`），**不能直接互换**。
+
 `ffmpeg` 由 apt 安装，不随包分发 100 MB 副本。
+
+> 一体部署的代价：数据库随 API 进程生命周期（`StopOnExit=true`），不能跑多副本，
+> 升级 PostgreSQL = 重建镜像。要这些能力就切 `external` profile，切换只改两个环境变量。
 
 ### 4.2 Linux 裸机 / systemd
 
-```ini
-# /etc/systemd/system/knowspace.service
-[Unit]
-Description=KnowSpace API
-After=network.target
+最省事的方法：发布 `-Target console -Runtime linux-x64`，拷到服务器后一条命令：
 
+```bash
+sudo bash deploy/linux/install.sh --source /tmp/console-linux-x64
+```
+
+它做五件事：装 PostgreSQL 17 + pgvector（PGDG 源）、建系统账号 `myfirstmafagent`、
+铺程序到 `/opt/myfirstmafagent` 与数据到 `/var/lib/myfirstmafagent`、
+写 `/etc/myfirstmafagent/myfirstmafagent.env`（带随机数据库口令）、装并启动 systemd 单元。
+
+手写单元时的关键行（完整模板见 `deploy/linux/myfirstmafagent.service`）：
+
+```ini
 [Service]
 Type=simple
-User=knowspace
-WorkingDirectory=/opt/knowspace
-ExecStart=/opt/knowspace/MyFirstMafAgent.Api --urls http://127.0.0.1:5056 --no-browser
-Environment=ASPNETCORE_ENVIRONMENT=Production
-Environment=MAF_SERVER_TOKEN=<令牌>
-Environment=Server__AllowAnonymousHealth=true
-Environment=Server__TrustForwardedHeaders=true
-Environment=ConnectionStrings__KnowledgeBase=Host=127.0.0.1;Port=5432;Database=myfirstmafagent;Username=knowspace;Password=<口令>
-Environment=PortablePostgres__Enabled=false
+User=myfirstmafagent
+WorkingDirectory=/opt/myfirstmafagent
+EnvironmentFile=/etc/myfirstmafagent/myfirstmafagent.env
+ExecStart=/opt/myfirstmafagent/Zhijian.Api --urls http://127.0.0.1:5056 --no-browser
 Restart=always
 RestartSec=5
+TimeoutStopSec=120
+ReadWritePaths=/var/lib/myfirstmafagent
+```
 
-[Install]
-WantedBy=multi-user.target
+env 里最少这几项：
+
+```ini
+MAF_SERVER_TOKEN=<令牌>
+Server__AllowAnonymousHealth=true
+Server__TrustForwardedHeaders=true
+Server__PublicBaseUrl=https://knowspace.example.com
+# 内置库：用 apt 装的 PG 17，不随包分发便携树（便携树只有 win-x64）
+PortablePostgres__Enabled=true
+PortablePostgres__BinDirectory=/usr/lib/postgresql/17/bin
+PortablePostgres__RootDirectory=/var/lib/myfirstmafagent
+PortablePostgres__Password=<强口令>
+# 签名私钥会落在它的上层目录（/var/lib/myfirstmafagent/oauth/），所以不能用程序目录
+Storage__RootPath=/var/lib/myfirstmafagent/uploads
 ```
 
 > 必须加 `--urls`：`appsettings.json` 里的 `Urls` 是 `127.0.0.1`，
 > 绑不到对外地址。`ASPNETCORE_URLS` 会被配置文件同名项压掉，只有命令行参数生效。
+
+想改用本机已有的 PostgreSQL：把 `PortablePostgres__Enabled` 改 `false`、加上
+`ConnectionStrings__KnowledgeBase`，`systemctl restart` 即可，不用重跑安装脚本；
+但 **pgvector 扩展要自己装**（`postgresql-17-pgvector`）。
 
 ### 4.3 Windows Server
 
@@ -221,7 +302,7 @@ WantedBy=multi-user.target
 $env:MAF_SERVER_TOKEN = "<令牌>"
 $env:Server__AllowAnonymousHealth = "true"
 $env:Server__TrustForwardedHeaders = "true"
-.\MyFirstMafAgent.Api.exe --urls http://127.0.0.1:5056 --no-browser
+.\Zhijian.Api.exe --urls http://127.0.0.1:5056 --no-browser
 ```
 
 便携 PostgreSQL 在 Windows 上开箱可用（`ExternalTools\pgSQL\win-x64`）；

@@ -159,7 +159,7 @@ function Get-PostgresBinCandidates {
 
 function Assert-RuntimeFiles([string]$output) {
     $exeSuffix = if ($Runtime -like 'win-*') { '.exe' } else { '' }
-    $mainExe = "MyFirstMafAgent.Api$exeSuffix"
+    $mainExe = "Zhijian.Api$exeSuffix"
 
     foreach ($relative in @($mainExe, 'appsettings.json', 'wwwroot\index.html',
             'ExternalTools\Embedding\bge-small-zh-v1.5\model.onnx',
@@ -205,6 +205,13 @@ function Assert-RuntimeFiles([string]$output) {
         Write-Warning "  Needs the whole tree ExternalTools\pgSQL\$Runtime\ (bin + lib + share); bin/ alone is not enough."
         Write-Warning "  Provide it: powershell -ExecutionPolicy Bypass -File scripts\Download-ExternalTools.ps1 -Target pgsql -PgSource <ready dist\pgsql>"
         Write-Warning "              (or -PgZip <pgsql-portable zip>)"
+        if ($Runtime -notlike 'win-*') {
+            # Linux/macOS: the recommended path is the OS package, not a bundled tree.
+            Write-Warning "  Linux/macOS: use the OS package instead of a bundled tree (this project does not ship one)."
+            Write-Warning "    Debian/Ubuntu: apt-get install -y postgresql-17 postgresql-17-pgvector"
+            Write-Warning "    Then set PortablePostgres__BinDirectory=/usr/lib/postgresql/17/bin"
+            Write-Warning "    deploy/linux/ has a ready systemd unit and install.sh."
+        }
         Write-Warning "  Or skip the portable database entirely: set ConnectionStrings__KnowledgeBase to an external PostgreSQL (recommended in Docker)."
     }
 

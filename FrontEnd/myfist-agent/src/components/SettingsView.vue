@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { Archive, ArrowDownToLine, ArrowUpFromLine, Boxes, Check, Cloud, Cpu, Database, Download, KeyRound, LoaderCircle, Mic, Plug, Power, RefreshCw, RotateCcw, Save, Server, SlidersHorizontal, Sparkles, Trash2, Upload, UserRound } from 'lucide-vue-next'
+import { Archive, ArrowDownToLine, ArrowUpFromLine, Boxes, Check, Cloud, Copy, Cpu, Database, Download, KeyRound, LoaderCircle, Mic, Plug, Power, RefreshCw, RotateCcw, Save, Server, SlidersHorizontal, Sparkles, Trash2, Upload, UserRound } from 'lucide-vue-next'
 import { deleteWhisperModel, downloadWhisperModel, exportKnowledgeBasePackage, getWhisperModelStatus, importWhisperModel, importKnowledgeBasePackage } from '../services/api'
 import { getAgentInfo, getMcpStatus, importLocalEmbeddingSpec, listAgentTools, probeEmbeddingSpec, registerCloudEmbeddingSpec } from '../services/api'
+import { getLocalMcpConfig } from '../services/api'
 import { normalizeAgentSettings } from '../services/api'
 import type { AgentInfo, AgentSettings, AgentToolInfo, AppSettings, EmbeddingSpec, KnowledgeBase, KnowledgePackageImportResult, McpStatus, SaveSettingsPayload, WhisperModelStatus } from '../services/api'
 
@@ -64,6 +65,13 @@ const agentTools = ref<AgentToolInfo[]>([])
 const agentBusy = ref(false)
 const agentError = ref('')
 
+// 一键复制 MCP 配置：端口是后端随机分配的，只有它能告诉我真实入口。
+const mcpClientKey = ref('')
+const mcpCopyMessage = ref('')
+const mcpCopyError = ref('')
+// 复制出来的地址「只在本机可用」时给一条警告，不报错——配置本身是能用的。
+const mcpBaseUrlWarning = ref('')
+
 const whisperStatus = ref<WhisperModelStatus | null>(null)
 const whisperBusy = ref(false)
 const whisperMessage = ref('')
@@ -96,6 +104,36 @@ async function loadAgentInfo() {
     agentError.value = errorText(error)
   } finally {
     agentBusy.value = false
+  }
+}
+
+/**
+ * 复制本地 MCP 配置。
+ *
+ * 这是不依赖 OAuth、不依赖 Server Card、不依赖 mDNS 的「确定可用入口」：
+ * 拿到真实端口 + 用户填的 maf_ 密钥，粘贴就能用。
+ */
+async function copyMcpConfig(target: 'cursor' | 'claude') {
+  mcpCopyMessage.value = ''
+  mcpCopyError.value = ''
+  mcpBaseUrlWarning.value = ''
+  if (!props.apiOnline) {
+    mcpCopyError.value = 'API 未连接，暂时拿不到真实端口。'
+    return
+  }
+
+  try {
+    const config = await getLocalMcpConfig(mcpClientKey.value.trim() || undefined)
+    const text = target === 'cursor' ? config.cursor : config.claudeDesktop
+    await navigator.clipboard.writeText(text)
+    mcpCopyMessage.value = target === 'cursor'
+      ? `已复制 Cursor 配置（${config.endpoint}），粘贴到 ~/.cursor/mcp.json 即可。`
+      : `已复制 Claude Desktop 配置（${config.endpoint}），粘贴到 claude_desktop_config.json 即可。`
+    // 服务端部署时后端会返回一条「回环地址只在本机有效」的提示，原样转述。
+    const deploymentNote = config.notes.find(note => note.includes('PublicBaseUrl'))
+    if (deploymentNote) mcpBaseUrlWarning.value = deploymentNote
+  } catch (error) {
+    mcpCopyError.value = errorText(error)
   }
 }
 
@@ -921,6 +959,29 @@ const whisperReady = computed(() => whisperStatus.value?.exists === true)
           <div><dt>外部 MCP 服务器</dt><dd>{{ mcpStatus ? `已连接 ${mcpStatus.connectedCount} / ${mcpStatus.servers.length}` : '未获取' }}</dd></div>
           <div><dt>可调用工具</dt><dd>{{ agentTools.length }} 个（含 MCP 工具 {{ mcpStatus?.toolCount ?? 0 }} 个）</dd></div>
         </dl>
+
+        <div class="settings-tool-groups">
+          <div class="settings-tool-group">
+            <span class="settings-tool-group-title">MCP 接入配置（一键复制）</span>
+            <span class="settings-spec-meta">把下面的配置粘到 Cursor 或 Claude Desktop，就能让它们连上本机知识库。端口是本机随机回环端口，以后端返回的实际值为准。</span>
+            <label class="settings-field">
+              <span>客户端密钥（可选，maf_ 开头）</span>
+              <input v-model="mcpClientKey" placeholder="maf_…" autocomplete="off" spellcheck="false" />
+            </label>
+            <div class="settings-agent-switches">
+              <button class="button button-soft" :disabled="!apiOnline" @click="copyMcpConfig('cursor')">
+                <Copy :size="14" /> 复制 Cursor 配置
+              </button>
+              <button class="button button-soft" :disabled="!apiOnline" @click="copyMcpConfig('claude')">
+                <Copy :size="14" /> 复制 Claude Desktop 配置
+              </button>
+            </div>
+            <p v-if="mcpCopyMessage" class="settings-hint"><Check :size="13" /> {{ mcpCopyMessage }}</p>
+            <p v-if="mcpBaseUrlWarning" class="settings-hint settings-hint-error">{{ mcpBaseUrlWarning }}</p>
+            <p v-if="mcpCopyError" class="settings-hint settings-hint-error">{{ mcpCopyError }}</p>
+            <span class="settings-spec-meta">密钥只需要建一次（POST /api/agent-clients，明文只出现一次）。配置里不填密钥也能复制，之后再补。</span>
+          </div>
+        </div>
 
         <div class="settings-tool-groups">
           <div class="settings-tool-group">

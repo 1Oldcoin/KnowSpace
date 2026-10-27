@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using Microsoft.AspNetCore.Diagnostics;
+using Microsoft.Extensions.Options;
 using MyFirstMafAgent.Api.Endpoints;
+using MyFirstMafAgent.Api.OAuth;
 using MyFirstMafAgent.Api.Options;
 using Scalar.AspNetCore;
 
@@ -22,6 +24,9 @@ public static class HostPipeline
         // 转发头必须在最前面：后面所有读 RemoteIpAddress 的逻辑（审计、限流、回环判定）都靠它。
         app.UseTrustedForwardedHeaders(serverSecurity);
         app.UseSecurityHeaders(serverSecurity);
+
+        // 配置项与实现不一致时，宁可吵一句也不要静默（见方法注释）。
+        app.WarnUnimplementedMdns(serverSecurity);
 
         var requestLogger = app.Services.GetRequiredService<ILoggerFactory>()
             .CreateLogger("MyFirstMafAgent.Api.Requests");
@@ -112,6 +117,17 @@ public static class HostPipeline
         if (mcp.Enabled)
             app.MapMcp(mcp.Path);
 
+        // OAuth 授权服务器（与资源服务器同源）：只有配好 Issuer 才映射。
+        var oauthContext = OAuthServerContext.TryCreate(
+            app.Services.GetRequiredService<IOptions<McpOAuthOptions>>().Value,
+            mcp.Path);
+
+        if (oauthContext is not null)
+            app.MapOAuthEndpoints(oauthContext);
+
+        // 诊断 / 本地配置 / Server Card / 认证事件。
+        app.MapMcpAccessEndpoints(mcp, oauthContext);
+
         if (app.Environment.IsDevelopment())
         {
             app.MapOpenApi();
@@ -126,6 +142,8 @@ public static class HostPipeline
             {
                 if (context.Request.Path.StartsWithSegments("/api")
                     || context.Request.Path.StartsWithSegments(mcp.Path)
+                    || context.Request.Path.StartsWithSegments("/oauth")
+                    || context.Request.Path.StartsWithSegments("/.well-known")
                     || context.Request.Path.StartsWithSegments("/openapi")
                     || context.Request.Path.StartsWithSegments("/scalar"))
                 {

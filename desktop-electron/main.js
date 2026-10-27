@@ -21,6 +21,13 @@ const { pathToFileURL } = require('node:url');
 const { createUpdater } = require('./updater');
 
 const TOKEN_HEADER = 'X-Api-Token';
+/**
+ * 用户看到的产品名。与 electron-builder.yml 的 productName 保持一致。
+ * 磁盘上的 exe 叫 Zhijian.exe（executableName），两者故意不同，见该文件的命名说明。
+ */
+const APP_DISPLAY_NAME = '知间-本地知识库';
+/** 后台 sidecar 的文件名（.csproj 里的 AssemblyName，不是项目目录名）。 */
+const API_EXE_NAME = 'Zhijian.Api.exe';
 const READY_TIMEOUT_MS = 180_000;
 const HEALTH_TIMEOUT_MS = 180_000;
 const SHUTDOWN_TIMEOUT_MS = 20_000;
@@ -117,9 +124,9 @@ function resolveApiExecutable() {
   if (process.env.MAF_API_EXE) return process.env.MAF_API_EXE;
 
   const candidates = [
-    path.join(process.resourcesPath || '', 'api', 'MyFirstMafAgent.Api.exe'),
-    path.join(__dirname, '..', 'publish', 'desktop', 'MyFirstMafAgent.Api.exe'),
-    path.join(__dirname, '..', 'publish', 'console', 'MyFirstMafAgent.Api.exe')
+    path.join(process.resourcesPath || '', 'api', API_EXE_NAME),
+    path.join(__dirname, '..', 'publish', 'desktop', API_EXE_NAME),
+    path.join(__dirname, '..', 'publish', 'console', API_EXE_NAME)
   ];
 
   for (const candidate of candidates) {
@@ -127,6 +134,34 @@ function resolveApiExecutable() {
   }
 
   return null;
+}
+
+/**
+ * 读取 sidecar 的 appsettings.json 里的 Server:FixedLocalPort。
+ *
+ * 0 / 缺省 = 随机回环端口（安全默认：端口不可预测）。
+ * 设成固定端口只是「配置可以写死」的便利，不改变「只绑回环地址」的安全前提，
+ * 因此这里不做任何自动广播或对外监听。
+ */
+function resolveFixedLocalPort(exePath) {
+  const fromEnv = Number.parseInt(process.env.MAF_FIXED_LOCAL_PORT || '', 10);
+  if (Number.isInteger(fromEnv) && fromEnv > 0 && fromEnv < 65536) return fromEnv;
+
+  try {
+    const settingsPath = path.join(path.dirname(exePath), 'appsettings.json');
+    if (!fs.existsSync(settingsPath)) return 0;
+
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    const port = Number.parseInt(settings?.Server?.FixedLocalPort, 10);
+    if (Number.isInteger(port) && port > 0 && port < 65536) {
+      log(`fixed local port enabled: ${port} (only recommended on trusted single-user machines)`);
+      return port;
+    }
+  } catch (error) {
+    log(`failed to read Server:FixedLocalPort: ${error.message}`);
+  }
+
+  return 0;
 }
 
 function startApi(exePath, readyFile) {
@@ -137,10 +172,14 @@ function startApi(exePath, readyFile) {
     DESKTOP_STRICT_CSP: '1'
   };
 
-  log('starting API sidecar');
+  // 默认随机端口；只有显式配置固定端口时才写死（见 resolveFixedLocalPort）。
+  const fixedPort = resolveFixedLocalPort(exePath);
+  const listenUrl = fixedPort > 0 ? `http://127.0.0.1:${fixedPort}` : 'http://127.0.0.1:0';
+
+  log(`starting API sidecar on ${listenUrl}`);
 
   const child = spawn(exePath, [
-    '--urls', 'http://127.0.0.1:0',
+    '--urls', listenUrl,
     '--no-browser',
     '--desktop-ready-file', readyFile,
     '--desktop-data-root', userDataRoot()
@@ -239,7 +278,7 @@ function createWindow(baseUrl) {
     minHeight: 640,
     show: false,
     backgroundColor: '#f5f7f4',
-    title: '知间',
+    title: APP_DISPLAY_NAME,
     icon: path.join(__dirname, '..', 'assets', 'app.ico'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -335,7 +374,7 @@ function createSplash() {
     show: false,
     backgroundColor: '#f4f8f4',
     skipTaskbar: false,
-    title: '知间',
+    title: APP_DISPLAY_NAME,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -496,8 +535,8 @@ function installMenu() {
           click: () => {
             dialog.showMessageBox(mainWindow, {
               type: 'info',
-              title: '关于知间',
-              message: `知间 ${app.getVersion()}`,
+              title: `关于 ${APP_DISPLAY_NAME}`,
+              message: `${APP_DISPLAY_NAME} ${app.getVersion()}`,
               detail: `Electron ${process.versions.electron} · Chromium ${process.versions.chrome}\n数据目录：${userDataRoot()}`
             });
           }
@@ -666,7 +705,7 @@ async function bootstrap() {
       if (!exePath) {
         closeSplash();
         dialog.showErrorBox('缺少后端服务',
-          '未找到 MyFirstMafAgent.Api.exe。请先执行 scripts\\Publish-Portable.ps1，或设置 MAF_API_EXE 指向已发布的可执行文件。');
+          `未找到 ${API_EXE_NAME}。请先执行 scripts\\Publish-Portable.ps1，或设置 MAF_API_EXE 指向已发布的可执行文件。`);
         app.exit(1);
         return;
       }

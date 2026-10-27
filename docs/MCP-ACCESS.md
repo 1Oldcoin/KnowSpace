@@ -12,7 +12,8 @@
 | 面 | 谁在用 | 凭据 | 说明 |
 | --- | --- | --- | --- |
 | `/api` | 界面（浏览器 / 桌面窗口） | `X-Api-Token` | 桌面：一次性令牌，每次启动重生成、不落盘、不下发给渲染进程<br>服务端：长期令牌 `Server:ApiToken` / 环境变量 `MAF_SERVER_TOKEN`，或反向代理认证后注入 |
-| `/mcp` | 外部智能体 | 客户端密钥 `Authorization: Bearer ...` 或 `X-Api-Key: ...` | 长期有效，可轮换/停用/删除 |
+| `/mcp` | 外部智能体 | 客户端密钥 `Authorization: Bearer maf_…` 或 `X-Api-Key: maf_…`<br>**或** OAuth 访问令牌 `Authorization: Bearer eyJ…` | 两条通道并存，共用同一个准入闸门 |
+| `/oauth/*`、`/.well-known/*` | OAuth 流程本身 | 各自的参数 + PKCE | 必须匿名可达：客户端在这之前还没有凭据 |
 | 静态资源 | 浏览器 | 无 | 首页与 `assets/*` 不需要凭据 |
 
 **为什么不是同一个令牌**：桌面令牌按设计不落盘，外部 Agent 拿不到；而如果为了对外把令牌固定下来，等于让本机上任何进程都能读走整个知识库。两件事必须分开。
@@ -161,6 +162,11 @@ curl.exe -s http://127.0.0.1:5056/api/agent-clients/catalog
 | PUT | `/api/agent-clients/{id}` | 改能力/白名单/额度/启停 |
 | POST | `/api/agent-clients/{id}/rotate` | 轮换密钥（旧密钥立即失效） |
 | DELETE | `/api/agent-clients/{id}` | 删除（审计历史保留） |
+| GET | `/api/mcp/diagnostics` | 协议诊断（Legacy/Modern、版本、方法计数）+ 通道状态 |
+| GET | `/api/mcp/local-config` | 一键复制的 Cursor / Claude Desktop / curl 配置（含真实端口） |
+| GET | `/api/mcp/auth-events?limit=` | **认证事件**审计（与工具调用审计分开） |
+| GET | `/api/mcp/oauth-consents` | OAuth 授权同意列表 |
+| POST | `/api/mcp/oauth-consents/{id}/revoke` | 撤销同意（已签发令牌立即失效） |
 
 ---
 
@@ -226,9 +232,91 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Test-McpE2E.ps1
 - 审计不含请求正文，因此"谁搜了什么词"不会入库；如果需要，请在网关层另行加字段前先评估隐私影响。
 - 应用本身不终止 TLS。密钥是 Bearer 型凭据，**明文 HTTP 上等于公开**——云端必须由反向代理提供 HTTPS。
 
+## 8. OAuth 2.1（可选主路径）
+
+从「复制密钥贴进配置」升级到「浏览器点一下同意」时启用。完整实现与验收见 [`MCP-OAUTH.md`](MCP-OAUTH.md)，这里只列使用者需要知道的四件事。
+
+```jsonc
+"Mcp": {
+  "OAuth": {
+    "Enabled": true,
+    "Issuer": "https://knowspace.example.com"   // 必须与公网访问地址一致
+  }
+}
+```
+
+1. **OAuth 与 `maf_` 密钥并存**。OAuth 是普通用户的主路径；密钥通道留给 CI、脚本和不支持 OAuth 的客户端。Cursor 的刷新令牌有已知问题，这时切回密钥配置即可。
+2. **客户端注册顺序是「预注册 → CIMD → DCR → 手动」**。授权服务器在元数据里声明 `client_id_metadata_document_supported: true`，支持 CIMD 的客户端会把 `client_id` 设成 HTTPS URL，由服务端拉取（只允许 HTTPS、拒绝重定向、拒绝私有地址、连接已校验 IP）。
+3. **`aud` 强制绑定**：授权请求与令牌请求都必须带 `resource`，`/mcp` 校验 `aud` 必须等于本资源标识。签给别的资源的令牌拿过来是 401。
+4. **scope 不等于数据库权限**。同意页选中的知识库会写进 `oauth_consents`，每次 `tools/call` 仍然逐次判定；撤销同意后旧令牌下一次请求就失效。
+5. **`/oauth/token` 与 `/oauth/register` 有按来源 IP 的失败闸门**（与 `/mcp` 共用同一个 30 次/分钟 → 封 300 秒的窗口）。它们可以在无任何凭据的情况下被调用，所以必须限速；被封时返回 `429` + `error: temporarily_unavailable` + `Retry-After`。
+
+401 响应会带 `WWW-Authenticate: Bearer realm=…, resource_metadata="…/.well-known/oauth-protected-resource"`，支持 OAuth 的客户端据此自动走授权流程。
+
+---
+
+## 9. 协议版本与客户端兼容
+
+服务端由 MCP SDK 2.2.0 提供双世代支持：
+
+| 客户端世代 | 第一个请求 | 服务端行为 |
+| --- | --- | --- |
+| Legacy（…2025-11-25） | `initialize` | 正常握手，回 `InitializeResult` |
+| Modern（2026-07-28） | `server/discover` | 回 `supportedVersions` + `capabilities`；不再有 `Mcp-Session-Id` |
+
+`server/discover` **不需要凭据**（只返回静态能力，不碰业务数据）；数据面仍然要认证。想看「我的客户端到底协商到了哪个版本」，看：
+
+```powershell
+curl.exe -s http://127.0.0.1:5056/api/mcp/diagnostics
+```
+
+返回里有 `recent[]`（每个 `/mcp` 请求的 `firstMethod` / `protocolVersion` / `era` / 状态）和 `methodCounts`。这是「连接不通」时最有用的第一现场证据。
+
+---
+
+## 10. 本地配置：一键复制
+
+桌面版端口是**随机回环端口**，只有后端知道。设置页「AI 工具与 MCP → MCP 接入配置」里有两个按钮，直接把带真实端口的配置复制到剪贴板：
+
+- **Cursor**：`url` + `headers.Authorization`
+- **Claude Desktop**：`npx -y mcp-remote <url> --header "Authorization: Bearer maf_…"`
+
+对应的接口是 `GET /api/mcp/local-config?clientKey=maf_…`（不传 `clientKey` 就生成不含鉴权头的版本，之后自己补）。
+需要固定端口时设 `Server:FixedLocalPort`（默认 `0` = 随机）；这只影响端口可预测性，**监听地址仍然只有回环**，文档标注「仅建议单机可信环境」。
+
+### 服务端部署：`Server:PublicBaseUrl`
+
+「一键复制」的地址按以下优先级解析，返回值里的 `baseUrlSource` 会告诉你这次用了哪一个：
+
+| 优先级 | 来源 | `baseUrlSource` | 使用场景 |
+| --- | --- | --- | --- |
+| 1 | `Mcp:OAuth:Issuer` | `oauth-issuer` | 开了 OAuth：`aud` 按 issuer 签发，配置片段必须与之一致 |
+| 2 | `Server:PublicBaseUrl` | `public-base-url` | 服务端部署、未开 OAuth |
+| 3 | Kestrel 监听地址 | `kestrel` | 桌面版随机回环端口 |
+| 4 | 请求的 scheme/host | `request` | 兜底 |
+
+```jsonc
+"Server": {
+  "PublicBaseUrl": "https://knowspace.example.com"
+}
+```
+
+它**只影响生成给人看的配置字符串**，不参与任何鉴权判定，也不影响令牌的 `iss`/`aud`（后者只认 `Mcp:OAuth:Issuer`，且绝不从请求头推导）。
+如果既没开 OAuth 又没填它，而你又从别的机器打开管理页，`notes[]` 里会出现一条「回环地址只在本机有效」的提醒，前端会把它显示成黄色警告。
+
+---
+
+## 11. Server Card 与 mDNS
+
+- `GET /.well-known/mcp/server-card.json`（云端与本地都有）：描述端点、支持的协议版本、认证方式、工具分类。**当前是 Draft，本项目不围绕它做任何功能依赖**——客户端支持了是锦上添花，不支持也一切照常。
+- mDNS **默认关闭**（`Server:EnableMdns=false`）。它是局域网「发现」协议，不是授权协议：不能证明客户端可信，也不能替代认证。只有用户显式开启局域网共享时才应打开。当前版本提供开关与配置项，实际 DNS-SD 广播留到「局域网共享」真正要做时再实现，避免默认打开一个新的暴露面。
+- **`EnableMdns=true` 目前不生效，但会吵一句**：启动时打一条 `LogWarning`，明确说「服务名不会出现在局域网上、本次启动没有任何发现行为、请改用 `/api/mcp/local-config`」。这样用户不会误以为这是客户端的问题（详见 `ServerSecurity.WarnUnimplementedMdns`）。
+- **没有 mDNS 也不影响接入**：Cursor / Claude Desktop 都不做 mDNS 发现，它们只接受一条写死的 URL 或 stdio 命令。真正可用的入口是 `GET /api/mcp/local-config`（可粘贴的完整配置块）与 `GET /.well-known/mcp/server-card.json`（机器可读描述），两者都是**拉取式**、地址来源确定。
+
 ## 相关文档
 
 - [`CLOUD-DEPLOYMENT.md`](CLOUD-DEPLOYMENT.md) —— 云服务器部署与 MCP 接入（安全清单、三种部署形态、密钥生命周期）
+- [`MCP-OAUTH.md`](MCP-OAUTH.md) —— OAuth 2.1 实现、CIMD/SSRF 防线、验收清单与风险
 - [`MCP-INTEGRATION-MANUAL.md`](MCP-INTEGRATION-MANUAL.md) —— MCP 两个方向的完整说明书
 - [`MCP-INTEGRATION.md`](MCP-INTEGRATION.md) —— 速查版
 - [`../ARCHITECTURE.md`](../ARCHITECTURE.md) §9.10 —— 授权模型的设计取舍

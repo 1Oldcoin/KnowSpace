@@ -93,7 +93,7 @@ $assets += @(Get-ChildItem -Path $ReleasesDir -Filter '*.blockmap' -File | ForEa
 $assets = $assets | Select-Object -Unique
 
 $tag = "v$Version"
-$body = if ([string]::IsNullOrWhiteSpace($Notes)) { "MyFirstMafAgent $Version" } else { $Notes }
+$body = if ([string]::IsNullOrWhiteSpace($Notes)) { "知间-本地知识库 $Version" } else { $Notes }
 
 Write-Host "==> Release $tag ($Owner/$Repo)" -ForegroundColor Cyan
 foreach ($asset in $assets) { Write-Host ("    asset: {0} ({1:N1} MB)" -f (Split-Path $asset -Leaf), ((Get-Item $asset).Length / 1MB)) }

@@ -129,6 +129,67 @@ Embedding 模型目录包含 `model.onnx` 和 `tokenizer.json`；项目会将其
 - 知识库问答历史与 AI 伴侣的档案、导入消息、会话及消息均保存在 PostgreSQL 中；删除知识库/档案会级联删除对应会话和消息。
 - 备份：同时备份 PostgreSQL 数据和原始文件目录，并定期验证恢复流程。
 
+### 5.1 问答历史的管理动作
+
+历史会话是用户唯一无法从别处重建的数据（资料可以从原文件重新导入，笔记/问答不行），所以删除一律走"显式确认 + 服务端二次校验"：
+
+| 动作 | 端点 | 关键约束 |
+| --- | --- | --- |
+| 重命名 | `PUT …/sessions/{id}` | 标题非空且 ≤100 字符；`sessionId` 必须属于该知识库（越权返回 404 而不是 403，避免探测 ID 是否存在） |
+| 删除单条 | `DELETE …/sessions/{id}` | 同上；级联删除消息 |
+| 批量删除 | `POST …/sessions/batch-delete` | 1–100 条（上界防一次性拖库级删除）；返回 `deletedCount` 供前端核对 |
+| 导出 | `GET …/sessions/{id}/export` | 服务端生成 Markdown，前端只负责落盘 |
+
+前端把四个动作都放在侧栏「问答历史」里：单条 `⋯` 菜单（重命名/导出/删除）+ 「管理」模式（勾选 + 全选 + 批量删除）。**这两条路径共用同一套 emit**，避免出现"菜单能删、批量不能删"这种两套语义。
+
+> 这里踩过一个坑：脚本逻辑（`isManagingSessions`、`selectedSessionIds`、菜单`emit`）与 CSS（`.assistant-session-row`/`.assistant-session-select`/`.assistant-session-menu`）早就写好了，但**模板里没有渲染**——功能等于不存在，且一行 `console` 都不报错。这类"半成品"只能靠真机点一遍发现。回归方式：打开问答页 → 有 ≥2 条历史 → 点 `⋯` 应出现三个菜单项 → 点「管理」应出现复选框与批量工具栏。
+
+下拉菜单有两个实现细节值得保留：菜单向上还是向下展开**按实际几何位置算**（`getBoundingClientRect`），不猜行号——会话列表是 `overflow:auto`，向下展开会被裁掉；点外部关闭靠一个 document 级监听（判断 `closest('.assistant-session-actions')`），比给每个菜单加遮罩层干净。
+
+### 5.2 学习打卡的读取与"不补零"
+
+卡片上的连续天数是聚合结果（`StudyCalculator.Summarize`），而日历弹窗需要**任意月份**的明细，所以另有一条按区间的端点：
+
+```
+GET /api/study/checkins/range?from=2026-10-01&to=2026-10-31
+```
+
+三条设计取舍：
+
+1. **区间而不是"最近 N 天"**：`Summarize` 只能往回看（`rangeDays` 上限 365），日历要能自由翻月，包括翻到比"最近一年"更早的月份。
+2. **不补零**：只返回真正有记录的日期。补零会让"打卡 0 分钟"和"完全没打卡"在数据层就分不开，而且给未来日期补零等于凭空捏造"当天学了 0 分钟"。缺的那天由前端判空。
+3. **区间有上界**（`MaxRangeDays = 400`）：`from=1970-01-01` 这种请求一律 400，否则一个 URL 就能让服务端把整表读出来。
+
+翻月是**按月请求**而不是一次拉全部历史：一个用了三年的库有上千行记录，而用户一次只看一个月。
+
+### 5.3 数据量增长：现在怎么扛，什么时候必须换招
+
+先说结论：**本项目的表里没有一张"设计上就会上亿"的表，但有三张"用户足够勤奋 + 资料足够多"就能破千万的表**。把量级排一下，才谈得上处理手段：
+
+| 表 | 增长源 | 量级估计（单用户） | 破千万的触发条件 |
+| --- | --- | --- | --- |
+| `kb_chunks` | 每份资料的切片（正文 + 预分词 token） | 1 万份资料 × 50 片 ≈ 50 万 | 十万份资料级别 |
+| `kb_index_vectors` | 切片 × 每个索引一份向量（512 维 ≈ 2 KB/行） | 与 `kb_chunks` 同阶，乘索引个数 | 换过 3 次模型之后 |
+| `jobs` / `agent_client_calls` / `oauth_auth_events` / `avatar_feed_entries` | 纯时间序列（每次调用/任务/事件一行） | 每天几百到几千行 | 长期运行 + 不清理 |
+| `knowledge_chat_messages` | 对话轮次 | 每天几十行 | 十年也不到 |
+| `study_checkins` | 每天最多 1 行（有唯一索引） | ≤ 365/年 | **永远不可能** |
+
+**关键判断：先把"行数"换成"扫描行数"。** PostgreSQL 单表一亿行并不慢，慢的是没有索引裁剪的全表扫描 —— 1 亿行的索引点查仍在毫秒级。所以处理顺序是固定的，不能跳级：
+
+1. **少存**（成本最低）：终态数据有保留策略。`jobs` 已有 `RetentionHours`（默认 168h）+ 定期 purge；`kb_outbox_events` 有 `OutboxRetentionHours`；插件旧版本自动裁剪。**任何新加的时间序列表必须同时带上保留策略**，这是准入条件而非优化项。
+2. **少扫**：禁止 `SELECT *` 读含 `vector` 列的行（一行 2 KB，整表读出来就把内存打爆），所有查询显式投影。`kb_chunks` 的词法检索走 `to_tsvector('simple', lexical_tokens)` 的 GIN **表达式**索引，不额外存 `tsvector` 列。
+3. **分区**（真正的分水岭）：时间序列表（`jobs`/`agent_client_calls`/`oauth_auth_events`/`avatar_feed_entries`）用 PostgreSQL **声明式分区**按 `created_at` 做 `RANGE` 分区（按月或按周）。收益不只是查询裁剪 —— 过期数据的清理从 `DELETE`（会留下大量死元组、把 autovacuum 拖垮）变成 `DROP PARTITION`（瞬间、零膨胀）。
+4. **冷热分离**：真的到了"必须留十年但不能占在线库"的规模，把旧分区 `DETACH` 出来转存到归档库或冷存储，查询走"先查热库、未命中再查归档"的两段式。
+5. **分片**（最后手段）：按 `knowledge_base_id` 拆到多个库/实例。这一步会撕开跨库事务与跨库检索，除非单库单表 + 分区已经扛不住，否则不做。
+
+**为什么不用"动态换表"（按时间建 `kb_chunks_2026_10` 这种）**：这是在自己实现分区。代价是表名路由写满应用层、跨期查询要手拼 `UNION ALL`、DDL 迁移要遍历所有表、SqlSugar 的实体映射直接失效（`[SugarTable]` 是编译期常量）。PostgreSQL 的声明式分区把这些全部内建了，而且对查询透明 —— **同一个 SQL，同一个实体，`WHERE created_at > …` 自动裁到相关分区**。唯一的约束是主键必须包含分区键，这对时间序列表从来不是问题。
+
+**向量的特殊之处**（`kb_index_vectors`）：目前**故意不建 HNSW/IVFFlat**，走顺序扫描。理由是可验证的：几十万行以内顺序扫描仍在毫秒级，而图索引带来构建时间、内存占用和新的调参问题（`m`/`ef_construction` 漂移会改变召回率，出了坏答案很难归因）。等实测跨过十万行门槛再按基线数据调参，而不是先建了再说。真要上规模时的组合拳是：`halfvec` 降精度 → HNSW → 按 `index_id` 分区（天然分片键，因为检索永远只在一个索引内）。另外**向量可以重算、正文不能**，所以备份只要保证 `kb_chunks` + 原始文件，`kb_index_vectors` 丢了就重建。
+
+**现在就该做、且已具备的**：保留策略（jobs/outbox）、禁止整行读向量列、投影式查询、向量可重建的备份口径。
+**到了触发线再做的**：时间分区、`pg_stat_statements` 基线、HNSW、归档库。
+**不建议提前做**：动态换表、跨库分片、为"未来可能上亿"给每张表加冗余字段。
+
 ## 6. 后端中间件与服务
 
 建议按职责逐步启用以下 ASP.NET Core 组件：
@@ -248,6 +309,8 @@ $env:ConnectionStrings__KnowledgeBase = "Host=localhost;Port=5432;Database=knowl
 dotnet run --project MyFirstMafAgent.Api/MyFirstMafAgent.Api.csproj
 ```
 
+**Linux / 容器里"便携库"指的是同一个机制，只是二进制换来源**：便携树只有 `win-x64` 一份，服务器上改为系统包（`PortablePostgres:BinDirectory=/usr/lib/postgresql/17/bin`）+ 数据根（`PortablePostgres:RootDirectory=/app/App_Data`）。`initdb`/`pg_ctl`/`CREATE EXTENSION vector` 的流程与 Windows 完全一致，因此**一体部署（API + 数据库同容器/同主机）与外部库之间切换，只差 `PortablePostgres:Enabled` 与 `ConnectionStrings:KnowledgeBase` 两个配置项**，没有第二套代码路径。三个平台差异已处理在实现里：Unix 可执行位（`PlatformRuntime.EnsureExecutable` 对 `initdb`/`pg_ctl`/`postgres` 与 `ffmpeg` 补 `+x`）、root 拒绝运行（`EnsureNotElevated` 扩展为 `Environment.IsPrivilegedProcess`）、Unix socket 目录（Debian/Ubuntu 集群模板会指向 `/var/run/postgresql`，非属主不可写，故 `EnsureUnixSocketDirectory` 在 initdb 后把它固定到 `{便携根}/pgsockets`）。
+
 **跳过便携库之后必须先确认那条连接串真的能用**（`Infrastructure/Persistence/ConnectionPreflight.cs`）。「有连接串就跳过便携库」这条规则本身是对的，但它把两类失败混成了一条消息：库没启动、口令/库名不对。没有预检时两者都要等 SqlSugar 初始化才炸，而炸出来的是 `SqlSugarException: … Failed to connect to 127.0.0.1:5432 DbType="PostgreSQL";ConfigId=""` ——这里面没有库名、也没有"便携库是被跳过而不是坏了"这个因果，用户只能自己猜。
 
 所以启动顺序改成：解析连接串 → **TCP + 一条真实 Npgsql 连接**探一次（`PortablePostgres:PreflightTimeoutSeconds`，默认 5 秒，0 = 关闭）→ 通过才注册 SqlSugar。失败时把人话写进 `[startup]` 日志后直接抛，内容固定包含四段：端点（`host:port/database`）、脱敏连接串（`Password=***`，口令永不进日志）、失败分类（主机名解析失败 / TCP 连不上 / 握手超时 / 服务器拒绝 / 对端不是 PostgreSQL / 连接串解析失败）、以及三条互斥修法（启动那台数据库 / 清空连接串改用便携库 / 设 `PortablePostgres:RespectExternalConnectionString=false` 强制走便携库）。分类比错误原文重要：**"被拒绝"要引导去启动服务，"认证失败"要引导去改口令**，混在一起给的修法必然有一半是错的。
@@ -319,7 +382,7 @@ Electron.NET 现阶段不能作为基线：`ElectronNET.Core` 最新为 `0.6.0`�
 契约验证（不需要 Electron）：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Test-DesktopContract.ps1 -ApiExe <published>\MyFirstMafAgent.Api.exe
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Test-DesktopContract.ps1 -ApiExe <published>\Zhijian.Api.exe
 ```
 
 AI 伴侣导入端点为 `POST /api/companions/import`（multipart 字段：`name`、`targetSender`、`platform`、`file`），格式为 UTF-8 JSON/TXT，最大 20 MB。`targetSender` 必须匹配导出中的发言者名称。生成画像、开启会话及对话需调用当前选择的聊天模型；云端模式会将提示、相关历史片段及本轮对话发送给配置的 API 服务商。该功能用于生成 AI 模拟，不应被呈现为逝者本人；导入前应确认有权处理聊天记录。
@@ -542,7 +605,17 @@ Embedding 使用 `Microsoft.ML.OnnxRuntime` 和 `Microsoft.ML.Tokenizers` NuGet 
 
 阶段 9 删掉了 Photino 壳与 Velopack。桌面端从"能跑"到"能交付"只差打包，本阶段补上：
 
-**打包只做一件事：把已发布的 API 原样塞进安装包**。`electron-builder.yml` 里 `files` 只含 `main.js`/`preload.js`/`package.json`，后端通过 `extraResources` 从 `../publish/desktop` 映射到 `resources\api`——**不能打进 asar**，asar 内的 exe 无法作为子进程启动。`main.js` 本来就按 `process.resourcesPath/api` 找 exe，所以代码零改动。产物 `MyFirstMafAgent-<version>-setup.exe` 约 310 MB，大头是自包含 .NET 运行时与便携 PostgreSQL 目录（`bin`/`lib`/`share` 三块必须整树带上，只拷 exe 会 `0xC0000135` 找不到 DLL）；NSIS 再用 LZMA 压到同一体积量级，因此首次安装需要十几秒。
+**命名分三层，改名字时先分清是哪一层**（细节见 `desktop-electron/electron-builder.yml` 顶部注释）：
+
+| 层 | 值 | 改了会怎样 |
+| --- | --- | --- |
+| 产品显示名 | `知间-本地知识库`（`productName`） | 只影响控制面板/开始菜单/窗口标题/安装包文件名，安全 |
+| 磁盘上的名字 | `Zhijian` / `Zhijian.Api.exe`（`executableName`、`AssemblyName`） | 影响安装目录与所有启动脚本，**必须同步 15+ 处**（main.js / installer.nsh / Dockerfile / systemd / 各测试脚本） |
+| 身份与数据 | `appId`（`com.myfirstmafagent.desktop`）、`%LOCALAPPDATA%\MyFirstMafAgentData`、`%APPDATA%\myfirstmafagent-desktop` | 🔴 **不能改**：appId 变了 NSIS 的升级判定就断（`HKCU\Software\<UUID(appId)>` 里的 `InstallLocation`），数据目录变了用户全部资料立刻"消失" |
+
+.NET 侧同样分两层：项目目录与命名空间 `MyFirstMafAgent.Api` 是源码组织（改一下要动几百个 `using`，收益为零），产物名由 `<AssemblyName>Zhijian.Api</AssemblyName>` 单独指定（任务管理器、`ENTRYPOINT dotnet Zhijian.Api.dll`、systemd `ExecStart` 都看它）。这个"目录名≠产物名"的分离是故意保留的，不是遗漏。
+
+**打包只做一件事：把已发布的 API 原样塞进安装包**。`electron-builder.yml` 里 `files` 只含 `main.js`/`preload.js`/`package.json`，后端通过 `extraResources` 从 `../publish/desktop` 映射到 `resources\api`——**不能打进 asar**，asar 内的 exe 无法作为子进程启动。`main.js` 本来就按 `process.resourcesPath/api` 找 exe，所以代码零改动。产物 `Zhijian-<version>-setup.exe` 约 310 MB，大头是自包含 .NET 运行时与便携 PostgreSQL 目录（`bin`/`lib`/`share` 三块必须整树带上，只拷 exe 会 `0xC0000135` 找不到 DLL）；NSIS 再用 LZMA 压到同一体积量级，因此首次安装需要十几秒。
 
 **卸载钩子曾经是"有实现、没调用方"的死代码**。`PortablePostgresHost.TryStopForUninstall` 从 Velopack 时代就存在，删工程时唯一的调用点（`OnBeforeUninstallFastCallback`）一起没了，于是变成"文档说要接、代码没人调"。本阶段的接法刻意做得极薄：给 API 加一个一次性参数 `--stop-portable-postgres`，在 `Program.cs` **构建 Host 之前**处理（只调 `TryStopForUninstall(AppContext.BaseDirectory)` 然后 `return 0`），NSIS 的 `customUnInstall` 用 `nsExec::ExecToLog` 调它。这样安装器不需要知道便携库的数据目录/端口/连接串，**这些全部仍由 appsettings 决定**，避免两处配置漂移；用 `nsExec` 而不是 `ExecWait`，是为了卸载向导里不闪控制台窗口。
 
@@ -887,6 +960,7 @@ Embedding 使用 `Microsoft.ML.OnnxRuntime` 和 `Microsoft.ML.Tokenizers` NuGet 
 - `fetch_url` 只接受 http/https 绝对地址，抓取前经 `SafeUrlGuard` 拒绝环回、私网、链路本地、云元数据等内部地址（并在 DNS 解析后二次校验），响应体最多读取 2 MB。
 - 联网与抓取结果在提示词中被明确标注为引用数据而非指令，页面内的“忽略以上指令”之类文本按普通内容对待。
 - MCP 服务端**有完整鉴权**（`Hosting/AgentClientGate.cs`）：客户端密钥 + 能力 + 工具白名单 + 知识库范围 + 限流 + 审计，清单外工具默认拒绝。详见 §9.10.3。
+- **OAuth 2.1 是同一闸门上的第二条认证通道**（`OAuth/`）：授权服务器只回答「谁被授权」（`client_id` + PKCE + `scope` + RFC 8707 `aud`），令牌被翻译成同样的 `AgentClient` 形状后交给同一个 `AgentClientGate`。业务层授权落在 `oauth_consents`（subject → client_id → scopes + 知识库列表），撤销后已签发令牌下一次请求即失效。协议版本兼容由 SDK 双世代提供（Legacy `initialize` / Modern `server/discover`），`GET /api/mcp/diagnostics` 记录协商结果。详见 `docs/MCP-OAUTH.md`。
 
 ## 11. 分身模块（Avatar）
 

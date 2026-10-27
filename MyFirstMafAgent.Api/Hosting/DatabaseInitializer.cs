@@ -56,6 +56,9 @@ public static class DatabaseInitializer
             // 外部智能体客户端与 MCP 调用审计。
             await Step("agent client store", () => app.Services.GetRequiredService<SqlSugarAgentClientStore>().InitializeAsync(cancellationToken, ensureSchema: !schemaUpToDate));
 
+            // OAuth：客户端、同意（业务层授权）、授权码、刷新令牌、jti 黑名单、认证事件。
+            await Step("oauth store", () => app.Services.GetRequiredService<SqlSugarOAuthStore>().InitializeAsync(cancellationToken, ensureSchema: !schemaUpToDate));
+
             // 长任务表：必须在使用之前建好，否则调度器第一轮会报表不存在。
             await Step("job queue", () =>
             {

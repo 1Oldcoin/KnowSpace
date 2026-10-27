@@ -71,31 +71,59 @@ graph TD
 
 ### 方式一：Windows 安装包（最省事）
 
-从 [Releases](https://github.com/1Oldcoin/KnowSpace/releases) 下载 `MyFirstMafAgent-x.y.z-setup.exe`，双击安装。
+从 [Releases](https://github.com/1Oldcoin/KnowSpace/releases) 下载 `Zhijian-x.y.z-setup.exe`（安装后显示为「知间-本地知识库」），双击安装。
 
+- 装到 `%LOCALAPPDATA%\Programs\Zhijian`，每用户安装、不需要管理员
 - 用户数据在 `%LOCALAPPDATA%\MyFirstMafAgentData`，卸载不会删除
 - 首次启动会在后台初始化便携数据库（约 5–10 秒），之后约 1.5 秒
 
 > 安装包目前**未做代码签名**，首次运行 Windows SmartScreen 会提示「未知发布者」，选择「更多信息 → 仍要运行」即可。
 
-### 方式二：Docker（Linux 服务器）
+### 方式二：Docker（Linux 服务器，一体包）
 
 ```bash
 git clone https://github.com/1Oldcoin/KnowSpace.git
 cd KnowSpace
 
-cat > .env <<'EOF'
-LLM_API_KEY=sk-your-key
-MAF_SERVER_TOKEN=<openssl rand -hex 32>
-PG_PASSWORD=<强口令>
-EOF
-
-docker compose up -d --build
+cp .env.example .env      # 然后编辑：LLM_API_KEY / MAF_SERVER_TOKEN / PG_PASSWORD / PUBLIC_BASE_URL
+docker compose up -d --build   # 一个容器：API + 前端 + PostgreSQL 17 + pgvector
 ```
 
-浏览器打开 <http://localhost:5056>。
+浏览器打开 <http://localhost:5056>。首启动要 `initdb` + 全量建表，约 30~90 秒（`docker compose logs -f app` 能看到进度）。
+
+两种形态，二选一：
+
+| 命令 | 形态 | 说明 |
+| --- | --- | --- |
+| `docker compose up -d --build` | **一体（默认）** | API + 前端 + PG17 + pgvector 全在一个容器，数据在 `maf-app-data` 卷 |
+| `docker compose --profile external up -d --build` | 外部库 | `api` + `db`（pgvector 镜像）两个容器，适合要独立备份/扩容的场景 |
+
+改回内部库 ⇄ 外部库不用重建镜像：只改 `PortablePostgres__Enabled` 与 `ConnectionStrings__KnowledgeBase` 两个环境变量。
+
+自检（容器内或裸机都能跑，只依赖 curl）：
+
+```bash
+docker compose exec app bash /app/scripts/Test-IntegratedStack.sh --pg-password "$PG_PASSWORD"
+```
 
 > 默认只绑 `127.0.0.1`。**对外暴露前必读 [`docs/CLOUD-DEPLOYMENT.md`](docs/CLOUD-DEPLOYMENT.md)** —— 需要配反向代理、TLS 与 `MAF_SERVER_TOKEN`，否则 `/api` 是不鉴权的。
+
+### 方式三：Linux 裸机（systemd，不用 Docker）
+
+仓库里有打好的包 `publish/Zhijian-linux-x64-1.0.1.tar.gz`（139.9 MB，**自包含**，目标机不用装 .NET）：
+
+```bash
+tar xzf Zhijian-linux-x64-1.0.1.tar.gz -C /tmp/
+sudo bash /tmp/Zhijian-linux-x64/deploy/linux/install.sh --source /tmp/Zhijian-linux-x64/app
+```
+
+装到 `/opt/myfirstmafagent`，数据在 `/var/lib/myfirstmafagent`，配置在 `/etc/myfirstmafagent/myfirstmafagent.env`。
+包里的 `README-LINUX.md` 是完整说明书。
+
+> **Linux 只有这一份产物**：前端是 `wwwroot/` 里的静态文件，由 API 自己托管，浏览器打开就是完整界面，
+> 不存在「有 UI 版 / 无 UI 版」的区分。Electron 壳只服务 Windows 安装包。
+
+**Linux 裸机**（不用 Docker）：先发布 `-Target console -Runtime linux-x64`，再拷到服务器执行 `sudo bash deploy/linux/install.sh --source /tmp/console-linux-x64`；它会装 PostgreSQL 17 + pgvector、建服务账号、装 systemd 单元并跑自检。细节见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) §6。
 
 ### 方式三：从源码开发
 

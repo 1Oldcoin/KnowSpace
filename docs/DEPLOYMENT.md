@@ -21,7 +21,7 @@ Electron 自身已经跨平台，所以「桌面版」不需要后端做额外�
 
 | 组成 | 位置 | 是否随包分发 |
 | --- | --- | --- |
-| API + 前端静态文件 | `MyFirstMafAgent.Api[.exe]`、`wwwroot/` | 是（`dotnet publish` + `npm run build`） |
+| API + 前端静态文件 | `Zhijian.Api[.exe]`、`wwwroot/` | 是（`dotnet publish` + `npm run build`） |
 | 便携 PostgreSQL（PostgreSQL 17.9 + pgvector 0.8.7，EDB Windows x64） | `ExternalTools/pgSQL/<rid>/`（`bin/`、`lib/`、`share/`） | **按平台**，可留空（容器里用外部 PG） |
 | Embedding 模型（bge-small-zh-v1.5, 97 MB） | `ExternalTools/Embedding/bge-small-zh-v1.5/` | 是（与平台无关，ONNX） |
 | ffmpeg | `ExternalTools/ffmpeg/<rid>/` 或 PATH | 可选（只有视频需要） |
@@ -102,29 +102,84 @@ powershell -ExecutionPolicy Bypass -File scripts\Publish-Portable.ps1 -Target co
 
 ## 6. Docker
 
+默认是**一体形态**：一个容器里跑 API + 前端 + PostgreSQL 17 + pgvector。
+
 ```bash
 docker compose up -d --build
 # 浏览器打开 http://localhost:5056
 ```
 
-`docker-compose.yml` 组成：
+要改成「API + 独立数据库」：
 
-- `db`：`pgvector/pgvector:pg18`（若该 tag 不存在，换 `pg17`/`pg16`，只依赖 `vector` 扩展）
-- `api`：本仓库 `Dockerfile` 构建，`ConnectionStrings__KnowledgeBase` 指向 `db`
+```bash
+docker compose --profile external up -d --build
+```
+
+| | 一体（默认，`app`） | 外部库（`--profile external`，`api` + `db`） |
+| --- | --- | --- |
+| 容器数 | 1 | 2 |
+| 数据库 | 镜像内 apt 装的 PostgreSQL 17，由 API 进程 `initdb`/`pg_ctl` 拉起 | `pgvector/pgvector:pg17` 独立容器 |
+| 数据卷 | `maf-app-data`（`/app/App_Data`，含 `pgdata`） | `maf-api-data` + `maf-pgdata` |
+| 备份 | 备份整个卷；或 `pg_dump` 进容器 | 只备份 `maf-pgdata` |
+| 多副本 | **不行**（各副本一套独立数据） | 可以 |
+
+切换只改两个环境变量，不用重建镜像：
+
+```yaml
+PortablePostgres__Enabled: "false"
+ConnectionStrings__KnowledgeBase: "Host=db;Port=5432;Database=myfirstmafagent;Username=postgres;Password=..."
+```
 
 镜像刻意做了这几件事：
 
 | 决定 | 原因 |
 | --- | --- |
 | 不含 Electron | 容器里没有渲染需求 |
-| 不打包便携 PostgreSQL | 用外部 PostgreSQL，`PortablePostgres__Enabled=false` |
-| ffmpeg 用 `apt-get install` | 不随镜像塞 100 MB 副本；程序找不到随包副本时会回落到 PATH |
+| PostgreSQL 用 apt 装（PGDG 源），不打包便携树 | 便携树只有 `win-x64` 一份（65 MB），Linux 上还得自己编 pgvector；apt 的 `postgresql-17-pgvector` 把 `vector.so` 装进默认 `$libdir`，`CREATE EXTENSION` 零配置 |
+| **必须装 17 而不是 18** | `PortablePostgresHost.ExpectedMajorVersion` 硬编码为 `17`，混用会把已有数据目录判为不兼容 |
+| ffmpeg 用 `apt-get install` | 不随镜像塞 100~300 MB 副本；程序找不到随包副本时回落到 PATH 里的 `ffmpeg` |
+| `PortablePostgres__BinDirectory=/usr/lib/postgresql/17/bin` | 复用系统的 PG，走同一套「API 自己拉起数据库」逻辑 |
+| `PortablePostgres__RootDirectory=/app/App_Data` | 数据必须落在卷里；不设的话 Linux 上会落到 `~/.local/share`，**容器重建就丢库** |
 | `CMD ["--urls","http://0.0.0.0:5056"]` | **appsettings.json 里的 `Urls` 是 127.0.0.1，会盖掉 `ASPNETCORE_URLS`**，只有命令行 `--urls` 能覆盖 |
-| `VOLUME /app/App_Data` | 上传资料、日志、Whisper 模型、插件目录都在里面 |
-| 非 root（`app` 用户） | 最小权限 |
+| 非 root（`app` 用户） | 最小权限；且 `initdb`/`postgres` 明确拒绝 root 运行 |
 | `HEALTHCHECK` 打 `/api/health` | 它会真的查一次数据库，比只看端口有意义 |
+| `start_period: 90s` | 首次启动要 `initdb`（3~10 秒）+ 全量建表 |
 
-镜像里**没有**的东西（按需自行挂载或加卷）：Whisper 模型、插件 ZIP、用户数据。
+镜像里**没有**的东西（按需自行挂载或加卷）：Whisper 模型、插件 ZIP。
+
+### 6.1 自检
+
+```bash
+# 一体形态（默认）
+docker compose exec app bash /app/scripts/Test-IntegratedStack.sh --pg-password "$PG_PASSWORD"
+
+# 外部库形态
+docker compose --profile external exec api bash /app/scripts/Test-IntegratedStack.sh
+```
+脚本查 7 组东西：`/api/health`（含 `database:connected`）、PG 端口与进程数（**6 个属正常**：1 主进程 + 5 后台 + 每连接 1）、pgvector 版本、`pgdata` 是否落在持久化位置、`/mcp` 未认证挑战头、管理端点、公开发现端点。
+
+### 6.2 Linux 裸机（不用 Docker）
+
+> **已打好的交付包**：`publish/Zhijian-linux-x64-1.0.1.tar.gz`（139.9 MB）。
+> 解开后是 `Zhijian-linux-x64/{app,deploy/linux,scripts,README-LINUX.md}`，
+> 里面那份 `README-LINUX.md` 是给测试人看的完整说明书（含命令、自检顺序、未验证清单）。
+> 包里 `app/` 就是下面第 1 步的产物，不用重新发布。
+
+```powershell
+# 1. 发布（自包含，目标机不需要装 .NET）
+powershell -ExecutionPolicy Bypass -File scripts\Publish-Portable.ps1 -Target console -Runtime linux-x64
+```
+
+```bash
+# 2. 拷到服务器后一条命令装完（apt 装 PG17+pgvector、建账号、铺文件、装 systemd、自检）
+sudo bash deploy/linux/install.sh --source /tmp/console-linux-x64
+```
+
+产物布局：程序 `/opt/myfirstmafagent`、数据 `/var/lib/myfirstmafagent`、配置 `/etc/myfirstmafagent/myfirstmafagent.env`、单元 `deploy/linux/myfirstmafagent.service`。
+
+安装脚本会顺手生成随机数据库口令并写入 env（便携库默认口令是 `postgres`，等于没锁）。两个需要人拍板的项留给你：`Server__PublicBaseUrl` 与 `MAF_SERVER_TOKEN`。
+
+> 想让浏览器界面正常用，就不要设 `MAF_SERVER_TOKEN`（前端拿不到令牌，只能由反代注入 `X-Api-Token`）。只要服务只监听回环、自用，这是合理选择；一旦走公网，就必须设令牌 + 反代注入。
 
 ### 6.1 对外暴露前必须配的三项
 
@@ -160,17 +215,17 @@ docker compose up -d --build
 - `ExternalTools/pgSQL/win-x64/` 整树落地：`bin`（`postgres`/`pg_ctl`/`initdb`/`pg_isready`/`psql` 及运行时 DLL）、`lib`（含 `vector.dll`）、`share/extension`（`vector.control` 等）齐备，`VERSION.txt` 记 PostgreSQL 17.9 + pgvector 0.8.7
 - **新便携库形态的端到端启动（真机、非模拟）**：首次运行 `initdb` → `pg_ctl start` → 建库 → `CREATE EXTENSION vector` → 退出码 0，`GET /api/health` 返回 `{"status":"ok","database":"connected"}`；`SchemaInitializer` 正常建表、索引生命周期管理器完成 embedding spec 校验
 - **复用已在跑的实例**：第二个 API 进程读到 `postmaster.pid` 后直接复用 55432，日志 `检测到已在运行的 PostgreSQL（端口 55432，数据目录 …），直接复用。`，且它退出时**不会**停掉别人启动的库
-- **卸载钩子**：`MyFirstMafAgent.Api.exe --stop-portable-postgres` 把运行中的便携库停干净（12 个 `postgres.exe` → 0、55432 释放），日志 `[installer] 便携 PostgreSQL 已停止（数据目录 …）。`
+- **卸载钩子**：`Zhijian.Api.exe --stop-portable-postgres` 把运行中的便携库停干净（12 个 `postgres.exe` → 0、55432 释放），日志 `[installer] 便携 PostgreSQL 已停止（数据目录 …）。`
 - **非 ASCII 安装路径**：安装目录在 `C:\Word\通用文件服务\...` 下时镜像到纯 ASCII 根目录后成功启动（未镜像时 `initdb` 报 `invalid byte sequence for encoding "UTF8"`）
 - 全量单元测试 844 项通过（含新增 `PgProcessRunnerTests` / `PlatformRuntimeTests` 的目录解析用例 / `PortablePostgresRootTests`）
 - `linux-x64` 发布成功，产出 ELF 启动器 + 清理掉 12 项其它平台文件；缺 ffmpeg 只警告
-- Dockerfile 里的发布命令（`-p:UseAppHost=false`）与入口 `dotnet MyFirstMafAgent.Api.dll --urls ...` 在 Windows 上等价跑通
+- Dockerfile 里的发布命令（`-p:UseAppHost=false`）与入口 `dotnet Zhijian.Api.dll --urls ...` 在 Windows 上等价跑通
 - `electron-builder.yml` 通过 schema 校验，`publish` 配置可解析
 - 更新逻辑 8 个用例全绿
 
 **未验证（不要当成已完成）**
 
-- `docker build` / `docker compose up` 未在本机执行（本机没有 Docker）
-- Linux / macOS 上的真实运行（没有对应机器；那些平台的便携库发行件尚未装配）
+- **`docker build` / `docker compose up` 未在本机执行（本机没有 Docker）**—— Dockerfile / compose / `deploy/linux/*` 是按代码与文档写定的，需在真机首跑一次
+- **Linux 上的真实运行**：`deploy/linux/install.sh` 与 `scripts/Test-IntegratedStack.sh` 未在真实发行版上跑过；PGDG 源、`postgresql-17-pgvector` 包名以官方仓库为准
 - Electron 安装包重新构建（本机访问 GitHub 拉 `winCodeSign` 超时；上一阶段的 0.1.0 安装包是当时构建的）
 - 自动更新的端到端升级（需要两个版本的安装包 + 可达的更新源）

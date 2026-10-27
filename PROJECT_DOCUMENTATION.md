@@ -14,10 +14,10 @@
 - 上传 PDF、DOCX、TXT、MD、HTML/HTM、常见图片、视频与**音频**（MP3/WAV/M4A/AAC/OGG/OPUS/FLAC/WEBA/AMR），查看资料处理进度、摘要或错误；在资料卡的更多菜单中可阅读原文、重新解析、复制名称、下载原文件或删除资料。图片在卡片上直接显示缩略图、音频内联播放——两者都按原文件保存，可直接当素材/表情包/语音库使用。
 - 按知识库管理专题：创建、重命名、删除专题，将资料归入专题，并在侧栏、专题页和资料页按专题筛选；删除专题只解除资料归属。
 - 根据资料内容进行向量检索和带引用问答；问答会话及消息写入数据库。
-- 管理问答历史：新建、重命名、单条删除、批量删除和 Markdown 导出。
+- 管理问答历史：新建、重命名、单条删除、批量删除和 Markdown 导出；侧栏「问答历史」里单条走 `⋯` 菜单、多条走「管理」模式的勾选批量。
 - 导入 UTF-8 JSON/TXT 聊天记录，生成人物表达风格描述，并创建独立的 AI 伴侣会话。
 - 前端“设置”可修改聊天模型来源（本地/在线）、接口地址、模型、API Key、显示名称和每日学习目标；配置保存在本机数据库，保存后立即生效。
-- 学习打卡：记录每日学习时长与备注，统计连续学习天数、最长连续天数、累计天数和本周学习节奏；总览页展示打卡状态与本周图表。
+- 学习打卡：记录每日学习时长与备注，统计连续学习天数、最长连续天数、累计天数和本周学习节奏；总览页展示打卡状态与本周图表。点击整张打卡卡片打开日历弹窗，按月翻页查看每一天的打卡记录与备注（按月按需请求，不在前端一次拉全部历史）。
 - 学习笔记完整持久化：新建、编辑、删除、置顶、分类、标签、关键词检索，可从原文阅读器一键存为摘录笔记。
 - 原文阅读：对已解析的资料按字符偏移分页加载解析文本，支持字号调整、复制已加载文本和存为笔记。
 - 全局搜索支持资料、笔记文本匹配，以及基于向量检索的知识库语义片段；命中项可直接打开原文阅读。
@@ -682,9 +682,9 @@ powershell -ExecutionPolicy Bypass -File scripts\Publish-Portable.ps1 -Target de
 
 | 目录 | 用途 |
 | --- | --- |
-| `publish/console/` | 控制台便携版（双击 `MyFirstMafAgent.Api.exe`） |
-| `publish/desktop/` | Electron sidecar（`MyFirstMafAgent.Api.exe` + `wwwroot` + `ExternalTools`） |
-| `publish/releases/` | electron-builder 产出的 NSIS 安装包（`MyFirstMafAgent-<version>-setup.exe`） |
+| `publish/console/` | 控制台便携版（双击 `Zhijian.Api.exe`） |
+| `publish/desktop/` | Electron sidecar（`Zhijian.Api.exe` + `wwwroot` + `ExternalTools`） |
+| `publish/releases/` | electron-builder 产出的 NSIS 安装包（`Zhijian-<version>-setup.exe`；显示名「知间-本地知识库」） |
 
 Electron 调试用 `cd desktop-electron; npm install; npm start`（可用 `MAF_API_EXE` 指向已发布的 API）。打安装包：`cd desktop-electron; npm run dist:full`（等价于 `scripts\Build-ElectronInstaller.ps1`，会先发布 sidecar 再跑 electron-builder）。自动更新已接入（`desktop-electron/updater.js` + `electron-updater`），发布用 `npm run dist:publish`，详见 `docs/DEPLOYMENT.md` §7。
 
@@ -735,8 +735,11 @@ powershell -ExecutionPolicy Bypass -File scripts\Download-ExternalTools.ps1 -Run
 ```
 
 ```bash
-# 容器（不含 Electron，便携库关闭，用外部 pgvector）
+# 容器（不含 Electron）：默认一体 —— API + 前端 + PostgreSQL 17 + pgvector 单容器
 docker compose up -d --build
+
+# 外部库形态：api + db 两个容器
+docker compose --profile external up -d --build
 ```
 
 原生工具查找规则、便携库目录结构、容器环境变量、镜像内含/不含什么、已验证/未验证清单：见 **`docs/DEPLOYMENT.md`**。要点：
@@ -751,9 +754,9 @@ docker compose up -d --build
 - 应用图标统一放在仓库根 `assets/app.ico`（ICO 格式，含 16/32/48/64/128/256 六种尺寸）：Electron 主进程用它作为窗口图标，打包器用它生成 exe 与快捷方式图标；前端 `public/favicon.ico` 是同一文件的副本。**替换图标：覆盖 `assets/app.ico` 并同步 `FrontEnd/myfist-agent/public/favicon.ico`，再重新发布即可。**
 - 桌面版窗口加载 `http://127.0.0.1:<随机端口>/`，API 是独立子进程：令牌经环境变量传入、由主进程通过 `X-Api-Token` 请求头注入；退出时先 `POST /api/desktop/shutdown`，超时再强杀。
 - 便携库随 API 启动，退出时走 `pg_ctl stop -D <pgdata> -m fast -w -t 60` 优雅停止；异常退出后下次启动会读 `pgdata/postmaster.pid`，若那个 `postgres.exe` 还活着就直接复用它的端口，不再起第二个实例。
-- 便携库**就地**从发布目录的 `ExternalTools/pgSQL/<rid>/` 运行（不再复制到 `%LOCALAPPDATA%`），数据与日志写在 `%LOCALAPPDATA%\MyFirstMafAgentData` 下的 `pgdata`/`pglogs`：所以升级/卸载必须先把 `postgres.exe` 停掉，否则它占住安装目录——`MyFirstMafAgent.Api.exe --stop-portable-postgres` 就是给安装器用的。
+- 便携库**就地**从发布目录的 `ExternalTools/pgSQL/<rid>/` 运行（不再复制到 `%LOCALAPPDATA%`），数据与日志写在 `%LOCALAPPDATA%\MyFirstMafAgentData` 下的 `pgdata`/`pglogs`：所以升级/卸载必须先把 `postgres.exe` 停掉，否则它占住安装目录——`Zhijian.Api.exe --stop-portable-postgres` 就是给安装器用的。
 - **文件夹版不要放在桌面、文档或下载目录**：安全软件（火绒/360 的文件防护）与 Windows「受控文件夹访问」会拦截从这些位置启动的未签名程序写入用户目录，便携数据库因此初始化失败（表现为 `Access is denied`）。推荐 `D:\Apps\MyFirstMafAgent`。
-- **同一个约束也适用于开发**：仓库在桌面目录下时，VS 里 F5 启动的 `bin\Debug\...\MyFirstMafAgent.Api.exe` 无法写入 `%LOCALAPPDATA%` / `%TEMP%` / `%ProgramData%` / 用户主目录 / `%APPDATA%` 中的任何一个（实测：同一个探针程序只有自己的目录可写）。此时有三条路：**把仓库移到非受保护目录**（如 `C:\Dev\MyFirstMafAgent`）、**在安全软件里放行该 exe/目录**、或**配置 `PortablePostgres:RootDirectory` 指向一个已存在的可写目录**。注意：`PortablePostgres:DataDirectory` 救不了这种情况——它是在选根目录之后才被读取的。
+- **同一个约束也适用于开发**：仓库在桌面目录下时，VS 里 F5 启动的 `bin\Debug\...\Zhijian.Api.exe` 无法写入 `%LOCALAPPDATA%` / `%TEMP%` / `%ProgramData%` / 用户主目录 / `%APPDATA%` 中的任何一个（实测：同一个探针程序只有自己的目录可写）。此时有三条路：**把仓库移到非受保护目录**（如 `C:\Dev\MyFirstMafAgent`）、**在安全软件里放行该 exe/目录**、或**配置 `PortablePostgres:RootDirectory` 指向一个已存在的可写目录**。注意：`PortablePostgres:DataDirectory` 救不了这种情况——它是在选根目录之后才被读取的。
 - 自动选目录的**最后一档**是 `{程序目录}\App_Data\pgdata`（便携兜底）：用户目录整片不可写时才用，日志会打一条警告，因为覆盖安装/删除程序目录会连带数据。
 - 应用目录**可以**包含中文，但靠的是一层镜像，不是 `initdb` 天生支持：Windows 下 `initdb` 会把程序路径按 ANSI 代码页塞进启动 `postgres.exe` 的命令行，非 ASCII 目录会得到 `FATAL: invalid byte sequence for encoding "UTF8"`（实测：`C:\Word\通用文件服务\...` 下初始化必失败，同一份文件搬到 `C:\pgspike\pgsql` 立即成功）。所以当 `ExternalTools/pgSQL/<rid>/bin` 位于非 ASCII 路径时，`PortablePostgresHost.EnsureRunnableBinDirectoryAsync` 先把整棵树镜像到 `{便携根目录}\pgsql`（首次约 65 MB，之后靠 `VERSION.txt` 指纹判断是否最新，不再复制），再从镜像里跑 `initdb`/`pg_ctl`。**数据目录则必须是纯 ASCII**（`EnsureAsciiDataPath` 强制校验，否则直接报错并给出改法）：这一条同时解决了升级时 `postgres.exe` 锁住中文安装目录的问题。
 - 文件夹版应用目录需可写（会在其下创建 `App_Data`），不要放在 `Program Files`。

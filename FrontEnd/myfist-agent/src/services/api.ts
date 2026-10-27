@@ -556,6 +556,36 @@ export async function getMcpStatus(): Promise<McpStatus> {
   return await response.json() as McpStatus
 }
 
+/** 一键复制的本地 MCP 配置（Cursor / Claude Desktop）。 */
+export interface LocalMcpConfig {
+  endpoint: string
+  baseUrl: string
+  /**
+   * 基地址是从哪来的：`oauth-issuer` | `public-base-url` | `kestrel` | `request`。
+   * 前两种说明地址是「对外可用」的；后两种在本机才是对的。
+   */
+  baseUrlSource: string
+  port: number | null
+  fixedLocalPort: number | null
+  cursor: string
+  claudeDesktop: string
+  curl: string
+  notes: string[]
+}
+
+/**
+ * 取当前实例的实际监听地址与客户端配置片段。
+ *
+ * 端口是随机回环端口，只有后端自己知道，前端不能猜——所以由这个接口给。
+ * 不传 clientKey 时生成的配置不含鉴权头，用户可以随后自己补上。
+ */
+export async function getLocalMcpConfig(clientKey?: string): Promise<LocalMcpConfig> {
+  const query = clientKey ? `?clientKey=${encodeURIComponent(clientKey)}` : ''
+  const response = await fetch(`${apiBaseUrl}/api/mcp/local-config${query}`)
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  return await response.json() as LocalMcpConfig
+}
+
 async function getErrorMessage(response: Response) {
   try {
     const body = await response.json() as { error?: string; detail?: string; title?: string }
@@ -927,6 +957,17 @@ export async function checkInStudy(minutes: number, note?: string): Promise<Stud
   })
   if (!response.ok) throw new Error(await getErrorMessage(response))
   return await response.json() as StudySummary
+}
+
+/**
+ * 日历弹窗用：取 [from, to] 内**确实有打卡**的日期（后端不补零）。
+ * 与 getStudySummary 的区别是这里给的是显式区间而不是「最近 N 天」，所以可以自由翻月。
+ */
+export async function getStudyCheckinRange(from: string, to: string): Promise<StudyCheckinDay[]> {
+  const params = new URLSearchParams({ from, to })
+  const response = await fetch(`${apiBaseUrl}/api/study/checkins/range?${params.toString()}`)
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  return await response.json() as StudyCheckinDay[]
 }
 
 export interface NoteListFilter {

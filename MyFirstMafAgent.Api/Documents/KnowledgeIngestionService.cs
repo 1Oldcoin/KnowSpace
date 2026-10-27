@@ -574,7 +574,13 @@ public sealed class KnowledgeIngestionService(
     {
         var resolved = PlatformRuntime.ResolveTool(
             environment.ContentRootPath, ffmpegPath, "ExternalTools/ffmpeg", "ffmpeg");
-        if (resolved is not null) return resolved;
+        if (resolved is not null)
+        {
+            // Unix 上从 zip/tar 解出来或跨平台复制的 ffmpeg 会丢 +x，
+            // 表现只是一句 "Permission denied"，看不出是权限问题。Windows 上是空操作。
+            PlatformRuntime.EnsureExecutable(resolved);
+            return resolved;
+        }
 
         // 明确配置了一个不存在的绝对/相对路径时按原值返回，让真正的启动失败带上原始配置，
         // 而不是被静默改成 PATH 查找。

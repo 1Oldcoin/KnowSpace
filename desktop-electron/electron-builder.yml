@@ -7,9 +7,19 @@
 # 壳只打包 main.js / preload.js / package.json；后端整份目录通过 extraResources
 # 原样放到 <安装目录>\resources\api，由 main.js 的 process.resourcesPath/api 拉起，
 # 因此后端文件不会被塞进 asar（asar 里的 exe 无法直接启动）。
+#
+# 命名分两层，别混了：
+#   productName    = 「用户看到的名字」：控制面板卸载项、开始菜单、窗口标题、安装包文件名
+#   executableName = 「磁盘上的名字」：%LOCALAPPDATA%\Programs\<executableName>\<executableName>.exe
+# 路径用 ASCII、显示名用中文，是为了既让人一眼认出是什么软件，又不给中文路径的
+# 兼容性风险（国内安全软件 / 解压工具 / 第三方安装器对中文路径的支持并不一致）。
+#
+# appId 绝对不能动：NSIS 的升级判定靠 HKCU\Software\<UUID(appId)> 里的 InstallLocation，
+# 改了就等于换了个产品，老用户永远收不到升级。
 appId: com.myfirstmafagent.desktop
-productName: MyFirstMafAgent
-copyright: Copyright © 2026 MyFirstMafAgent
+productName: 知间-本地知识库
+executableName: Zhijian
+copyright: Copyright © 2026 知间
 
 directories:
   output: ../publish/releases
@@ -55,8 +65,12 @@ win:
       arch:
         - x64
   icon: ../assets/app.ico
-  artifactName: ${productName}-${version}-${arch}-setup.${ext}
-
+  # 产物名用 ASCII，**不要**写 ${productName}。
+  # 原因（实测过）：productName 含中文时，electron-builder 会为 GitHub 发布源把
+  # latest.yml 里的 path/url 换成 computeSafeArtifactName() 的结果（退化成
+  # `${name}-setup-${version}.exe`），而磁盘上的文件名仍是中文——两边对不上，
+  # 自动更新就会 404。显示名要中文，文件名要 ASCII，两边各取所需。
+  artifactName: Zhijian-${version}-${arch}-setup.${ext}
 nsis:
   # 交互式安装向导（不用 oneClick）：用户可改安装目录、能看到进度。
   oneClick: false
@@ -70,4 +84,4 @@ nsis:
   include: build/installer.nsh
   # 用户数据在 %LOCALAPPDATA%\MyFirstMafAgentData，绝不能随卸载删除。
   deleteAppDataOnUninstall: false
-  artifactName: ${productName}-${version}-setup.${ext}
+  artifactName: Zhijian-${version}-setup.${ext}

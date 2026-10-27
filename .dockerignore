@@ -3,6 +3,9 @@
 **/obj/
 **/node_modules/
 **/dist/
+# 开发机的 App_Data（含 pgdata，几十 MB）不进构建上下文；
+# 容器里的数据目录由 Dockerfile 自己建、由卷提供。
+**/App_Data/
 publish/
 App_Data/
 docs/
@@ -18,6 +21,14 @@ MyFirstMafAgent.Api.Tests/
 **/*.log
 probe-out*.txt
 rowdump.txt
+
+# Linux 镜像里 PostgreSQL 与 ffmpeg 都由 apt 提供，这两棵原生树没必要进构建上下文。
+# （便携 pgsql 只有 win-x64 一份；ffmpeg 三平台共 303 MB。合计约 370 MB 白传。）
+MyFirstMafAgent.Api/ExternalTools/pgSQL/
+MyFirstMafAgent.Api/ExternalTools/ffmpeg/
+
+# 注意：ExternalTools/Embedding 必须保留 —— 离线向量化依赖随包的 bge-small 模型。
+# 注意：assets/ 也不能排除 —— csproj 的 ApplicationIcon 指向 ..\assets\app.ico。
 
 # 注意：不要把 assets/ 排除掉 —— MyFirstMafAgent.Api.csproj 里
 # <ApplicationIcon>..\assets\app.ico</ApplicationIcon> 依赖它，缺了会构建失败。

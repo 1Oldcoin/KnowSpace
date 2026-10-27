@@ -16,7 +16,7 @@ namespace MyFirstMafAgent.Api.Infrastructure.PortablePostgres;
 /// → 启用 pgvector → 为 API 提供连接串；应用退出时 <c>pg_ctl stop</c>。
 ///
 /// <para>
-/// 桌面壳（Electron）不参与这一步：它只负责启动 <c>MyFirstMafAgent.Api.exe</c>、等
+/// 桌面壳（Electron）不参与这一步：它只负责启动 <c>Zhijian.Api.exe</c>、等
 /// <c>/api/health</c> 返回 200、然后加载页面。数据库起不来时 API 起不来，健康检查也就永远不通过，
 /// 壳只需要把 API 的日志展示给用户。
 /// </para>
@@ -123,9 +123,10 @@ public sealed class PortablePostgresHost : IAsyncDisposable
         var portableRoot = ResolvePortableRoot(contentRoot, options, rootFailures)
             ?? throw new InvalidOperationException(BuildNoWritableRootMessage(rootFailures));
 
-        // 走到「程序目录兜底」说明用户目录整片不可写（安全软件/受控文件夹访问），
-        // 数据因此跟着程序走：覆盖安装/删除程序目录会连带数据，必须让用户知情。
-        if (IsUnder(portableRoot, contentRoot))
+        // 「程序目录兜底」只在**自动挑选**时才是问题：说明用户目录整片不可写（安全软件/受控文件夹访问），
+        // 数据因此跟着程序走，覆盖安装/删除程序目录会连带数据。显式配了 RootDirectory 不算兜底
+        // （容器里 RootDirectory=/app/App_Data 正好在 contentRoot 之下，那是有意的挂卷位置）。
+        if (string.IsNullOrWhiteSpace(options.RootDirectory) && IsUnder(portableRoot, contentRoot))
         {
             log?.Invoke($"警告：用户数据目录不可写，便携数据库改用程序目录下的 {portableRoot}。"
                 + "该位置随程序目录一起被覆盖安装/删除，长期使用请把应用放进纯英文的自定义目录并配置 PortablePostgres:RootDirectory。");
@@ -141,6 +142,7 @@ public sealed class PortablePostgresHost : IAsyncDisposable
         Directory.CreateDirectory(logDirectory);
 
         binDirectory = await EnsureRunnableBinDirectoryAsync(binDirectory, portableRoot, log, cancellationToken);
+        EnsureExecutableBinaries(binDirectory);
 
         WarnAboutLegacyCluster(portableRoot, dataDirectory, log);
 
@@ -156,6 +158,9 @@ public sealed class PortablePostgresHost : IAsyncDisposable
         }
 
         await EnsureClusterInitializedAsync(binDirectory, dataDirectory, logDirectory, options, log, cancellationToken);
+
+        // 集群建好之后才能确定 postgresql.conf 在（首次启动时它刚被 initdb 写出来）。
+        EnsureUnixSocketDirectory(dataDirectory, portableRoot, log);
 
         var freePort = FindAvailablePort(options.Port);
         var host = new PortablePostgresHost(
@@ -265,25 +270,36 @@ public sealed class PortablePostgresHost : IAsyncDisposable
     /// </summary>
     private static void EnsureNotElevated()
     {
-        if (!OperatingSystem.IsWindows()) return;
-
-        bool elevated;
-        try
+        if (OperatingSystem.IsWindows())
         {
-            using var identity = WindowsIdentity.GetCurrent();
-            elevated = new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
-        }
-        catch (Exception exception) when (exception is UnauthorizedAccessException or InvalidOperationException)
-        {
-            return;
+            bool elevated;
+            try
+            {
+                using var identity = WindowsIdentity.GetCurrent();
+                elevated = new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
+            }
+            catch (Exception exception) when (exception is UnauthorizedAccessException or InvalidOperationException)
+            {
+                return;
+            }
+
+            if (!elevated) return;
+
+            throw new InvalidOperationException(
+                "当前进程以管理员权限运行，便携 PostgreSQL 无法启动（initdb/postgres 会拒绝提权令牌："
+                + "Execution of PostgreSQL by a user with administrative permissions is not permitted）。"
+                + "请以普通用户身份启动本程序；如果确实需要提权，请改用外部 PostgreSQL 并配置 ConnectionStrings:KnowledgeBase。");
         }
 
-        if (!elevated) return;
+        // Linux/macOS：postgres 同样拒绝以 root 运行（"cannot be run as root"）。
+        // 容器里如果忘了 USER 指令就会撞到这条，报错信息必须直接指向修法。
+        if (!Environment.IsPrivilegedProcess) return;
 
         throw new InvalidOperationException(
-            "当前进程以管理员权限运行，便携 PostgreSQL 无法启动（initdb/postgres 会拒绝提权令牌："
-            + "Execution of PostgreSQL by a user with administrative permissions is not permitted）。"
-            + "请以普通用户身份启动本程序；如果确实需要提权，请改用外部 PostgreSQL 并配置 ConnectionStrings:KnowledgeBase。");
+            "当前进程以 root 运行，便携 PostgreSQL 无法启动（initdb/postgres 明确拒绝 root）。"
+            + "请在容器里用非 root 用户运行（Dockerfile 已内置 USER app），"
+            + "或用 --user 指定非 root 账号；也可以关掉便携库改用外部 PostgreSQL："
+            + "PortablePostgres__Enabled=false + ConnectionStrings__KnowledgeBase。");
     }
 
     /// <summary>
@@ -376,7 +392,7 @@ public sealed class PortablePostgresHost : IAsyncDisposable
             + Environment.NewLine + "  1) 把便携数据库的数据目录放到纯英文路径，例如 D:\\Apps\\MyFirstMafAgentData"
             + "（程序目录可以含中文，数据目录不行）；"
             + Environment.NewLine + "  2) 目录本身可写但程序仍被拒绝时，通常是安全软件（火绒/360 的文件防护、勒索防护）"
-            + "或 Windows「受控文件夹访问」拦下了未签名 exe：把 MyFirstMafAgent.Api.exe（或整个应用目录）加入白名单后重试；"
+            + "或 Windows「受控文件夹访问」拦下了未签名 exe：把 Zhijian.Api.exe（或整个应用目录）加入白名单后重试；"
             + Environment.NewLine + "  3) 也可以显式指定一个纯英文可写目录：PortablePostgres:RootDirectory；"
             + Environment.NewLine + "  4) 或者改用外部 PostgreSQL：配置 ConnectionStrings:KnowledgeBase（容器/已有实例都推荐这种方式）。";
     }
@@ -420,6 +436,67 @@ public sealed class PortablePostgresHost : IAsyncDisposable
         EnsureAsciiDataPath(directory, "PortablePostgres:DataDirectory");
 
         return directory;
+    }
+
+    /// <summary>
+    /// 给 <c>initdb</c> / <c>pg_ctl</c> / <c>postgres</c> 补上可执行位（Unix）。
+    ///
+    /// <para>
+    /// 这三个二进制必须都带 +x：<c>pg_ctl</c> 自己会去 exec <c>postgres</c>，只给 <c>pg_ctl</c> 补没用。
+    /// 容器里从 apt 装的 PostgreSQL 本来就有；这里兜住的是「跨平台复制」「从 zip 解出来」
+    /// 以及 bare-metal 上手工部署 tar 包这几种会丢权限位的路径。Windows 上是空操作。
+    /// </para>
+    /// </summary>
+    private static void EnsureExecutableBinaries(string binDirectory)
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        foreach (var name in new[] { InitDbCommand, PgCtlCommand, PlatformRuntime.PostgresCommand })
+            PlatformRuntime.EnsureExecutable(Path.Combine(binDirectory, PlatformRuntime.WithSuffix(name)));
+    }
+
+    /// <summary>
+    /// Linux 上把 Unix socket 目录固定到便携根目录下（<c>{便携根}/pgsockets</c>）。
+    ///
+    /// <para>
+    /// Debian/Ubuntu 发行的 PostgreSQL 集群模板会把 <c>unix_socket_directories</c> 设成
+    /// <c>/var/run/postgresql</c>（属主 postgres、非该用户不可写）。我们是用 <c>initdb</c> 自建集群，
+    /// 拿到的是二进制里的编译默认值；一旦它指向 `/var/run/postgresql`，非 root 进程启动就会
+    /// 卡在「could not create lock file」/「could not bind Unix socket」，而错误信息完全不提权限。
+    /// 与其赌目标发行版的编译参数，不如显式写进 <c>postgresql.conf</c>：路径可能含空格，
+    /// 走配置文件比拼 <c>-o</c> 命令行可靠（conf 里单引号即可，不需要再逃一层 shell）。
+    /// </para>
+    ///
+    /// <para>
+    /// 连接全部走 TCP <c>127.0.0.1</c>，socket 目录只影响 <c>psql</c> 之类的本地客户端便利性，
+    /// 所以放在数据目录旁边就够了。Windows 没有 Unix socket，直接跳过。
+    /// </para>
+    /// </summary>
+    private static void EnsureUnixSocketDirectory(
+        string dataDirectory, string portableRoot, Action<string>? log)
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var socketDirectory = Path.Combine(portableRoot, "pgsockets");
+        Directory.CreateDirectory(socketDirectory);
+
+        var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+        if (!File.Exists(confPath)) return;
+
+        const string marker = "# MyFirstMafAgent: unix socket directory below";
+        var conf = File.ReadAllText(confPath);
+
+        // 已经指向同一个目录就不再重复追加（容器每次启动都会走这段）。
+        if (conf.Contains("unix_socket_directories = '" + socketDirectory + "'", StringComparison.Ordinal))
+            return;
+
+        // 只需去掉既有的有效赋值：initdb 写的是注释行，保持原样即可，追加会覆盖它。
+        var addition = Environment.NewLine + marker + Environment.NewLine
+            + "unix_socket_directories = '" + socketDirectory.Replace("'", "''", StringComparison.Ordinal) + "'"
+            + Environment.NewLine;
+
+        File.AppendAllText(confPath, addition, new UTF8Encoding(false));
+        log?.Invoke($"PostgreSQL Unix socket 目录：{socketDirectory}");
     }
 
     /// <summary>
@@ -828,7 +905,26 @@ public sealed class PortablePostgresHost : IAsyncDisposable
 
         await using var command = connection.CreateCommand();
         command.CommandText = "CREATE EXTENSION IF NOT EXISTS vector;";
-        await command.ExecuteNonQueryAsync(cancellationToken);
+
+        try
+        {
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (PostgresException exception)
+        {
+            // 缺少 pgvector 时原生报错只有一句 «extension "vector" is not available»，
+            // 完全看不出「是包没装」还是「装了但版本目录不对」。容器/bare-metal 上这条最容易踩，
+            // 所以翻译成能照着做的两条命令。
+            throw new InvalidOperationException(
+                $"数据库 {Database} 启用 pgvector 失败（{exception.SqlState}）：{exception.MessageText}"
+                + Environment.NewLine + "本进程使用的 PostgreSQL 二进制目录：" + _binDirectory
+                + Environment.NewLine + "修法一（推荐，Debian/Ubuntu）：apt-get install -y postgresql-17-pgvector"
+                + Environment.NewLine + "修法二：确认该 bin 目录同级的 lib/ 下有 vector.so、"
+                + "share/extension/ 下有 vector.control（Windows 为 vector.dll）。"
+                + Environment.NewLine + "知识库检索强依赖向量索引，缺它无法启动。",
+                exception);
+        }
+
         _log?.Invoke($"pgvector 已启用（数据库 {Database}）。");
     }
 

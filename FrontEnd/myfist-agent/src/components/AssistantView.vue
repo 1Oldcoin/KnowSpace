@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ArrowDown, BookOpen, Check, CornerDownLeft, Download, FileText, FolderOpen, Globe, MessageCircle, MoreHorizontal, NotebookPen, Pencil, Play, Plus, Send, Sparkles, Trash2, UserRound, Wrench } from 'lucide-vue-next'
 import type { ChatToolOptions, KnowledgeChatSession } from '../services/api'
 import type { AssistantMessage } from '../types'
@@ -36,6 +36,8 @@ const scrollAnchor = ref<HTMLElement | null>(null)
 const isManagingSessions = ref(false)
 const selectedSessionIds = ref<string[]>([])
 const openSessionMenuId = ref('')
+/** 菜单向下展开会被列表的 overflow 裁掉时改为向上展开（见 toggleSessionMenu）。 */
+const openSessionMenuUp = ref(false)
 const allSessionsSelected = computed(() => props.sessions.length > 0 && selectedSessionIds.value.length === props.sessions.length)
 
 function submit() {
@@ -94,9 +96,34 @@ function selectSession(sessionId: string) {
   emit('selectSession', sessionId)
 }
 
-function toggleSessionMenu(sessionId: string) {
-  openSessionMenuId.value = openSessionMenuId.value === sessionId ? '' : sessionId
+function toggleSessionMenu(sessionId: string, event: MouseEvent) {
+  if (openSessionMenuId.value === sessionId) {
+    openSessionMenuId.value = ''
+    return
+  }
+  openSessionMenuId.value = sessionId
+  openSessionMenuUp.value = false
+
+  // 会话列表是 overflow:auto，菜单绝对定位在行内会被裁掉。
+  // 下方剩余空间放不下一整个菜单时向上展开——按实际几何位置算，别猜行号。
+  void nextTick(() => {
+    const trigger = event.currentTarget as HTMLElement | null
+    const list = trigger?.closest('.assistant-session-list')
+    if (!trigger || !list) return
+    openSessionMenuUp.value = list.getBoundingClientRect().bottom - trigger.getBoundingClientRect().bottom < 132
+  })
 }
+
+/** 点菜单外部关掉菜单；点在菜单/触发按钮内部时不动（由它们自己处理）。 */
+function closeSessionMenuOnOutsideClick(event: MouseEvent) {
+  if (!openSessionMenuId.value) return
+  const target = event.target as HTMLElement | null
+  if (target?.closest('.assistant-session-actions')) return
+  openSessionMenuId.value = ''
+}
+
+onMounted(() => document.addEventListener('click', closeSessionMenuOnOutsideClick))
+onBeforeUnmount(() => document.removeEventListener('click', closeSessionMenuOnOutsideClick))
 
 function requestSessionAction(action: 'rename' | 'delete' | 'export', sessionId: string) {
   openSessionMenuId.value = ''
@@ -224,11 +251,35 @@ function canSaveAsNote(message: AssistantMessage) {
     <div class="assistant-status"><span class="connection-dot" :class="{ online: apiOnline }"></span>{{ apiOnline ? '知识库与模型服务已连接' : '等待连接 API / PostgreSQL' }}<span class="status-divider"></span><BookOpen :size="14" /> 基于资料检索并附带引用</div>
     <div class="assistant-workspace">
       <aside class="assistant-session-list">
-        <div class="assistant-session-heading"><strong>问答历史</strong><button class="tiny-icon-button" aria-label="新建对话" :disabled="busy || sessionsLoading" @click="emit('newChat')"><Plus :size="16" /></button></div>
+        <div class="assistant-session-heading">
+          <strong>问答历史<span v-if="sessions.length" class="session-count"> · {{ sessions.length }}</span></strong>
+          <div class="assistant-session-controls">
+            <button v-if="sessions.length > 0" class="session-manage-button" :disabled="busy || sessionsLoading" :aria-pressed="isManagingSessions" @click="toggleSessionManagement">{{ isManagingSessions ? '完成' : '管理' }}</button>
+            <button class="tiny-icon-button" aria-label="新建对话" :disabled="busy || sessionsLoading" @click="emit('newChat')"><Plus :size="16" /></button>
+          </div>
+        </div>
+        <div v-if="isManagingSessions" class="assistant-session-bulk-toolbar">
+          <button type="button" @click="toggleAllSessions">{{ allSessionsSelected ? '取消全选' : '全选' }}</button>
+          <span>已选 {{ selectedSessionIds.length }} / {{ sessions.length }}</span>
+          <button type="button" class="session-delete-selected" :disabled="selectedSessionIds.length === 0 || busy" @click="deleteSelectedSessions">删除所选</button>
+        </div>
         <div v-if="sessionsLoading" class="assistant-session-empty">正在读取对话…</div>
-        <button v-for="session in sessions" :key="session.id" class="assistant-session-item" :class="{ selected: activeSessionId === session.id }" :disabled="busy || sessionsLoading" @click="emit('selectSession', session.id)">
-          <span><MessageCircle :size="14" /><strong>{{ session.title }}</strong></span><small>{{ sessionTime(session.updatedAt) }}</small>
-        </button>
+        <div v-for="session in sessions" :key="session.id" class="assistant-session-row" :class="{ selected: activeSessionId === session.id }">
+          <label v-if="isManagingSessions" class="assistant-session-select">
+            <input type="checkbox" :checked="selectedSessionIds.includes(session.id)" :aria-label="`选择对话：${session.title}`" @change="toggleSessionSelection(session.id)" />
+          </label>
+          <button class="assistant-session-item" :class="{ selected: activeSessionId === session.id }" :disabled="busy || sessionsLoading" @click="selectSession(session.id)">
+            <span><MessageCircle :size="14" /><strong>{{ session.title }}</strong></span><small>{{ sessionTime(session.updatedAt) }}</small>
+          </button>
+          <div v-if="!isManagingSessions" class="assistant-session-actions">
+            <button class="tiny-icon-button session-more-button" :aria-label="`更多操作：${session.title}`" :aria-expanded="openSessionMenuId === session.id" :disabled="busy || sessionsLoading" @click.stop="toggleSessionMenu(session.id, $event)"><MoreHorizontal :size="14" /></button>
+            <div v-if="openSessionMenuId === session.id" class="assistant-session-menu" :class="{ up: openSessionMenuUp }" role="menu">
+              <button type="button" role="menuitem" @click="requestSessionAction('rename', session.id)"><Pencil :size="12" /> 重命名</button>
+              <button type="button" role="menuitem" @click="requestSessionAction('export', session.id)"><Download :size="12" /> 导出为 Markdown</button>
+              <button type="button" role="menuitem" class="session-menu-danger" @click="requestSessionAction('delete', session.id)"><Trash2 :size="12" /> 删除</button>
+            </div>
+          </div>
+        </div>
         <div v-if="!sessionsLoading && sessions.length === 0" class="assistant-session-empty">还没有历史对话，点击“新对话”开始。</div>
       </aside>
       <div class="assistant-chat-column">
@@ -264,6 +315,7 @@ function canSaveAsNote(message: AssistantMessage) {
 .assistant-workspace { min-height: 0; flex: 1; display: grid; grid-template-columns: 205px minmax(0, 1fr); gap: 16px; margin-top: 12px; }
 .assistant-session-list { min-width: 0; max-height: calc(100vh - 250px); display: flex; flex-direction: column; gap: 5px; padding: 12px; overflow-y: auto; border: 1px solid #e8ede8; border-radius: 12px; background: #fff; }
 .assistant-session-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 3px; color: #536258; font-size: 10px; }
+.assistant-session-heading .session-count { color: #a4aea6; font-weight: 400; }
 .assistant-session-controls { display: flex; align-items: center; gap: 4px; }
 .session-manage-button { padding: 4px 6px; border: 0; border-radius: 5px; color: #718078; background: transparent; font-size: 9px; }
 .session-manage-button:hover:not(:disabled) { color: #397c65; background: #edf5ee; }
@@ -275,13 +327,23 @@ function canSaveAsNote(message: AssistantMessage) {
 .assistant-session-row.selected { color: #397c65; background: #edf5ee; }
 .assistant-session-select { flex: none; display: flex; align-items: center; padding-left: 7px; }
 .assistant-session-select input { width: 13px; height: 13px; accent-color: #397c65; }
-.assistant-session-item { min-width: 0; flex: none; display: flex; flex-direction: column; gap: 5px; padding: 8px; border: 0; border-radius: 8px; color: #75817b; background: transparent; text-align: left; }
+/* flex: 1 是必须的：行里现在多了「⋯」按钮，item 不撑满就会把标题挤成一条细缝。 */
+.assistant-session-item { min-width: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 5px; padding: 8px; border: 0; border-radius: 8px; color: #75817b; background: transparent; text-align: left; }
 .assistant-session-item:hover:not(:disabled), .assistant-session-row.selected .assistant-session-item { color: #397c65; }
 .assistant-session-item > span { min-width: 0; display: flex; align-items: center; gap: 7px; }
 .assistant-session-item strong { overflow: hidden; color: inherit; font-size: 9px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .assistant-session-item small { padding-left: 21px; color: #a4aea6; font-size: 8px; }
-.assistant-session-actions { position: relative; flex: none; }
+.assistant-session-actions { position: relative; flex: none; display: flex; align-items: center; padding-right: 3px; }
+/* 平时把「⋯」藏起来，否则一列小按钮比标题更抢眼；hover / 键盘聚焦 / 菜单打开时常驻。 */
+.assistant-session-actions .session-more-button { opacity: 0; transition: opacity .14s; }
+.assistant-session-row:hover .assistant-session-actions .session-more-button,
+.assistant-session-row.selected .assistant-session-actions .session-more-button,
+.assistant-session-actions .session-more-button:focus-visible,
+.assistant-session-actions .session-more-button[aria-expanded='true'] { opacity: 1; }
+@media (hover: none) { .assistant-session-actions .session-more-button { opacity: 1; } }
 .assistant-session-menu { position: absolute; z-index: 5; top: calc(100% - 3px); right: 2px; min-width: 126px; display: flex; flex-direction: column; gap: 2px; padding: 5px; border: 1px solid #e8ede8; border-radius: 8px; background: #fff; box-shadow: 0 8px 24px #304a3a1a; }
+/* 名单末尾几行的菜单向下展开会被列表的 overflow:auto 裁掉，改为向上展开（角度由 JS 测出来）。 */
+.assistant-session-menu.up { top: auto; bottom: calc(100% - 3px); }
 .assistant-session-menu button { display: flex; align-items: center; gap: 7px; padding: 7px; border: 0; border-radius: 5px; color: #536258; background: transparent; text-align: left; white-space: nowrap; font-size: 9px; }
 .assistant-session-menu button:hover { color: #397c65; background: #edf5ee; }
 .assistant-session-menu .session-menu-danger { color: #a54848; }

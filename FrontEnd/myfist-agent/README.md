@@ -4,7 +4,7 @@ Vue 3 + TypeScript + Vite 前端工程，提供概览、资料、专题、学习
 
 ## 启动
 
-1. 启动 `MyFirstMafAgent.Api`，默认地址为 `http://localhost:5056`。
+1. 启动 `Zhijian.Api`，默认地址为 `http://localhost:5056`。
 2. 在此目录安装依赖并启动开发服务器：
 
 ```sh
@@ -33,12 +33,14 @@ npm run dev
 - `DELETE /api/knowledge-bases/{knowledgeBaseId}/sessions/{sessionId}`：删除会话及其消息。
 - `POST /api/knowledge-bases/{knowledgeBaseId}/sessions/batch-delete`：批量删除（JSON：`{"sessionIds":["..."]}`，单次最多 100 条）。
 - `GET /api/knowledge-bases/{knowledgeBaseId}/sessions/{sessionId}/export`：下载 Markdown 对话记录。
+- 侧栏「问答历史」的界面动作：单条 `⋯` 菜单（重命名/导出/删除）与「管理」模式（勾选、全选、批量删除）。两者共用同一套 emit，避免出现「菜单能删、批量不能删」的两套语义。
 - `/api/knowledge-bases/{knowledgeBaseId}/topics`：`GET` 列出专题（含资料数量）、`POST` 创建专题；`PUT` / `DELETE /{topicId}` 重命名或删除专题。
 - `PUT /api/documents/{documentId}/topic`：把资料移入专题或移回未分类。
 - `GET /api/documents/{documentId}/content?offset=&length=`：分页读取已解析原文，供原文阅读器使用。
 - `/api/knowledge-bases/{knowledgeBaseId}/notes`：`GET` 列出（支持 `query`、`category`）、`POST` 新建笔记；`GET/PUT/DELETE /{noteId}` 读取、更新、删除；`POST /{noteId}/pin` 置顶切换。
 - `GET` / `PUT /api/settings`：读取/保存聊天模型、显示名称和每日学习目标；API Key 仅返回掩码提示，保存后立即生效。
 - `GET` / `POST /api/study/checkins`：读取连续学习、累计天数和本周节奏；记录/更新今日学习时长与备注。`DELETE /api/study/checkins/today` 可撤销今日打卡。
+- `GET /api/study/checkins/range?from=YYYY-MM-DD&to=YYYY-MM-DD`：日历弹窗用。只返回区间内**确实有打卡**的日期（不补零），跨度上限 400 天；不传参默认当月。
 - `/api/companions/*`：导入聊天记录、生成人物风格画像、保存陪伴会话与消息。
 
 ## API 路由查找与调试

@@ -1,0 +1,48 @@
+[Unit]
+Description=KnowSpace (MyFirstMafAgent) API with built-in PostgreSQL 17
+Documentation=https://github.com/ (repo) docs/DEPLOYMENT.md
+# PostgreSQL 只在 127.0.0.1 上，不需要外网；但要用 network-online 保证回环与 DNS 就绪。
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=myfirstmafagent
+Group=myfirstmafagent
+WorkingDirectory=/opt/myfirstmafagent
+
+# 所有可调项都在这里，改完 systemctl restart 即可生效。
+EnvironmentFile=/etc/myfirstmafagent/myfirstmafagent.env
+
+# 服务账号是 --no-create-home 的，默认 HOME=/ 不可写。
+# 指向数据目录后，任何「用户数据目录」兜底路径（日志、OAuth 私钥候选）也都落在可写位置。
+Environment=HOME=/var/lib/myfirstmafagent
+
+# --urls 必须显式传：appsettings.json 里的 Urls 是 127.0.0.1:5056，
+# 而 ASPNETCORE_URLS 会被同名配置项压掉，只有命令行参数生效。
+ExecStart=/opt/myfirstmafagent/Zhijian.Api --urls http://127.0.0.1:5056 --no-browser
+
+Restart=always
+RestartSec=5
+
+# 单实例：内置数据库独占数据目录，第二份进程会因端口/postmaster.pid 冲突起不来。
+KillMode=mixed
+# 优雅退出会连带停掉内置 PostgreSQL（PortablePostgres:StopOnExit），
+# 给足时间让它 checkpoint，否则下次启动要做崩溃恢复。
+TimeoutStopSec=120
+
+# --- 加固 ---
+NoNewPrivileges=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectSystem=full
+# 内置数据库的数据目录必须可写。
+ReadWritePaths=/var/lib/myfirstmafagent
+# PostgreSQL 的 Unix socket 会落在 /var/lib/myfirstmafagent/pgsockets，
+# 所以不需要 PrivateTmp（开了也不会坏事，但别让人以为 socket 在 /tmp）。
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

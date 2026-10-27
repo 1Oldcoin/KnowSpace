@@ -2,8 +2,8 @@
   "name": "myfirstmafagent-desktop",
   "version": "1.0.1",
   "private": true,
-  "description": "MyFirstMafAgent desktop shell: native Electron main process + .NET API sidecar",
-  "author": "MyFirstMafAgent",
+  "description": "知间-本地知识库 桌面壳：原生 Electron 主进程 + .NET API sidecar",
+  "author": "知间",
   "main": "main.js",
   "scripts": {
     "start": "electron .",

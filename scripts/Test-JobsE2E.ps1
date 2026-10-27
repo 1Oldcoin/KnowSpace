@@ -57,7 +57,7 @@ function Start-Api {
 
     $stdout = Join-Path $work 'api-out.log'
     $stderr = Join-Path $work 'api-err.log'
-    $exe = Join-Path $ApiDir 'MyFirstMafAgent.Api.exe'
+    $exe = Join-Path $ApiDir 'Zhijian.Api.exe'
     $process = Start-Process -FilePath $exe -WorkingDirectory $ApiDir -PassThru -WindowStyle Hidden `
         -RedirectStandardOutput $stdout -RedirectStandardError $stderr
 

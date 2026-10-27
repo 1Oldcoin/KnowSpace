@@ -540,6 +540,9 @@ public sealed class PluginSyncServiceTests
     {
         public Task<bool> ExistsAsync(Guid knowledgeBaseId, CancellationToken cancellationToken) =>
             Task.FromResult(exists);
+
+        public Task<IReadOnlyList<KnowledgeBaseSummary>> ListAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<KnowledgeBaseSummary>>([]);
     }
 
     private sealed class FakeRegistry : IPluginRegistry

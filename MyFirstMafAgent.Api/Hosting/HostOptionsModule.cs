@@ -93,8 +93,9 @@ public static class HostOptionsModule
             .Validate(options => (string.IsNullOrWhiteSpace(options.ApiToken) || options.ApiToken.Trim().Length >= 16)
                 && options.FailedAuthLimitPerMinute is >= 0 and <= 100_000
                 && options.FailedAuthBlockSeconds is >= 0 and <= 86_400
-                && options.KnownProxies.All(proxy => System.Net.IPAddress.TryParse(proxy?.Trim(), out _)),
-                "Server:ApiToken must be empty or at least 16 characters; the failed-auth limit, block seconds and every KnownProxies entry must be valid.")
+                && options.KnownProxies.All(proxy => System.Net.IPAddress.TryParse(proxy?.Trim(), out _))
+                && IsValidPublicBaseUrl(options.PublicBaseUrl),
+                "Server:ApiToken must be empty or at least 16 characters; the failed-auth limit, block seconds and every KnownProxies entry must be valid; Server:PublicBaseUrl must be empty or an absolute http/https URL without query or fragment.")
             .ValidateOnStart();
         // 插件运行时：目录、超时与重启退避必须有效，否则启动即失败。
         services.AddOptions<PluginOptions>()
@@ -140,5 +141,21 @@ public static class HostOptionsModule
                     && !string.IsNullOrWhiteSpace(options.Database)),
                 "PortablePostgres 的端口、超时、用户名与数据库名必须有效。")
             .ValidateOnStart();
+    }
+
+    /// <summary>
+    /// <c>Server:PublicBaseUrl</c> 允许留空；填了就必须是「绝对 http/https 地址」，
+    /// 且不带查询串或片段——它会被拼成 <c>{base}/mcp</c> 直接粘进客户端配置，
+    /// 多一个 <c>?x=1</c> 就会生成连不上的地址。
+    /// </summary>
+    private static bool IsValidPublicBaseUrl(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return true;
+
+        return System.Uri.TryCreate(value.Trim(), System.UriKind.Absolute, out var uri)
+            && (uri.Scheme == System.Uri.UriSchemeHttp || uri.Scheme == System.Uri.UriSchemeHttps)
+            && uri.Host.Length > 0
+            && uri.Query.Length == 0
+            && uri.Fragment.Length == 0;
     }
 }

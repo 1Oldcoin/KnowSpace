@@ -85,6 +85,10 @@ public static class PersistenceModule
         services.AddSingleton<IAgentClientStore>(sp => sp.GetRequiredService<SqlSugarAgentClientStore>());
         services.AddSingleton<IAgentCallLogStore>(sp => sp.GetRequiredService<SqlSugarAgentClientStore>());
 
+        // OAuth 授权服务器状态（客户端、同意、授权码、刷新令牌、认证事件）。
+        services.AddSingleton<SqlSugarOAuthStore>();
+        services.AddSingleton<MyFirstMafAgent.Api.OAuth.IOAuthStore>(sp => sp.GetRequiredService<SqlSugarOAuthStore>());
+
         // 长任务队列（落库 + 租约，重启不丢任务）。
         services.AddSingleton<SqlSugarJobQueue>();
         services.AddSingleton<IJobQueue>(sp => sp.GetRequiredService<SqlSugarJobQueue>());

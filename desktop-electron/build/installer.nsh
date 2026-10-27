@@ -12,7 +12,7 @@
 
 !macro myFirstMafAgentStopPortablePostgres
   DetailPrint "Stopping portable PostgreSQL..."
-  nsExec::ExecToLog '"$INSTDIR\resources\api\MyFirstMafAgent.Api.exe" --stop-portable-postgres'
+  nsExec::ExecToLog '"$INSTDIR\resources\api\Zhijian.Api.exe" --stop-portable-postgres'
   Pop $0
   DetailPrint "Portable PostgreSQL stop exit code: $0"
 !macroend

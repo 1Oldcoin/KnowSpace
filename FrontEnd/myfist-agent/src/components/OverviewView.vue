@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { ArrowRight, ArrowUpRight, BookOpen, CalendarCheck, Check, Clock3, CloudUpload, FileText, Flame, Globe, LoaderCircle, MoreHorizontal, Play, Search, Sparkles, X } from 'lucide-vue-next'
+import { ArrowRight, ArrowUpRight, BookOpen, CalendarCheck, CalendarDays, Check, Clock3, CloudUpload, FileText, Flame, Globe, LoaderCircle, MoreHorizontal, Play, Search, Sparkles, X } from 'lucide-vue-next'
 import type { StudySummary } from '../services/api'
 import type { MaterialItem, NoteItem } from '../types'
 import { SUPPORTED_ACCEPT } from '../fileTypes'
+import CheckinCalendarModal from './CheckinCalendarModal.vue'
 
 const props = defineProps<{
   materials: MaterialItem[]
@@ -45,6 +46,7 @@ const chartBars = computed(() => {
 })
 
 const showCheckin = ref(false)
+const showCalendar = ref(false)
 const checkinMinutes = ref(30)
 const checkinNote = ref('')
 
@@ -65,6 +67,20 @@ function openCheckin() {
 function submitCheckin() {
   emit('checkin', Math.max(0, Math.min(1440, Math.round(checkinMinutes.value || 0))), checkinNote.value.trim() || undefined)
   showCheckin.value = false
+}
+
+/**
+ * 整张打卡卡可点开日历。键盘等价：Enter / 空格，否则卡片在 Tab 序列里是「不可用控件」。
+ * 注意卡片内部还有一个「今日打卡」按钮，它的 click 必须 .stop，否则会连带打开日历。
+ */
+function openCalendar() {
+  showCalendar.value = true
+}
+
+function onStudyCardKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Enter' && event.key !== ' ') return
+  event.preventDefault()
+  openCalendar()
 }
 
 function formatDate(date: Date) {
@@ -99,16 +115,19 @@ function formatDate(date: Date) {
       <div class="stat-value">{{ notes.length }}<span> 篇</span></div><div class="stat-label">学习笔记</div>
       <div class="stat-progress"><span style="width: 62%"></span></div><div class="stat-foot">本月目标 <strong>10 篇</strong></div>
     </article>
-    <article class="stat-card stat-study-card">
+    <article class="stat-card stat-study-card stat-study-card-clickable" role="button" tabindex="0" aria-label="查看打卡记录" @click="openCalendar" @keydown="onStudyCardKeydown">
       <div class="stat-top"><span class="stat-icon icon-peach"><Flame :size="17" /></span><span class="stat-caption">{{ study?.todayCheckedIn ? '今日已打卡' : '保持节奏' }}</span></div>
       <div class="stat-value">{{ study?.currentStreak ?? 0 }}<span> 天</span></div><div class="stat-label">连续学习 · 累计 {{ study?.totalDays ?? 0 }} 天</div>
       <div class="streak-dots">
         <i v-for="(day, index) in week" :key="day.date || index" :class="{ done: day.minutes > 0, today: index === todayWeekIndex }">{{ weekdayLabels[index] }}</i>
       </div>
-      <button class="checkin-button" :class="{ done: study?.todayCheckedIn }" @click="openCheckin">
-        <CalendarCheck :size="12" />
-        {{ study?.todayCheckedIn ? `已打卡 · ${study.todayMinutes} 分钟` : '今日打卡' }}
-      </button>
+      <div class="stat-study-foot">
+        <button class="checkin-button" :class="{ done: study?.todayCheckedIn }" @click.stop="openCheckin">
+          <CalendarCheck :size="12" />
+          {{ study?.todayCheckedIn ? `已打卡 · ${study.todayMinutes} 分钟` : '今日打卡' }}
+        </button>
+        <span class="stat-study-link"><CalendarDays :size="11" /> 查看记录</span>
+      </div>
     </article>
   </section>
 
@@ -170,4 +189,6 @@ function formatDate(date: Date) {
       </section>
     </div>
   </Teleport>
+
+  <CheckinCalendarModal v-if="showCalendar" :study="study" :api-online="isApiOnline" @close="showCalendar = false" />
 </template>

@@ -80,8 +80,8 @@ if (-not $SkipPublish) {
     if ($LASTEXITCODE -ne 0) { throw "Publish-Portable.ps1 failed (exit code $LASTEXITCODE)." }
 }
 
-if (-not (Test-Path (Join-Path $sidecar 'MyFirstMafAgent.Api.exe'))) {
-    throw "Missing $sidecar\MyFirstMafAgent.Api.exe. Run without -SkipPublish."
+if (-not (Test-Path (Join-Path $sidecar 'Zhijian.Api.exe'))) {
+    throw "Missing $sidecar\Zhijian.Api.exe. Run without -SkipPublish."
 }
 
 $temporaryBuild = $false

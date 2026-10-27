@@ -595,6 +595,10 @@ public sealed class AgentClientServiceTests
 
         public Task<bool> ExistsAsync(Guid knowledgeBaseId, CancellationToken cancellationToken) =>
             Task.FromResult(Existing.Contains(knowledgeBaseId));
+
+        public Task<IReadOnlyList<KnowledgeBaseSummary>> ListAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<KnowledgeBaseSummary>>(
+                Existing.Select(id => new KnowledgeBaseSummary(id, id.ToString("D"))).ToList());
     }
 
     private sealed class FakeAgentClientStore : IAgentClientStore
