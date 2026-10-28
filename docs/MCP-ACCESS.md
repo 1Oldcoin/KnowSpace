@@ -122,6 +122,7 @@ curl.exe -s http://127.0.0.1:5056/api/agent-clients/catalog
 - **可选参数也一样受校验**：`chat_search_history` / `list_chat_sessions` 不强制要知识库，但只要显式传了 `knowledgeBaseId`，网关就会拿它对照白名单——否则「可选」就成了绕过范围的后门（真实修过：`AgentCallGate` 曾经对 `UsesKnowledgeBase: false` 的工具直接放行）。
 - `get_document_content` 只带资料 ID，网关会回查资料属于哪个知识库再判定。
 - `list_knowledge_bases` 只返回范围内的库（连名字也不外泄）。
+- **知识库被删除后，客户端范围不会自动放宽**：白名单里那个 GUID 仍然存在，只是再也匹配不到任何知识库。所以「删掉库」不等于「回收授权」——受限客户端会退化成什么都访问不了，需要手工改它的白名单。这是刻意的：把空列表当作「不限」会让一次删除变成一次提权。删除知识库不会走 MCP，只有界面与 `DELETE /api/knowledge-bases/{id}` 两条路（都需要界面令牌），MCP 侧不提供建库/删库工具。
 
 ---
 

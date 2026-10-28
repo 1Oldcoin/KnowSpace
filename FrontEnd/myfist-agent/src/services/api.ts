@@ -17,6 +17,8 @@ export interface KnowledgeBase {
   id: string
   name: string
   createdAt: string
+  /** 默认知识库不可删除：未指定知识库的上传与检索都以它为兜底。 */
+  isDefault?: boolean
 }
 
 export interface KnowledgeChatSession {
@@ -272,6 +274,29 @@ export async function createKnowledgeBase(name: string): Promise<KnowledgeBase> 
   })
   if (!response.ok) throw new Error(await getErrorMessage(response))
   return await response.json() as KnowledgeBase
+}
+
+/** 删除知识库时连带删掉的数量，用来在提示里告诉用户「删了什么」。 */
+export interface KnowledgeBaseDeletionResult {
+  knowledgeBaseId: string
+  name: string
+  deletedDocuments: number
+  deletedChunks: number
+  deletedNotes: number
+  deletedTopics: number
+  deletedChatSessions: number
+}
+
+/**
+ * 删除知识库：资料、切片、向量、笔记、专题、问答历史会一起消失，不可恢复。
+ * 默认知识库由后端拒绝（409），界面应当先隐藏入口。
+ */
+export async function deleteKnowledgeBase(knowledgeBaseId: string): Promise<KnowledgeBaseDeletionResult> {
+  const response = await fetch(`${apiBaseUrl}/api/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}`, {
+    method: 'DELETE',
+  })
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  return await response.json() as KnowledgeBaseDeletionResult
 }
 
 export async function createKnowledgeChatSession(knowledgeBaseId: string, title = '新的对话'): Promise<KnowledgeChatSession> {

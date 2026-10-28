@@ -162,7 +162,10 @@ MyFirstMafAgent/
 | `Infrastructure/Persistence/SqlSugarJobQueue.cs` | 任务队列的 SqlSugar 实现：乐观 CAS 领取、租约续期、退避重试、僵尸回收。 |
 | `Endpoints/JobEndpoints.cs` | 任务中心接口：列表/计数/类型/详情/取消/重跑与 SSE 实时进度。 |
 | `Hosting/JobsModule.cs` | 任务系统的依赖注入组合（调度器、队列、处理器索引、补投器）。 |
-| `Persistence/KnowledgeBaseStore.cs` | 知识库、资料、上传状态、分块和向量检索数据访问。 |
+| `Persistence/KnowledgeBaseStore.cs` | 知识库、资料、上传状态、分块和向量检索数据访问；并实现 `IKnowledgeBaseMaintenanceStore`，在一个事务内按「子表 → 父表」删除整个知识库。 |
+| `Domain/Knowledge/KnowledgeBaseDefaults.cs` | 默认知识库 ID 与名称常量：既是「未指定知识库」的兜底目标，也是唯一不允许删除的知识库。 |
+| `Domain/Knowledge/IKnowledgeBaseMaintenanceStore.cs` | 知识库整体删除端口与删除结果统计，避免应用层依赖持久化实现。 |
+| `Application/Knowledge/KnowledgeBaseDeletionService.cs` | 删除知识库：先拒默认库、再删数据库、最后删磁盘目录；两项顺序不可颠倒（文件系统不在事务里）。 |
 | `Persistence/KnowledgeChatStore.cs` | 知识库问答会话及消息持久化和历史管理（含引用与答案元数据列）。 |
 | `Persistence/KnowledgeChatCitations.cs` | 引用元数据模型（引用 / 检索上下文 / 答案元数据）与 JSON 编解码。 |
 | `Domain/Notes/NoteSource.cs` | 笔记引用的一条资料依据（资料 ID / 文件名 / 切片序号 / 相似度 / 片段）。 |
@@ -497,6 +500,7 @@ Embedding 与聊天模型采用分离配置：切换本地/云端聊天模型不
 | --- | --- | --- |
 | `GET` | `/api/health` | 检查 API 与 PostgreSQL 连接。 |
 | `GET` / `POST` | `/api/knowledge-bases` | 列出/创建知识库。 |
+| `DELETE` | `/api/knowledge-bases/{knowledgeBaseId}` | 删除知识库及其全部从属数据（资料、切片、向量、笔记、专题、问答历史），并清理磁盘资料目录；默认知识库拒绝删除（409）。 |
 | `GET` / `POST` | `/api/embedding-specs` | 列出/注册向量模型规格。 |
 | `POST` | `/api/embedding-specs/import-local` | multipart 导入本地 ONNX 模型（`modelFile` + `tokenizerFile`），自动识别维度并验证推理。 |
 | `POST` | `/api/embedding-specs/register-cloud` | 注册 OpenAI 兼容向量模型，注册前调用一次 `/embeddings` 验证。 |
