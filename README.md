@@ -330,6 +330,21 @@ git merge --no-ff dev
 git push github master:main
 ```
 
+分支名对不上、命令要记两套，容易敲错（`git push github master` 会凭空在远端多出一个 `master` 分支）。所以整套动作收进了脚本：
+
+```powershell
+# 先看一眼会做什么（只读，不改任何东西）
+powershell -ExecutionPolicy Bypass -File scripts\Merge-To-Main.ps1 -DryRun
+
+# 一键合并 dev -> main 并推送
+powershell -ExecutionPolicy Bypass -File scripts\Merge-To-Main.ps1
+
+# 顺带重打版本标签
+powershell -ExecutionPolicy Bypass -File scripts\Merge-To-Main.ps1 -TagName v1.0.2
+```
+
+脚本做的事：检查工作区干净 → `fetch` → 本地 `master` 快进到 `github/main` → `merge --no-ff dev` → 推送 `master:main` → 把 `dev` 也指到合并提交并推送（避免下次出现「假落后」）→ 可选重打标签。默认会列出待合并的提交并要求确认，`-Yes` 跳过；`-NoPush` 只做本地合并；本地 `master` 有未推送提交时默认拒绝继续。
+
 ### 1.0.1 更新要点
 
 这一版的主题是**"部署到公网也不至于裸奔"**：把桌面形态下"本机即可信"的假设，从服务端形态里彻底剥掉。
