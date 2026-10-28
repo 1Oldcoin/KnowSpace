@@ -48,12 +48,18 @@ function Get-GitHubToken {
 
     $previous = $env:GIT_TERMINAL_PROMPT
     $env:GIT_TERMINAL_PROMPT = '0'
+    $credentialFile = Join-Path $root ('.cred-' + [guid]::NewGuid().ToString('N') + '.tmp')
     try {
-        $input = "protocol=https`nhost=github.com`n`n"
-        $lines = ($input | git credential fill 2>$null)
+        # Piping a string into a native command mangles the newlines under PS 5.1, and
+        # `$input` is an automatic variable (assigning to it is a no-op) -- both make git
+        # answer "refusing to work with credential missing protocol field". Redirecting a
+        # real file is the reliable form.
+        [System.IO.File]::WriteAllText($credentialFile, "protocol=https`nhost=github.com`n`n")
+        $lines = (& cmd /c "git credential fill < `"$credentialFile`"" 2>$null)
     }
     finally {
         $env:GIT_TERMINAL_PROMPT = $previous
+        if (Test-Path $credentialFile) { Remove-Item $credentialFile -Force -ErrorAction SilentlyContinue }
     }
 
     $password = ($lines | Where-Object { $_ -match '^password=' })
