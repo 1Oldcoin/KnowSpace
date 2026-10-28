@@ -231,6 +231,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Test-McpE2E.ps1
 - 子进程/工具仍以当前用户身份运行，访问 `/mcp` 的 Agent 能读到的内容 = 该客户端被授予的范围，不是操作系统级隔离。
 - 审计不含请求正文，因此"谁搜了什么词"不会入库；如果需要，请在网关层另行加字段前先评估隐私影响。
 - 应用本身不终止 TLS。密钥是 Bearer 型凭据，**明文 HTTP 上等于公开**——云端必须由反向代理提供 HTTPS。
+- **请求必须是单条 JSON-RPC 消息**（`POST` + `application/json`）。批量数组、重复属性名、非 JSON 的 Content-Type 一律被网关拒绝（400 / 415）——这些在旧实现里会被当成"无需判定"而放行，属于越权面。
+- `/mcp` 校验 `Host` 与 `Origin`：反代后若对外域名与 `Mcp:OAuth:Issuer` / `Server:PublicBaseUrl` 不一致，需在 `Mcp:AllowedHosts` 里登记；浏览器类工具（如 MCP Inspector）的源要登记在 `Mcp:AllowedOrigins`，否则 403。
+- **受限客户端（配了知识库白名单）读不到私人对话**：`chat:read` 只覆盖知识库问答，分身 / 伴侣 / 导入来源需要"不限制知识库"的客户端才能看到。
+- 服务端形态（`Hosting:Profile=Server`）**不暴露** `local_*` 文件工具 —— 云上的"本机目录"是服务器的文件系统。
 
 ## 8. OAuth 2.1（可选主路径）
 
@@ -252,6 +256,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Test-McpE2E.ps1
 5. **`/oauth/token` 与 `/oauth/register` 有按来源 IP 的失败闸门**（与 `/mcp` 共用同一个 30 次/分钟 → 封 300 秒的窗口）。它们可以在无任何凭据的情况下被调用，所以必须限速；被封时返回 `429` + `error: temporarily_unavailable` + `Retry-After`。
 
 401 响应会带 `WWW-Authenticate: Bearer realm=…, resource_metadata="…/.well-known/oauth-protected-resource"`，支持 OAuth 的客户端据此自动走授权流程。
+
+6. **同意页的访问闸门（当前版本）**：`/oauth/authorize` 只接受两类来源 —— 回环地址（本机浏览器），或携带有效 `X-Api-Token`（`Server:ApiToken` / `MAF_SERVER_TOKEN`）的请求。浏览器本身加不了请求头，所以公网部署要由反向代理在完成自己的认证后注入该头；不注入就只能从服务器本机完成授权，或改用 `maf_` 密钥。账号登录 + MFA 见 [`MCP-REMOTE-DESIGN.md`](MCP-REMOTE-DESIGN.md) §3.2（Phase 1）。
 
 ---
 

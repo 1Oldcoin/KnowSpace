@@ -74,11 +74,16 @@ public static class ChatHistorySources
 }
 
 /// <summary>会话列表查询。来源为空表示"全部来源"。</summary>
+/// <param name="AllowedKnowledgeBaseIds">
+/// 非空表示"只允许这些知识库"（MCP 受限客户端的知识库白名单）。
+/// <c>null</c> 或空数组表示不限制。
+/// </param>
 public sealed record ChatSessionQuery(
     IReadOnlyList<string> Sources,
     Guid? KnowledgeBaseId,
     Guid? CompanionProfileId,
-    int Limit);
+    int Limit,
+    IReadOnlyList<Guid>? AllowedKnowledgeBaseIds = null);
 
 /// <summary>消息检索查询。<paramref name="Text"/> 为空时退化为"最近消息"。</summary>
 public sealed record ChatMessageQuery(
@@ -86,7 +91,8 @@ public sealed record ChatMessageQuery(
     Guid? KnowledgeBaseId,
     Guid? CompanionProfileId,
     string? Text,
-    int Limit);
+    int Limit,
+    IReadOnlyList<Guid>? AllowedKnowledgeBaseIds = null);
 
 /// <summary>
 /// 聊天历史的读取端口。实现放在 Infrastructure；Application 只依赖这个接口。

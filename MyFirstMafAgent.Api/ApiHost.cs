@@ -61,6 +61,15 @@ public static class ApiHost
         StartupTimeline.Sink = LogStartup;
         StartupTimeline.Mark("process arguments parsed");
 
+        // 在拉起数据库之前做：配置不安全就别浪费几十秒启动 PostgreSQL。
+        var hostProfile = HostProfileResolver.Resolve(builder.Configuration, urls);
+        SecurityPostureGuard.Enforce(
+            hostProfile,
+            SecurityPostureGuard.Evaluate(hostProfile, builder.Configuration, desktopSecurity),
+            LogStartup);
+        builder.Services.AddSingleton(hostProfile);
+        builder.Services.AddSingleton(desktopSecurity);
+
         HostBootstrap.ConfigureHttp(builder);
         builder.AddValidatedOptions();
 
@@ -113,7 +122,7 @@ public static class ApiHost
         builder.Services.AddAgentModule();
         builder.Services.AddPluginModule();
         builder.Services.AddJobsModule();
-        var mcp = builder.Services.AddMcpModule(builder.Configuration);
+        var mcp = builder.Services.AddMcpModule(builder.Configuration, hostProfile);
         builder.Services.AddBackgroundWorkers();
 
         var beforeBuild = StartupTimeline.Mark("service registration done");

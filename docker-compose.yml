@@ -45,6 +45,9 @@ services:
       # --- 身份与对外地址 ---
       # 保护 /api（openssl rand -hex 32）。置空 = /api 不鉴权。
       MAF_SERVER_TOKEN: "${MAF_SERVER_TOKEN:-}"
+      # 宿主形态：容器里必须显式 Server。Auto 只在"监听非回环地址"时才推断为 Server，
+      # 而 --urls 是 0.0.0.0，能推断出来；显式写死是为了让"漏配令牌就拒绝启动"始终生效。
+      Hosting__Profile: "Server"
       # 放行未鉴权的 /api/health，给 HEALTHCHECK / 监控探活用。
       Server__AllowAnonymousHealth: "true"
       # 只影响「一键复制」生成的 MCP 配置地址（不参与鉴权）。
@@ -114,6 +117,7 @@ services:
       PortablePostgres__Enabled: "false"
       ConnectionStrings__KnowledgeBase: "Host=db;Port=5432;Database=myfirstmafagent;Username=postgres;Password=${PG_PASSWORD:-postgres}"
       MAF_SERVER_TOKEN: "${MAF_SERVER_TOKEN:-}"
+      Hosting__Profile: "Server"
       Server__AllowAnonymousHealth: "true"
       Server__PublicBaseUrl: "${PUBLIC_BASE_URL:-}"
       Server__TrustForwardedHeaders: "${TRUST_FORWARDED_HEADERS:-false}"

@@ -38,6 +38,18 @@ public sealed class McpOptions
 
     /// <summary>网关允许读取的最大请求体字节数（需要读取工具参数才能做权限判定）。</summary>
     public int MaxRequestBodyBytes { get; set; } = 8 * 1024 * 1024;
+
+    /// <summary>
+    /// 允许调用 <c>/mcp</c> 的浏览器 Origin（如 <c>http://localhost:6274</c> 的 MCP Inspector）。
+    /// 带 Origin 头但不在此列表的请求一律 403；OAuth Issuer 与 Server:PublicBaseUrl 的源自动加入。
+    /// </summary>
+    public List<string> AllowedOrigins { get; set; } = [];
+
+    /// <summary>
+    /// 允许的 Host 头（不含端口）。回环名、OAuth Issuer 与 Server:PublicBaseUrl 的主机自动加入。
+    /// 防 DNS rebinding：攻击页面把自己的域名解析到 127.0.0.1 后，Host 仍是攻击者域名。
+    /// </summary>
+    public List<string> AllowedHosts { get; set; } = [];
 }
 
 public sealed class McpRemoteServerOptions

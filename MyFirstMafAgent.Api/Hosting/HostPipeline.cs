@@ -75,6 +75,9 @@ public static class HostPipeline
         // 桌面模式：本机令牌校验（仅 /api）与严格 CSP。控制台模式为无操作。
         app.UseDesktopSecurity(desktopSecurity);
 
+        // MCP 传输层：Host / Origin 白名单（防 DNS rebinding 与跨站调用），必须在鉴权之前。
+        app.UseMcpTransportGuard(mcp);
+
         // MCP 数据面：客户端密钥、启停、限流、工具准入与调用审计。
         app.UseAgentClientGate(mcp);
 

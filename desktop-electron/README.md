@@ -95,7 +95,7 @@ npm run dist:full
 npm run dist
 ```
 
-产物在 `publish\releases\Zhijian-<version>-setup.exe`（约 310 MB，未压缩的自包含 .NET 后端占大头）。
+产物在 `publish\releases\Zhijian-<version>-setup.exe`（约 283 MB，未压缩的自包含 .NET 后端占大头）。
 
 **命名分两层**（见 `electron-builder.yml`）：
 

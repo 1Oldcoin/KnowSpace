@@ -15,7 +15,10 @@ public sealed record McpServerRegistration(bool Enabled, string Path);
 /// </summary>
 public static class McpModule
 {
-    public static McpServerRegistration AddMcpModule(this IServiceCollection services, IConfiguration configuration)
+    public static McpServerRegistration AddMcpModule(
+        this IServiceCollection services,
+        IConfiguration configuration,
+        HostProfileInfo profile)
     {
         services.AddSingleton<McpClientRegistry>();
 
@@ -41,7 +44,7 @@ public static class McpModule
 
         if (enabled)
         {
-            services
+            var server = services
                 .AddMcpServer(options => options.ServerInfo = new Implementation
                 {
                     // 这是客户端（Cursor / Claude Desktop）工具列表里显示的名字，属于「用户可见的
@@ -51,9 +54,12 @@ public static class McpModule
                 })
                 .WithHttpTransport(options => options.Stateless = true)
                 .WithTools<KnowledgeMcpTools>()
-                .WithTools<LocalFileMcpTools>()
                 .WithTools<AvatarMcpTools>()
                 .WithTools<ChatHistoryMcpTools>();
+
+            // 服务端上的"本机目录"是服务器的文件系统，不能交给远程 Agent。
+            if (!profile.IsServer)
+                server.WithTools<LocalFileMcpTools>();
         }
 
         return new McpServerRegistration(enabled, path);
