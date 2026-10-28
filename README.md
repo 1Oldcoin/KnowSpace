@@ -316,6 +316,8 @@ powershell -ExecutionPolicy Bypass -File scripts\Publish-Release.ps1 -Version 1.
 | `main` | **稳定分支**，只放已验证可发布的代码 | 不直接提交；只接受从 `dev` 合并 |
 | `dev` | **开发分支**，日常改动都落在这里 | 所有提交先推这里，手工验证通过后再合并到 `main` |
 
+> 本地仓库的 `master` 跟踪远端的 `main`（历史原因），命令里用 `master:main` 显式指定推送目标。
+
 ```bash
 # 日常：改完推到 dev
 git checkout dev
@@ -323,7 +325,9 @@ git add -A && git commit -m "feat: ..."
 git push github dev
 
 # 验证没问题后，合并到 main
-git checkout main && git merge --no-ff dev && git push github main
+git checkout master
+git merge --no-ff dev
+git push github master:main
 ```
 
 ### 1.0.1 更新要点
