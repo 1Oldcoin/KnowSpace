@@ -180,6 +180,8 @@ MyFirstMafAgent/
 | `Persistence/*SchemaEntities.cs` | SqlSugar CodeFirst 表、列和普通索引映射。 |
 | `Persistence/PgVectorSql.cs` | 集中封装 pgvector 专属 SQL（扩展 DDL、余弦距离运算符、vector 类型转换），其余数据访问均走 SqlSugar 原生 API。 |
 | `Models/LocalOnnxEmbeddingService.cs` | 在 API 进程内加载 BGE ONNX 模型并生成归一化向量。 |
+| `Models/ModelEndpointAuthorization.cs` | OpenAI 兼容端点的 `Authorization` 头唯一出口：有密钥就用；无密钥 + 本机/内网端点补占位值 `local`（LM Studio / Ollama 不校验）；无密钥 + 公网端点直接抛中文异常，点名缺哪个配置项。避免“没填密钥”被远端 401 糊成“密钥填错”。 |
+| `Hosting/ModelEndpointWarnings.cs` | 启动期自检：聊天模型走公网端点却没配密钥时打 warning。必须在 `DatabaseInitializer` 之后调用 —— 界面里保存的模型配置存在数据库，启动中途才加载。 |
 | `Agents/KnowledgeAgent.cs` | 通过 Microsoft Agent Framework 调用聊天模型并组织 RAG 上下文。 |
 | `Chats/KnowledgeChatService.cs` | 组合历史消息、检索结果、Agent 回答和引用信息（含检索上下文与工具审计），并写入会话。 |
 

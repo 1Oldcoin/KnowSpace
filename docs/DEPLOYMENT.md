@@ -160,10 +160,15 @@ docker compose --profile external exec api bash /app/scripts/Test-IntegratedStac
 
 ### 6.2 Linux 裸机（不用 Docker）
 
-> **已打好的交付包**：`publish/Zhijian-linux-x64-1.0.1.tar.gz`（139.9 MB）。
-> 解开后是 `Zhijian-linux-x64/{app,deploy/linux,scripts,README-LINUX.md}`，
+> **产物是本地产物，不在仓库里**：`publish/Zhijian-linux-x64-1.0.1.tar.gz`（139.9 MB）是打包机上的
+> 构建结果，`publish/` 被 `.gitignore` 挡住，`git clone` 拿不到。要在新机器上部署，先按下文第 1 步
+> 自己发一次。解开 tar.gz 后是 `Zhijian-linux-x64/{app,deploy/linux,scripts,README-LINUX.md}`，
 > 里面那份 `README-LINUX.md` 是给测试人看的完整说明书（含命令、自检顺序、未验证清单）。
-> 包里 `app/` 就是下面第 1 步的产物，不用重新发布。
+>
+> 包内 `ExternalTools/pgSQL` 与 `ExternalTools/ffmpeg` **只有占位 README**：Linux 上这两个由 apt 提供，
+> 随包的 Windows 便携树是 370 MB 死重量，而且 Linux 的 PostgreSQL 二进制与发行版 ABI 绑定、
+> 官方二进制也不含 pgvector —— 拷一棵树过去反而启动失败。`install.sh` 会把
+> `PortablePostgres__BinDirectory` 指到 `/usr/lib/postgresql/17/bin`。
 
 ```powershell
 # 1. 发布（自包含，目标机不需要装 .NET）
@@ -178,6 +183,11 @@ sudo bash deploy/linux/install.sh --source /tmp/console-linux-x64
 产物布局：程序 `/opt/myfirstmafagent`、数据 `/var/lib/myfirstmafagent`、配置 `/etc/myfirstmafagent/myfirstmafagent.env`、单元 `deploy/linux/myfirstmafagent.service`。
 
 安装脚本会顺手生成随机数据库口令并写入 env（便携库默认口令是 `postgres`，等于没锁）。两个需要人拍板的项留给你：`Server__PublicBaseUrl` 与 `MAF_SERVER_TOKEN`。
+
+> **不经 `install.sh` 直接 `./Zhijian.Api` 会启动失败**：包里没有 pgSQL 二进制，
+> `PortablePostgresHost` 找不到 `postgres` 就抛 `FileNotFoundException`。手工运行至少要给
+> `PortablePostgres__BinDirectory` 与 `PortablePostgres__RootDirectory`，或者
+> `PortablePostgres__Enabled=false` + `ConnectionStrings__KnowledgeBase` 改用外部库。
 
 > 想让浏览器界面正常用，就不要设 `MAF_SERVER_TOKEN`（前端拿不到令牌，只能由反代注入 `X-Api-Token`）。只要服务只监听回环、自用，这是合理选择；一旦走公网，就必须设令牌 + 反代注入。
 

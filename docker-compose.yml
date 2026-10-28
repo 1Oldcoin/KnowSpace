@@ -20,6 +20,15 @@
 # Whisper 模型（141 MB ~ 3 GB）不随镜像分发：首次使用会按需下载到 maf-app-data 卷；
 # 离线环境把 Media__AutoDownloadWhisperModel 设为 false，再从「设置 → 语音转写」导入本地 ggml 文件。
 
+# 项目名必须显式固定。
+# 不写的话 compose 会拿**所在目录名**当项目名，卷名就变成 <目录名>_maf-app-data：
+# 把仓库克隆到 zhijian/ 与克隆到 KnowSpace/ 是两份互不相干的数据库，
+# 看起来像「数据丢了」，实际只是卷名不同。
+# 升级提醒：已有部署从「目录名」改成 zhijian 后，旧卷不会自动迁移，先备份再复制：
+#   docker volume create zhijian_maf-app-data
+#   docker run --rm -v <旧卷名>:/from -v zhijian_maf-app-data:/to alpine cp -av /from/. /to/
+name: zhijian
+
 services:
   # ════════════════════════════════════════════════════════════════
   # 一体模式（默认）
@@ -28,7 +37,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: myfirstmafagent:integrated
+    image: zhijian-api:integrated
     restart: unless-stopped
     ports:
       - "127.0.0.1:${APP_PORT:-5056}:5056"
@@ -93,7 +102,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: myfirstmafagent:integrated
+    image: zhijian-api:integrated
     restart: unless-stopped
     depends_on:
       db:

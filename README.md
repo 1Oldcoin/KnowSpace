@@ -26,6 +26,36 @@
 - **回答可追溯**。每条结论都附引用片段与相似度，音视频引用能直接跳到「第几分几秒」。
 - **能力可对外开放但受控**。外部 AI 工具通过 MCP 接入时，能精确限定「读哪些库、调哪些工具、每分钟几次」，并全量审计。
 
+### 检索是怎么做的（混合 RAG）
+
+问题不是「找相似的句子」，而是「既要看懂意思，也要一字不差地命中」。所以检索走的是**两路召回 → RRF 融合 → 重排 → 带引用生成**：
+
+```mermaid
+graph LR
+    Q["用户问题"] --> V["向量召回<br/>pgvector 余弦相似度"]
+    Q --> L["词法召回<br/>预分词 + PG 全文 ts_rank"]
+    V --> F["RRF 融合<br/>Σ 1/(k + rank)"]
+    L --> F
+    F --> R["重排<br/>词面覆盖率 + 融合名次/余弦先验"]
+    R --> C["带引用的回答<br/>片段 · 相似度 · 时间戳"]
+```
+
+| 环节 | 实现 | 为什么这么选 |
+| --- | --- | --- |
+| **向量召回** | pgvector 的 `vector` 列 + 余弦距离，查询向量由进程内 BGE ONNX 模型（`bge-small-zh-v1.5`）或外部 embedding 接口生成 | 负责「意思相近」：换个说法、同义词、跨语言表述也能召回 |
+| **词法召回** | 自研 CJK 分词写入 `kb_chunks.lexical_tokens`，PostgreSQL `to_tsvector('simple', …)` + GIN 表达式索引，按 `ts_rank` 排序 | 负责「字面必须出现」：产品编号、报错码、人名、罕见术语 —— 这些在向量空间里几乎不可分 |
+| **融合（RRF）** | `score(d) = Σ 1 / (k + rank_i(d))`，默认 `k = 60`；同一片段被两路同时召回时只保留一条，并标记来源 | **不**把余弦和 `ts_rank` 加权相加：两者量纲完全不同（余弦 0–1，`ts_rank` 通常只有 0.0x），任何线性权重都得按语料重新调参；RRF 只看排名，天然免疫量纲问题 |
+| **重排** | 在融合结果上叠加「词面覆盖率」，权重 `RerankLexicalWeight = 0.65`；送进重排的候选池默认 60 条 | RRF 只看名次不看内容，会把「词法排第 5、但正文确实完整回答了问题」的片段压在后面；放大候选池再重排才能把第 6 名救回来（实测 recall 0.9762 → 1.0000） |
+| **拒答** | `AbstainEnabled` 默认**关闭**，靠提示词约束模型回答「资料里没有」 | 实测这份语料上重排分数不可分（有答案最低 0.361、无答案最高 0.474），硬上阈值要误拒 16/42 条有答案的资料，代价比让模型自己说「没有」高得多 |
+
+所以「混合 RAG」在这里具体指：**向量 + 词法双路召回，用 RRF（Reciprocal Rank Fusion）融合成一个排名，再按词面覆盖率重排，最后把命中的原文片段连相似度一起交给模型作答**。
+
+几个工程约束值得知道：
+
+- **两路是串行执行的**，不是并发。同一个 `SqlSugarScope` 在一个请求上下文里共用一条连接，并发查询会抛 `NpgsqlOperationInProgressException`。
+- **检索模式可显式指定**：`hybrid`（纯 RRF，评估基线）、`vector`、`lexical`、`rerank`（融合 + 重排）。显式传 `hybrid` 不会被配置偷偷升级成重排，否则评估基线会随线上配置漂移。
+- **跨模型绝不复用向量**：每个索引绑定向量模型的指纹与维度，指纹不一致时直接报错，避免不同向量空间混用导致「看起来能搜、结果全错」。
+
 ## 功能一览
 
 | 模块 | 能力 |
@@ -62,7 +92,7 @@ graph TD
 
 **关键设计取舍**
 
-- **后端是一体的**：API + 便携 PostgreSQL + Embedding 模型 + ffmpeg 打成一个可分发单元。装完即用，不需要用户自己装数据库。
+- **后端是一体的**：API + 零部件 + Embedding 模型打成一个可分发单元（Windows 上含便携 PostgreSQL 与 ffmpeg；Linux 上这两个由系统包提供，见「方式三」）。装完即用，不需要用户自己装数据库。
 - **Electron 只是壳**：只负责窗口、端口分配、令牌注入与子进程生命周期，不含业务逻辑。同一份后端可以跑成桌面版、控制台版或容器。
 - **单一组合根**：桌面宿主与控制台宿主共用 `ApiHost.BuildAsync`，避免两套 HTTP 行为。
 - **启动有指纹快路径**：数据库结构未变时跳过全部 DDL 与目录查询，后端就绪从 3.8–5.1s 降到 1.4s 左右。
@@ -91,12 +121,23 @@ docker compose up -d --build   # 一个容器：API + 前端 + PostgreSQL 17 + p
 
 浏览器打开 <http://localhost:5056>。首启动要 `initdb` + 全量建表，约 30~90 秒（`docker compose logs -f app` 能看到进度）。
 
+`LLM_API_KEY` **必须填**（DeepSeek 或任何 OpenAI 兼容端点）。留空时上传、切块、向量化都正常，只有问答与摘要会在调用时报 401 —— 启动日志里也会有一条 warning 直接点名缺哪个配置项。
+
 两种形态，二选一：
 
 | 命令 | 形态 | 说明 |
 | --- | --- | --- |
 | `docker compose up -d --build` | **一体（默认）** | API + 前端 + PG17 + pgvector 全在一个容器，数据在 `maf-app-data` 卷 |
 | `docker compose --profile external up -d --build` | 外部库 | `api` + `db`（pgvector 镜像）两个容器，适合要独立备份/扩容的场景 |
+
+镜像名是 `zhijian-api:integrated`；compose **项目名固定为 `zhijian`**（`docker-compose.yml` 顶部的 `name:`），所以卷叫 `zhijian_maf-app-data`，跟你 clone 到哪个目录无关。
+
+> 从旧版本升级：如果之前的卷名是 `<目录名>_maf-app-data`，固定项目名后新卷是空的，数据看起来「丢了」。先备份再复制：
+>
+> ```bash
+> docker volume create zhijian_maf-app-data
+> docker run --rm -v <旧卷名>:/from -v zhijian_maf-app-data:/to alpine cp -av /from/. /to/
+> ```
 
 改回内部库 ⇄ 外部库不用重建镜像：只改 `PortablePostgres__Enabled` 与 `ConnectionStrings__KnowledgeBase` 两个环境变量。
 
@@ -110,22 +151,46 @@ docker compose exec app bash /app/scripts/Test-IntegratedStack.sh --pg-password 
 
 ### 方式三：Linux 裸机（systemd，不用 Docker）
 
-仓库里有打好的包 `publish/Zhijian-linux-x64-1.0.1.tar.gz`（139.9 MB，**自包含**，目标机不用装 .NET）：
+Linux 只有**一份**产物：一个自包含的 tar.gz（目标机不需要装 .NET）。它是 `publish/` 下的**构建产物**，
+`publish/` 被 `.gitignore` 挡在仓库外，所以 clone 下来**没有**这个文件，得自己打一次：
+
+```powershell
+# 在 Windows 开发机上执行（需要 .NET 10 SDK + Node 22）
+.\scripts\Publish-Portable.ps1 -Target console -Runtime linux-x64
+# 产物：publish\console-linux-x64\（约 310 MB）
+```
+
+把那个目录拷到服务器后：
 
 ```bash
-tar xzf Zhijian-linux-x64-1.0.1.tar.gz -C /tmp/
-sudo bash /tmp/Zhijian-linux-x64/deploy/linux/install.sh --source /tmp/Zhijian-linux-x64/app
+sudo ./deploy/linux/install.sh --source /tmp/console-linux-x64
 ```
 
 装到 `/opt/myfirstmafagent`，数据在 `/var/lib/myfirstmafagent`，配置在 `/etc/myfirstmafagent/myfirstmafagent.env`。
-包里的 `README-LINUX.md` 是完整说明书。
+`deploy/linux/README-LINUX.md` 是完整说明书（含「这台机器上没验证过」清单）。
 
 > **Linux 只有这一份产物**：前端是 `wwwroot/` 里的静态文件，由 API 自己托管，浏览器打开就是完整界面，
 > 不存在「有 UI 版 / 无 UI 版」的区分。Electron 壳只服务 Windows 安装包。
 
-**Linux 裸机**（不用 Docker）：先发布 `-Target console -Runtime linux-x64`，再拷到服务器执行 `sudo bash deploy/linux/install.sh --source /tmp/console-linux-x64`；它会装 PostgreSQL 17 + pgvector、建服务账号、装 systemd 单元并跑自检。细节见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) §6。
+两件必须知道的事：
 
-### 方式三：从源码开发
+1. **包里不带 pgSQL / ffmpeg 二进制**（只有占位 README）。`install.sh` 会用 apt 装 `postgresql-17` +
+   `postgresql-17-pgvector`，并把 `PortablePostgres__BinDirectory` 指到 `/usr/lib/postgresql/17/bin`。
+   原因是 Linux 的 PostgreSQL 二进制与发行版 ABI 绑定（libicu / libssl 的 soname 各不相同），
+   而且官方发布的二进制**不含 pgvector** —— 拷一棵树过去反而启动失败。
+2. **不跑 `install.sh` 而直接 `./Zhijian.Api` 会启动失败**：便携库目录是空的，
+   `PortablePostgresHost` 找不到 `postgres` 二进制就会抛 `FileNotFoundException`。
+   手工跑至少要给这两个环境变量：
+
+   ```bash
+   export PortablePostgres__BinDirectory=/usr/lib/postgresql/17/bin
+   export PortablePostgres__RootDirectory=/var/lib/myfirstmafagent
+   ./Zhijian.Api --urls http://127.0.0.1:5056
+   ```
+
+   或者干脆关掉内置库、改用外部 PostgreSQL（`PortablePostgres__Enabled=false` + `ConnectionStrings__KnowledgeBase`）。
+
+### 方式四：从源码开发
 
 前置：**.NET 10 SDK**、**Node.js 22.18+ 或 24.12+**
 
@@ -176,9 +241,12 @@ git clone https://github.com/1Oldcoin/KnowSpace.git
 powershell -ExecutionPolicy Bypass -File scripts\Download-ExternalTools.ps1 -Target ffmpeg
 ```
 
-缺任何一个都不会导致启动失败：ffmpeg 缺失时视频功能报可读错误，便携数据库缺失时回落到外部 PostgreSQL 连接串。
+缺了会怎样，两种情况不一样：
 
-> **运行时数据也入库了**：`MyFirstMafAgent.Api/App_Data/` 里的便携 PostgreSQL 数据目录（`pgdata/`，已建好表结构与扩展）与 `uploads/` 一并提交，clone 后初始化即用，不用自己建库。只有运行期临时文件（`postmaster.pid`、`pglogs/`、`pg_stat_tmp/`）被忽略。因为本机 `core.autocrlf=true`，`.gitattributes` 已把 `App_Data/` 与 `ExternalTools/` 标记为 `-text`，避免换行改写把数据库弄坏。
+- **ffmpeg 缺失**：只是视频/音频解析不可用，日志里有可读错误，其余功能正常（Linux 上由 apt 提供，`Dockerfile` 也会删掉随包副本改用 apt 的）。
+- **便携 PostgreSQL 缺失**：**启动会失败** 并抛 `FileNotFoundException`（`PortablePostgresHost` 找不到 `postgres` 二进制）。此时要么补回 `ExternalTools/pgSQL/<rid>/` 整棵树，要么配 `PortablePostgres__BinDirectory` 指向系统安装的 `bin`，要么关掉内置库改用外部连接串（`PortablePostgres__Enabled=false`）。
+
+> **运行时数据不入库**：`App_Data/pgdata`（数据库文件）与 `App_Data/uploads`（上传的资料）都不在版本库里 —— 跑一次开发环境就会产生上百个二进制变更，而且 `pgdata` 与 PostgreSQL 大版本绑死（PG18 打不开 PG17 的数据目录）。**首次启动会自动 `initdb` + 全量建表**，clone 下来直接 `dotnet run` 就是一个干净的库，不需要靠提交数据库来做到「开箱即用」。`.gitattributes` 仍把 `App_Data/` 与 `ExternalTools/` 标成 `-text`，防止本机 `core.autocrlf=true` 改写二进制。
 
 ## 把知识库接给外部 AI（MCP）
 
@@ -246,6 +314,7 @@ powershell -ExecutionPolicy Bypass -File scripts\Publish-Release.ps1 -Version 1.
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | 技术债、待做功能、明确不做的事（留档避免反复讨论） |
 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | 跨平台部署口径：三种交付形态、平台矩阵、原生工具解析规则 |
 | [`docs/CLOUD-DEPLOYMENT.md`](docs/CLOUD-DEPLOYMENT.md) | **云服务器部署与 MCP 接入**：安全清单、Docker/systemd/Windows 三种形态、密钥生命周期 |
+| [`docs/DOCKER-VERIFICATION-2026-10-27.md`](docs/DOCKER-VERIFICATION-2026-10-27.md) | 一次真实 Docker 环境验收的完整记录（已脱敏）：跑通了什么、踩了什么坑、修了什么 |
 | [`docs/MCP-ACCESS.md`](docs/MCP-ACCESS.md) | MCP 接入速查：三步接入、能力词表、排错 |
 | [`docs/MCP-INTEGRATION-MANUAL.md`](docs/MCP-INTEGRATION-MANUAL.md) | MCP 两个方向（服务端 / 客户端）的完整说明书 |
 | [`docs/JOBS.md`](docs/JOBS.md) | 任务中心：并发、配额、租约、重试与事件流 |

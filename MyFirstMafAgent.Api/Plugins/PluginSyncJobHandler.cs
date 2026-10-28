@@ -5,6 +5,7 @@ using MyFirstMafAgent.Api.Application.Jobs;
 using MyFirstMafAgent.Api.Application.Plugins;
 using MyFirstMafAgent.Api.Domain.Jobs;
 using MyFirstMafAgent.Api.Options;
+using Npgsql;
 
 namespace MyFirstMafAgent.Api.Plugins;
 
@@ -121,11 +122,45 @@ public sealed class PluginSyncJobFeeder(
     /// <summary>每轮最多补投多少条，避免一次积压几百个游标时把一轮调度拖长。</summary>
     private const int BatchSize = 50;
 
+    /// <summary>
+    /// PostgreSQL <c>undefined_table</c>（42P01）。写成字面量而不是依赖
+    /// <c>PostgresErrorCodes</c>，避免 Npgsql 版本差异导致编译差异。
+    /// </summary>
+    private const string UndefinedTable = "42P01";
+
+    /// <summary>
+    /// <c>plugin_sync_states</c> 还没建表时的标记，只记一次日志。
+    /// <para>
+    /// 这是「全新数据库首次启动」的**确定性**竞态，不是偶发故障：这份表由
+    /// <c>PluginModule.QueueInitialization</c> 在「主机已监听之后」的后台初始化里建，
+    /// 而 <c>JobScheduler</c> 的第一轮补投几乎同时发生（<c>lastFedAt = MinValue</c>）。
+    /// 表建好后下一轮就恢复正常，所以不需要重试逻辑，只需要不再刷 ERROR。
+    /// </para>
+    /// </summary>
+    private bool _missingSchemaLogged;
+
     public async Task<int> FeedAsync(CancellationToken cancellationToken)
     {
         if (!options.Value.ScheduledSyncEnabled) return 0;
 
-        var scheduled = await syncStates.ListScheduledAsync(BatchSize, cancellationToken).ConfigureAwait(false);
+        IReadOnlyList<PluginSyncState> scheduled;
+        try
+        {
+            scheduled = await syncStates.ListScheduledAsync(BatchSize, cancellationToken).ConfigureAwait(false);
+        }
+        catch (PostgresException exception) when (exception.SqlState == UndefinedTable)
+        {
+            if (!_missingSchemaLogged)
+            {
+                _missingSchemaLogged = true;
+                logger.LogInformation(
+                    "plugin_sync_states 尚未建表，本轮跳过定时同步补投"
+                    + "（插件初始化在主机就绪后后台进行，建表完成后会自动恢复）。");
+            }
+
+            return 0;
+        }
+
         if (scheduled.Count == 0) return 0;
 
         var now = DateTimeOffset.UtcNow;

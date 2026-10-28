@@ -201,6 +201,7 @@
 | 任务队列多机领取 / 插件远程主机 / 跨机租约 | 原 P3-4 | 没有多机场景 |
 | TypeScript / Python 插件 SDK | 原 P3-5 | 协议已经语言无关（JSON-RPC over stdio），跨语言作者直接照协议写即可；D-2 的 MCP 兼容更重要 |
 | 任务 DAG 与批量编排 | 原 P3-6 | 现有"优先级 + 类型配额"够用 |
+| 单独的「镜像 + 打包数据库二进制」仓库 | — | 2026-10-28 决定。三条理由：(1) git 不存二进制，每次更新都是一个新 blob、只涨不缩，已经因为 ffmpeg 撞过一次 LFS 上限；(2) Linux 的 PostgreSQL 二进制与发行版 ABI 绑定（同一份 gnu 构建在 Debian 12 能跑、Ubuntu 24.04 因 libicu72 缺失直接加载失败），而且官方二进制**不含 pgvector**，`CREATE EXTENSION vector` 会抛异常 —— 要维护的不是一个包，而是 N 个发行版各一份；(3) 数据库由 `install.sh`（apt 装 PG17 + pgvector）或 `--profile external` 接外部库已经能覆盖。**分发改走**：镜像推 GHCR、离线包（`.deb` / `docker save` 的 tar）挂 GitHub Releases 附件 |
 
 ---
 
@@ -208,6 +209,7 @@
 
 | 项 | 说明 |
 | --- | --- |
+| **`App_Data` 已移出版本库（2026-10-28）** | `pgdata`（1554 个文件）+ `uploads`（55 个文件）共约 75 MB 不再跟踪，`.gitignore` 用 `**/App_Data/pgdata/`、`**/App_Data/uploads/` 挡住。理由：跑一次开发环境就产生上百个二进制变更，每次 PR 的 diff 里都混着无法 review 的差异；`pgdata` 又与 PostgreSQL 大版本绑死（PG18 打不开 PG17 的数据目录）。首次启动自动 `initdb` + 全量建表，不需要靠提交数据库来做到"开箱即用"。**历史里的 blob 仍在** —— 真要压缩体积需要 `git filter-repo` 重写历史，代价是所有 tag 失效、所有人重新 clone，目前不值得 |
 | **审计/行为表没有保留期（已决定暂不做，2026-10-27）** | `agent_client_calls`、`oauth_auth_events`、`avatar_feed_entries` 三张表**只进不出**——代码里只有写入与查询端点，没有任何删除/清理逻辑。单机桌面版无害（每天几百行，十年也就百万级）；**云端多租户是唯一可能堆到亿级的地方**。将来要做时照抄 `JobScheduler` 里 `jobs` 的 purge 套路即可：加配置 `Server:AuditRetentionDays`（默认 90，`0` = 永不清理）+ 一个日级后台任务分批 `DELETE ... WHERE occurred_at < cutoff LIMIT n`。**触发线（可测，不用猜）**：任一张表 > 1000 万行，或 `pg_relation_size` > 10 GB；到那时同批一起做按月声明式分区，把清理从 `DELETE` 换成 `DROP PARTITION`（避免上亿死元组压死 autovacuum）。取舍与量级估算见 `ARCHITECTURE.md` §5.3 |
 | `publish/` 目录 | `console` / `desktop` / `releases` 都是构建产物，可随时删除重建（安装包约 310 MB） |
 | 根目录临时文件 | `probe-out.txt`、`probe-out2.txt`、`rowdump.txt`、`api.ts` 是早期排查残留，确认无用可删 |

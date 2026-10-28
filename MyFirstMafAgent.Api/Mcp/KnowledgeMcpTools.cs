@@ -43,8 +43,8 @@ public sealed class KnowledgeMcpTools(
     [McpServerTool(Name = "list_documents")]
     [Description("列出指定知识库中的资料，包括文件名、状态、类型和摘要。不传 knowledgeBaseId 时使用默认知识库。")]
     public async Task<string> ListDocumentsAsync(
-        [Description("知识库 ID，可留空")] string? knowledgeBaseId,
-        CancellationToken cancellationToken)
+        [Description("知识库 ID，可留空（默认知识库）")] string? knowledgeBaseId = null,
+        CancellationToken cancellationToken = default)
     {
         var id = ParseKnowledgeBaseId(knowledgeBaseId);
         var documents = await store.ListDocumentsAsync(id, cancellationToken);

@@ -802,6 +802,27 @@ Embedding 使用 `Microsoft.ML.OnnxRuntime` 和 `Microsoft.ML.Tokenizers` NuGet 
 
 **诚实的边界**：不导出对话历史（`sourceSessionId` 导入后清空）；"分享到市场"目前只是"把 zip 发出去"，托管与一键安装属于 `docs/ROADMAP.md` 的 D-3。另外 `DELETE /api/knowledge-bases/{id}` 目前不存在（只能删资料与笔记），清理验证用的一次性库只能重建数据库。
 
+### 9.14 容器化验收后修掉的两处缺陷
+
+外部同事在真实 Docker 环境跑通全链路（记录见 `docs/DOCKER-VERIFICATION-2026-10-27.md`）后，暴露出两个**不会导致启动失败、只会静默降级**的问题。它们的共同教训是：日志里出现的错误信息如果指不出"该改哪个配置项"，就等于没提供信息。
+
+| 缺陷 | 表象 | 根因 | 修法 |
+| --- | --- | --- | --- |
+| 每次全新库首次启动刷 4 条 `plugin_sync_states does not exist` | 日志 4 条 `ERROR`（每个调度 lane 一条），之后自愈 | 建表在前、读表在后的顺序**没有保证**：`plugin_sync_states` 由 `PluginModule.QueueInitialization` 在"主机已监听之后"的后台初始化里建，而 `JobScheduler` 首轮补投几乎同时发生（`lastFedAt = MinValue`） | `PluginSyncJobFeeder.FeedAsync` 把 `42P01` 视为"表还没建好"，返回 0 并只记一次 `Information`。不加重试——下一轮本来就会恢复 |
+| 未配 `Llm:Online:ApiKey` 时远端回 `Your api key: ****ocal is invalid` | 上传、切块、向量化都正常，只有摘要/问答失败；报错内容形似密钥泄漏或填错 | `OpenAiCompatibleModelClient` / `OpenAiCompatibleEmbeddingGenerator` 都有 `key = IsNullOrWhiteSpace(apiKey) ? "local" : apiKey` 的兜底，本意是照顾 LM Studio 这类不校验密钥的本机服务，但对**公网端点**一视同仁 | 新增 `Models/ModelEndpointAuthorization`：公网端点缺密钥直接抛中文异常（点名缺哪个配置项 + 三种填法）；本机/内网端点维持占位值。另加启动期 `WarnMissingLlmApiKey`，不必等第一次提问才发现 |
+
+**为什么不用 `ValidateOnStart` 拦"密钥为空"**：密钥可以在界面「设置 → 模型」里保存，而那份配置存在数据库、由 `DatabaseInitializer` 在启动中途才加载进 `ILlmSettingsAccessor`。启动校验只看得到 `appsettings`，会把"密钥在库里"的部署全部误杀。所以判断放在两处：启动日志警告（读的是已合并后的配置）与调用时抛异常。
+
+**顺带对齐的三处口径**（都是"文档说一套、代码做一套"）：
+
+| 项 | 之前 | 现在 |
+| --- | --- | --- |
+| `list_documents` 的 `knowledgeBaseId` | 描述写"可留空"，实际没有默认值 → MCP SDK 当必填，不传就 `ArgumentException` | 加 `= null`（`CancellationToken` 同时补默认值以满足 C# 可选参数顺序），与 `search_knowledge_base` / `upload_document` 一致 |
+| compose 项目名 | 未固定，卷名跟着**所在目录名**走 | `docker-compose.yml` 顶部固定 `name: zhijian`；镜像名统一为 `zhijian-api:integrated`。换目录 clone 不再"丢数据" |
+| `App_Data` 的版本跟踪 | `pgdata`（1554 个文件）+ `uploads` 一并提交，约 75 MB | 移出版本库（`**/App_Data/pgdata/`、`**/App_Data/uploads/`）。首次启动自动 `initdb` + 全量建表；跑一次开发环境不再产生上百个二进制 diff |
+
+> 历史里那 75 MB 的 blob 不会被"从 HEAD 删除"消掉。真要压缩仓库体积需要 `git filter-repo` 重写历史——代价是所有人重新 clone、所有 tag 失效，目前不值得做。
+
 ## 10. Function Calling 与 MCP
 
 聊天模型不再依赖具体 SDK 的 Agent 抽象，而是在 API 内实现标准的 OpenAI `tools` / `tool_calls` 循环（`Agents/ToolCallingAgent.cs` + `Models/OpenAiCompatibleModelClient.cs` 的 `CompleteChatWithToolsAsync`），因此任何兼容 Chat Completions 的本地或在线模型都能使用；模型不支持 `tools` 时自动退化为普通问答。

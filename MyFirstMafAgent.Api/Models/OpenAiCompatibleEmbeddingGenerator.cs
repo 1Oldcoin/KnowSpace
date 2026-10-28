@@ -1,4 +1,3 @@
-using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using MyFirstMafAgent.Api.Domain.Knowledge;
@@ -55,8 +54,16 @@ public sealed class OpenAiCompatibleEmbeddingGenerator : IEmbeddingGenerator
             : new Uri(baseUri.AbsoluteUri.TrimEnd('/') + "/embeddings");
 
         var request = new HttpRequestMessage(HttpMethod.Post, uri);
-        var key = string.IsNullOrWhiteSpace(_spec.Runtime.ApiKey) ? "local" : _spec.Runtime.ApiKey;
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
+
+        // 与聊天模型同一套规则：公网端点缺密钥就报清楚，别发占位密钥去撞 401。
+        ModelEndpointAuthorization.Apply(
+            request,
+            uri,
+            _spec.Runtime.ApiKey,
+            missingSetting: $"向量规格「{_spec.Name}」的 ApiKey",
+            remedy: "界面「设置 → 索引 / 向量模型」里给该规格填上密钥；" +
+                    "离线场景改用进程内 ONNX 规格（bge-small-zh-v1.5，不调外部接口）。");
+
         return request;
     }
 }

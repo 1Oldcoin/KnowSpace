@@ -1,4 +1,3 @@
-using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using MyFirstMafAgent.Api.Agents.Tooling;
@@ -197,8 +196,15 @@ public sealed class OpenAiCompatibleModelClient(
             ? baseUri
             : new Uri(baseUri.AbsoluteUri.TrimEnd('/') + "/" + resource);
         var request = new HttpRequestMessage(HttpMethod.Post, uri);
-        var key = string.IsNullOrWhiteSpace(apiKey) ? "local" : apiKey;
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
+
+        // 缺密钥且端点在公网时抛中文异常；内网/回环继续用占位密钥（本机模型不校验）。
+        ModelEndpointAuthorization.Apply(
+            request,
+            uri,
+            apiKey,
+            missingSetting: "所选模型端点的 ApiKey（Llm:Online:ApiKey 或 Llm:Local:ApiKey）",
+            remedy: "环境变量 Llm__Online__ApiKey=<你的密钥>，或在界面「设置 → 模型」里填入并保存。");
+
         return request;
     }
 

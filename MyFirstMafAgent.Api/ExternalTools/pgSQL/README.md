@@ -1,5 +1,20 @@
 # 便携 PostgreSQL（随包分发）
 
+> **Linux / macOS 交付包里只有这个文件，没有任何二进制。**
+> 不是打包时漏了：Linux 上 PostgreSQL 由系统包提供（`install.sh` 会 apt 装
+> `postgresql-17` + `postgresql-17-pgvector`，并把 `PortablePostgres__BinDirectory` 指到
+> `/usr/lib/postgresql/17/bin`）；Docker 镜像同理。
+> 原因有两个，都是硬的：
+> 1. **ABI 绑定发行版**。同一份 `x86_64-unknown-linux-gnu` 构建在 Debian 12 能跑，到
+>    Ubuntu 24.04 会因为缺 `libicu72.so.72` 直接加载失败（它是 `libicu74`）。
+> 2. **官方二进制不含 pgvector**。缺 `lib/vector.so` 与 `share/extension/vector.control` 时
+>    `CREATE EXTENSION vector` 会抛异常，而 `PortablePostgresHost.EnableVectorExtensionAsync`
+>    把它当成致命错误（知识库检索强依赖向量索引）—— 启动直接失败，而不是降级。
+>
+> 所以 Linux 上如果**不经 `install.sh` 直接跑** `./Zhijian.Api`，必须手工给
+> `PortablePostgres__BinDirectory` 与 `PortablePostgres__RootDirectory`，
+> 或者 `PortablePostgres__Enabled=false` + `ConnectionStrings__KnowledgeBase` 改用外部库。
+
 这个目录**不是**源码，是随应用分发的 PostgreSQL 二进制。`PortablePostgresHost` 在
 `ConnectionStrings:KnowledgeBase` 留空时用它启动本地数据库：`initdb` 建集群 → `pg_ctl start`
 → 建库 → `CREATE EXTENSION vector`；应用退出时 `pg_ctl stop -m fast`。**数据库的整个生命周期

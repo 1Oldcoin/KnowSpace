@@ -27,6 +27,26 @@ Zhijian-linux-x64/
 注意：`ExternalTools/pgSQL` 与 `ExternalTools/ffmpeg` **不在包里**（只有 README 留着）。
 Linux 上这两个都由 apt 提供，包里那份是 Windows 专用的 370 MB 死重量。
 
+> 这不是为了省体积才砍的，是**砍不掉的理由**：Linux 的 PostgreSQL 二进制与发行版 ABI 绑定
+> （同一份 gnu 构建在 Debian 12 能跑、Ubuntu 24.04 因缺 `libicu72.so.72` 直接加载失败），
+> 而且官方二进制**不含 pgvector** —— 缺 `lib/vector.so` 时 `CREATE EXTENSION vector` 会抛异常，
+> `PortablePostgresHost` 把它当致命错误，启动直接失败而不是降级。所以 `install.sh` 走 apt，
+> 并把 `PortablePostgres__BinDirectory` 指到 `/usr/lib/postgresql/17/bin`。
+
+> ⚠️ **不要绕过 `install.sh` 直接 `./app/Zhijian.Api`**：包里没有 pgSQL 二进制，
+> `PortablePostgresHost` 找不到 `postgres` 会抛 `FileNotFoundException`，进程起不来。
+> 确实要手工跑，至少给这两个环境变量：
+>
+> ```bash
+> export PortablePostgres__BinDirectory=/usr/lib/postgresql/17/bin
+> export PortablePostgres__RootDirectory=/var/lib/myfirstmafagent
+> ./app/Zhijian.Api --urls http://127.0.0.1:5056
+> ```
+>
+> 或者关掉内置库改用外部 PostgreSQL：`PortablePostgres__Enabled=false` +
+> `ConnectionStrings__KnowledgeBase=Host=...;Database=...;Username=...;Password=...`
+> （外部库需自行装好 pgvector）。
+
 > ⚠️ **解压后先补可执行位**：这个包是在 Windows 上打的，`Zhijian.Api`、`install.sh`、
 > `Test-IntegratedStack.sh` 都会是 `0644`。`install.sh` 自己会 `chmod 0755`，所以走路线 B 不用管；
 > 但如果你想不经安装脚本直接跑 `./app/Zhijian.Api`，先执行：

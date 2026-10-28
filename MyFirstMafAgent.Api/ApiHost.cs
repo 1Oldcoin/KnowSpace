@@ -144,6 +144,10 @@ public static class ApiHost
         await DatabaseInitializer.InitializeAsync(app, CancellationToken.None);
         StartupTimeline.Step("database schema ready", beforeSchema);
 
+        // 库里的模型配置此时已经加载完，判断「公网端点缺密钥」才不会误报。
+        app.WarnMissingLlmApiKey();
+
+
         // 插件在数据库就绪后启动：单个插件失败不影响核心。
         // 这段曾阻塞 Kestrel 监听（插件含 AppContainer 启动与 30s 握手超时），
         // 现在由 PluginModule 自己挪到「主机已监听」之后，不再占用首屏时间。
