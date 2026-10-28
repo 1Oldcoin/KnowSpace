@@ -1,4 +1,4 @@
-# 校验 README.md 与 docs/*.md 中的相对链接是否存在。
+﻿# 校验 README.md 与 docs/*.md 中的相对链接是否存在。
 # 用法：powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Check-DocLinks.ps1
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -16,6 +16,11 @@ try {
         $dir = Split-Path $file -Parent
         if ([string]::IsNullOrEmpty($dir)) { $dir = '.' }
         $text = [IO.File]::ReadAllText((Resolve-Path $file))
+
+        # Inline code and fenced blocks contain examples such as [2024](url); strip them
+        # so the checker only looks at real markdown links.
+        $text = [regex]::Replace($text, '(?s)```.*?```', '')
+        $text = [regex]::Replace($text, '`[^`\r\n]*`', '')
 
         foreach ($match in [regex]::Matches($text, '\[[^\]]*\]\(([^)]+)\)')) {
             $link = $match.Groups[1].Value.Trim()

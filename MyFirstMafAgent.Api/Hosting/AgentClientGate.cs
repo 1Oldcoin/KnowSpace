@@ -133,18 +133,55 @@ public static class AgentClientGate
         var throttle = services.GetRequiredService<AgentAuthThrottle>();
         var callLog = services.GetRequiredService<IAgentCallLogStore>();
 
-        // ── 1. 协议探测（鉴权之前）──
-        // 只偷看 ≤64KiB 的 JSON 请求体，读后回卷；失败不影响后续处理。
-        var peek = await McpRequestPeekReader.TryPeekAsync(context, context.RequestAborted);
+        // ── 1. 解析请求体（鉴权之前）──
+        // 结果同时用于「discover 免认证判定」与「工具准入」，只有一份解析、一个结论。
+        var peek = await McpRequestPeekReader.TryPeekAsync(
+            context, options.MaxRequestBodyBytes, context.RequestAborted);
         sample.Method = peek.Method;
         sample.ProtocolVersion = peek.ProtocolVersion;
         sample.Era = peek.Era;
 
-        // ── 2. server/discover 预认证放行 ──
+        // ── 2. 传输层拒绝（fail-closed）──
+        // 解析不出结论就拒绝，不再"当作无需判定"放行：改配置或换客户端都能修，静默越权不能。
+        switch (peek.Status)
+        {
+            case McpBodyStatus.NotJson:
+                await WriteErrorAsync(context, null, -32600,
+                    $"Content-Type 必须是 application/json（{peek.Error}）。",
+                    StatusCodes.Status415UnsupportedMediaType, oauthContext);
+                return;
+
+            case McpBodyStatus.TooLarge:
+                await WriteErrorAsync(context, null, -32600,
+                    $"请求体超过 {options.MaxRequestBodyBytes} 字节上限。",
+                    StatusCodes.Status413PayloadTooLarge, oauthContext);
+                return;
+
+            case McpBodyStatus.Malformed:
+                await WriteErrorAsync(context, null, -32700, $"请求体不是合法的 JSON-RPC 消息：{peek.Error}",
+                    StatusCodes.Status400BadRequest, oauthContext);
+                return;
+
+            case McpBodyStatus.Unreadable:
+                await WriteErrorAsync(context, null, -32700, "请求体读取失败。",
+                    StatusCodes.Status400BadRequest, oauthContext);
+                return;
+        }
+
+        if (peek.IsBatch)
+        {
+            // 批量请求只解析第一条就判定，等于给「第二条越权」留了口子；直接不支持。
+            await WriteErrorAsync(context, null, -32600,
+                "不支持 JSON-RPC 批量请求，请逐条发送。",
+                StatusCodes.Status400BadRequest, oauthContext);
+            return;
+        }
+
+        // ── 3. server/discover 预认证放行 ──
         // 2026-07-28 移除了 initialize 握手，客户端第一件事就是问「你支持哪些版本」。
         // 这个请求不碰任何业务数据，只返回静态能力，因此不需要凭据；
         // 真正的数据面（tools/*）仍然要过认证。
-        if (string.Equals(peek.Method, RequestMethods.ServerDiscover, StringComparison.Ordinal))
+        if (peek.IsSingleServerDiscover)
         {
             sample.Authenticated = true;
             await next();
@@ -243,7 +280,7 @@ public static class AgentClientGate
         context.Items[ClientItemKey] = client;
 
         // ── 4. 工具准入 + 审计 ──
-        await ContinueWithToolGatingAsync(context, next, client, options, logger, callLog, oauthContext);
+        await ContinueWithToolGatingAsync(context, next, client, options, logger, callLog, peek, oauthContext);
     }
 
     /// <summary>工具调用的准入判定与审计（认证通过之后）。</summary>
@@ -254,23 +291,18 @@ public static class AgentClientGate
         McpOptions options,
         ILogger logger,
         IAgentCallLogStore callLog,
+        McpRequestPeek peek,
         OAuthServerContext? oauthContext)
     {
         var services = context.RequestServices;
 
-        // 只有 tools/call 需要读参数做权限判定；其余方法（initialize、tools/list…）直接放行。
-        var calls = await ReadToolCallsAsync(context, options.MaxRequestBodyBytes, logger);
-        if (calls.TooLarge)
-        {
-            await WriteErrorAsync(context, null, -32600,
-                $"请求体超过 {options.MaxRequestBodyBytes} 字节上限。", StatusCodes.Status413PayloadTooLarge, oauthContext);
-            return;
-        }
+        // 参数来自上面那份解析结果，不存在"第二套解析器给出不同参数"的空间。
+        var calls = peek.Calls;
 
         var defaultKnowledgeBase = KnowledgeBaseStore.DefaultKnowledgeBaseId;
         Guid? effectiveKnowledgeBaseId = null;
 
-        foreach (var call in calls.Items)
+        foreach (var call in calls)
         {
             if (call.Method != "tools/call") continue;
 
@@ -337,7 +369,7 @@ public static class AgentClientGate
 
             // 审计失败不能反过来阻断调用。
             await RecordAsync(callLog, client.Id,
-                calls.Items.FirstOrDefault(item => item.Method == "tools/call")?.Tool,
+                calls.FirstOrDefault(item => item.Method == "tools/call")?.Tool,
                 effectiveKnowledgeBaseId?.ToString("D"),
                 outcome, context.Response.StatusCode, stopwatch.ElapsedMilliseconds, failure);
         }
@@ -419,111 +451,11 @@ public static class AgentClientGate
         await context.Response.WriteAsync(payload.ToJsonString(), Encoding.UTF8);
     }
 
-    /// <summary>从请求体里读出所有 <c>tools/call</c> 的目标工具与关键参数。</summary>
-    private static async Task<McpCallScan> ReadToolCallsAsync(
-        HttpContext context,
-        int maxBytes,
-        ILogger logger)
-    {
-        if (!HttpMethods.IsPost(context.Request.Method)) return McpCallScan.Empty;
-
-        var contentType = context.Request.ContentType ?? string.Empty;
-        if (!contentType.Contains("json", StringComparison.OrdinalIgnoreCase)) return McpCallScan.Empty;
-
-        if (context.Request.ContentLength is { } declared && declared > maxBytes)
-            return McpCallScan.OverLimit;
-
-        context.Request.EnableBuffering();
-
-        string body;
-        using (var reader = new StreamReader(
-            context.Request.Body,
-            Encoding.UTF8,
-            detectEncodingFromByteOrderMarks: false,
-            bufferSize: 16 * 1024,
-            leaveOpen: true))
-        {
-            body = await reader.ReadToEndAsync(context.RequestAborted);
-        }
-
-        // 一定要回卷，否则 MCP 处理器读到的就是空体。
-        context.Request.Body.Position = 0;
-
-        if (Encoding.UTF8.GetByteCount(body) > maxBytes) return McpCallScan.OverLimit;
-
-        JsonNode? root;
-        try
-        {
-            root = JsonNode.Parse(body);
-        }
-        catch (Exception exception) when (exception is System.Text.Json.JsonException or ArgumentException)
-        {
-            // 不是 JSON 就交给后续处理器报错，这里不越权判定。
-            logger.LogDebug(exception, "MCP request body is not valid JSON; skipping tool gating.");
-            return McpCallScan.Empty;
-        }
-
-        var items = new List<McpCallInfo>();
-        switch (root)
-        {
-            case JsonObject single:
-                items.Add(ParseCall(single));
-                break;
-
-            case JsonArray batch:
-                foreach (var node in batch)
-                {
-                    if (node is JsonObject entry) items.Add(ParseCall(entry));
-                }
-
-                break;
-        }
-
-        return new McpCallScan(items, TooLarge: false);
-    }
-
-    private static McpCallInfo ParseCall(JsonObject message)
-    {
-        var method = message["method"]?.GetValue<string>();
-        var id = message["id"]?.DeepClone();
-
-        if (!string.Equals(method, "tools/call", StringComparison.Ordinal))
-            return new McpCallInfo(method, null, null, null, id);
-
-        var parameters = message["params"] as JsonObject;
-        var tool = parameters?["name"]?.GetValue<string>();
-        var arguments = parameters?["arguments"] as JsonObject;
-
-        return new McpCallInfo(
-            method,
-            tool,
-            ParseGuid(arguments?["knowledgeBaseId"]),
-            ParseGuid(arguments?["documentId"]),
-            id);
-    }
-
-    private static Guid? ParseGuid(JsonNode? node)
-    {
-        if (node is not JsonValue value) return null;
-        if (!value.TryGetValue<string>(out var text)) return null;
-
-        return Guid.TryParse(text, out var id) && id != Guid.Empty ? id : null;
-    }
-
     private sealed class SampleState
     {
         public string? Method { get; set; }
         public string? ProtocolVersion { get; set; }
         public string? Era { get; set; }
         public bool Authenticated { get; set; }
-    }
-
-    private sealed record McpCallInfo(string? Method, string? Tool, Guid? KnowledgeBaseId, Guid? DocumentId, JsonNode? Id);
-
-    private sealed record McpCallScan(IReadOnlyList<McpCallInfo> Items, bool TooLarge)
-    {
-        public static McpCallScan Empty { get; } = new([], TooLarge: false);
-
-        public static McpCallScan OverLimit { get; } = new([], TooLarge: true);
     }
 }

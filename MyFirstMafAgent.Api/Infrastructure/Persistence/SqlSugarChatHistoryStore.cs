@@ -35,7 +35,7 @@ public sealed class SqlSugarChatHistoryStore(SqlSugarScope database) : IChatHist
 
         if (Wants(query.Sources, ChatHistorySources.Knowledge))
         {
-            branches.Add(BuildKnowledgeSessionBranch(query.KnowledgeBaseId, parameters));
+            branches.Add(BuildKnowledgeSessionBranch(query.KnowledgeBaseId, query.AllowedKnowledgeBaseIds, parameters));
         }
 
         if (Wants(query.Sources, ChatHistorySources.Avatar))
@@ -95,10 +95,7 @@ public sealed class SqlSugarChatHistoryStore(SqlSugarScope database) : IChatHist
 
         if (Wants(query.Sources, ChatHistorySources.Knowledge))
         {
-            var scope = query.KnowledgeBaseId is { } knowledgeBaseId
-                ? " AND kb.id = @knowledgeBaseId"
-                : string.Empty;
-            if (query.KnowledgeBaseId is { } id) parameters.Add(new("@knowledgeBaseId", id));
+            var scope = BuildKnowledgeScope(query.KnowledgeBaseId, query.AllowedKnowledgeBaseIds, parameters, "kb");
 
             branches.Add($"""
                 SELECT 'knowledge' AS "Source", s.id AS "SessionId", s.title AS "SessionTitle",
@@ -182,14 +179,14 @@ public sealed class SqlSugarChatHistoryStore(SqlSugarScope database) : IChatHist
             row.CreatedAt)).ToList();
     }
 
-    private static string BuildKnowledgeSessionBranch(Guid? knowledgeBaseId, List<SugarParameter> parameters)
+    private static string BuildKnowledgeSessionBranch(
+        Guid? knowledgeBaseId,
+        IReadOnlyList<Guid>? allowedKnowledgeBaseIds,
+        List<SugarParameter> parameters)
     {
-        var scope = string.Empty;
-        if (knowledgeBaseId is { } id)
-        {
-            scope = "WHERE kb.id = @knowledgeBaseId";
-            parameters.Add(new SugarParameter("@knowledgeBaseId", id));
-        }
+        var scope = BuildKnowledgeScope(knowledgeBaseId, allowedKnowledgeBaseIds, parameters, "kb");
+        if (scope.Length > 0)
+            scope = "WHERE " + scope[5..];
 
         return $$"""
             SELECT 'knowledge' AS "Source", s.id AS "SessionId", s.title AS "Title",
@@ -202,6 +199,36 @@ public sealed class SqlSugarChatHistoryStore(SqlSugarScope database) : IChatHist
             JOIN kb_knowledge_bases AS kb ON kb.id = s.knowledge_base_id
             {{scope}}
             """;
+    }
+
+    /// <summary>
+    /// 知识库范围片段（以 <c> AND </c> 开头，便于直接拼在已有 WHERE 后面）。
+    /// 白名单用展开的 <c>IN</c> 而不是数组参数：SqlSugar 的 <c>Ado.SqlQueryAsync</c> 对
+    /// <c>Guid[]</c> 参数的展开行为依 Npgsql 版本而异，展开成具名参数最可控。
+    /// </summary>
+    private static string BuildKnowledgeScope(
+        Guid? knowledgeBaseId,
+        IReadOnlyList<Guid>? allowedKnowledgeBaseIds,
+        List<SugarParameter> parameters,
+        string alias)
+    {
+        if (knowledgeBaseId is { } single)
+        {
+            parameters.Add(new SugarParameter("@knowledgeBaseId", single));
+            return $" AND {alias}.id = @knowledgeBaseId";
+        }
+
+        if (allowedKnowledgeBaseIds is not { Count: > 0 } allowed) return string.Empty;
+
+        var names = new List<string>(allowed.Count);
+        for (var index = 0; index < allowed.Count; index++)
+        {
+            var name = $"@allowedKb{index}";
+            names.Add(name);
+            parameters.Add(new SugarParameter(name, allowed[index]));
+        }
+
+        return $" AND {alias}.id IN ({string.Join(", ", names)})";
     }
 
     private static string BuildCompanionSessionBranch(Guid? companionProfileId, List<SugarParameter> parameters)
@@ -244,7 +271,7 @@ public sealed class SqlSugarChatHistoryStore(SqlSugarScope database) : IChatHist
         if (string.IsNullOrEmpty(content)) return string.Empty;
 
         var index = content.IndexOf(needle, StringComparison.OrdinalIgnoreCase);
-        if (index < 0) return Clamp(content, PreviewChars * 2);
+        if (index < 0) return Clamp(content, PreviewChars * 2) ?? string.Empty;
 
         const int radius = 60;
         var start = Math.Max(0, index - radius);

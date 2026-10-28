@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using ModelContextProtocol.Protocol;
 
@@ -78,83 +79,258 @@ public sealed class McpProtocolDiagnostics
     }
 }
 
-/// <summary>请求体的轻量探测结果（只为诊断，不影响业务判定）。</summary>
-public sealed record McpRequestPeek(string? Method, string? ProtocolVersion, string? Era)
+/// <summary>一次 <c>tools/call</c> 的目标与判定所需参数。</summary>
+public sealed record McpCallInfo(string? Method, string? Tool, Guid? KnowledgeBaseId, Guid? DocumentId, JsonNode? Id);
+
+/// <summary>请求体的解析结论。除 <see cref="Json"/> 外都<b>不放行</b>（fail-closed）。</summary>
+public enum McpBodyStatus
 {
-    public static McpRequestPeek Empty { get; } = new(null, null, null);
+    /// <summary>没有请求体（GET / DELETE / OPTIONS，或空体）。</summary>
+    None,
+
+    /// <summary>合法的单条 JSON-RPC 消息。</summary>
+    Json,
+
+    /// <summary>Content-Type 不是 JSON。</summary>
+    NotJson,
+
+    /// <summary>JSON 解析失败，或含重复属性名。</summary>
+    Malformed,
+
+    /// <summary>超过网关接受的上限。</summary>
+    TooLarge,
+
+    /// <summary>读取失败（连接断开等）。</summary>
+    Unreadable
 }
 
 /// <summary>
-/// 在鉴权之前偷看请求体里的 <c>method</c> 与协议版本。
+/// 请求体的解析结果。<b>认证与工具准入都以它为唯一依据</b>，
+/// 避免"中间件解析出一份参数、SDK 绑定出另一份"的双解析器差异。
+/// </summary>
+public sealed record McpRequestPeek(
+    McpBodyStatus Status,
+    IReadOnlyList<McpCallInfo> Calls,
+    bool IsBatch = false,
+    string? Method = null,
+    string? ProtocolVersion = null,
+    string? Era = null,
+    string? Error = null)
+{
+    public static McpRequestPeek Empty { get; } = new(McpBodyStatus.None, []);
+
+    /// <summary>是否为"单条、且 method 恰好是 server/discover"的探测请求。</summary>
+    public bool IsSingleServerDiscover =>
+        Status == McpBodyStatus.Json
+        && !IsBatch
+        && Calls.Count == 1
+        && string.Equals(Method, RequestMethods.ServerDiscover, StringComparison.Ordinal);
+}
+
+/// <summary>
+/// 在鉴权之前解析请求体：拿到 method、协议版本、所有 <c>tools/call</c> 的目标与关键参数。
 ///
 /// <para>
-/// 限制是刻意的：只处理 JSON 且体积 <b>≤ 64 KiB</b> 的请求（<c>initialize</c> /
-/// <c>server/discover</c> 都很小），并且读完后把流回卷，后续处理器照常读取。
-/// 这样既不改变既有行为，也能把「客户端第一个请求是什么」记录下来。
+/// 与旧实现的区别：旧版在解析失败/非 JSON/超大时返回「空结果」并被当成"无需判定"，
+/// 于是网关整体放行。现在这些情况都会得到明确的 <see cref="McpBodyStatus"/>，由网关拒绝。
+/// 同时旧版只取批量请求的第一条做判定，现在<b>批量请求一律拒绝</b>。
+/// </para>
+///
+/// <para>
+/// 重复属性名会被判为 <see cref="McpBodyStatus.Malformed"/>：<c>{"knowledgeBaseId":"A","knowledgeBaseId":"B"}</c>
+/// 在网关与 SDK 两套解析器下可能得到不同答案，这种请求不该被接受。
 /// </para>
 /// </summary>
 public static class McpRequestPeekReader
 {
-    public const int MaxPeekBytes = 64 * 1024;
+    /// <summary>兼容旧引用：允许读取的最大请求体字节数由调用方（网关）按配置传入。</summary>
+    public const int MaxPeekBytes = 8 * 1024 * 1024;
 
-    public static async Task<McpRequestPeek> TryPeekAsync(HttpContext context, CancellationToken cancellationToken)
+    public static async Task<McpRequestPeek> TryPeekAsync(
+        HttpContext context,
+        int maxBytes,
+        CancellationToken cancellationToken)
     {
         if (!HttpMethods.IsPost(context.Request.Method)) return McpRequestPeek.Empty;
 
         var contentType = context.Request.ContentType ?? string.Empty;
-        if (!contentType.Contains("json", StringComparison.OrdinalIgnoreCase)) return McpRequestPeek.Empty;
+        if (!contentType.Contains("json", StringComparison.OrdinalIgnoreCase))
+        {
+            return new McpRequestPeek(McpBodyStatus.NotJson, [], Error: $"Content-Type 不是 JSON：'{contentType}'");
+        }
 
-        if (context.Request.ContentLength is { } declared && declared > MaxPeekBytes) return McpRequestPeek.Empty;
+        if (maxBytes <= 0) maxBytes = MaxPeekBytes;
+
+        if (context.Request.ContentLength is { } declared && declared > maxBytes)
+        {
+            return new McpRequestPeek(McpBodyStatus.TooLarge, [],
+                Error: $"请求体 {declared} 字节超过上限 {maxBytes} 字节");
+        }
 
         context.Request.EnableBuffering();
 
-        byte[] buffer = ArrayPool<byte>.Shared.Rent(MaxPeekBytes);
-        int total = 0;
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(Math.Min(maxBytes, 64 * 1024));
+        using var body = new MemoryStream();
         try
         {
-            while (total < MaxPeekBytes)
+            while (body.Length <= maxBytes)
             {
-                var read = await context.Request.Body.ReadAsync(
-                    buffer.AsMemory(total, MaxPeekBytes - total), cancellationToken);
+                var read = await context.Request.Body.ReadAsync(buffer, cancellationToken);
                 if (read == 0) break;
-                total += read;
+                body.Write(buffer, 0, read);
             }
         }
         catch (Exception exception) when (exception is IOException or BadHttpRequestException)
         {
-            return McpRequestPeek.Empty;
-        }
-        finally
-        {
-            // 一定要回卷，否则 MCP 处理器读到的是空体。
-            if (context.Request.Body.CanSeek) context.Request.Body.Position = 0;
-        }
-
-        try
-        {
-            if (total == 0) return McpRequestPeek.Empty;
-
-            var json = Encoding.UTF8.GetString(buffer, 0, total);
-            var node = JsonNode.Parse(json);
-            var message = node is JsonArray batch ? batch.FirstOrDefault() as JsonObject : node as JsonObject;
-            if (message is null) return McpRequestPeek.Empty;
-
-            var method = message["method"]?.GetValue<string>();
-            var parameters = message["params"] as JsonObject;
-
-            var protocolVersion =
-                parameters?["_meta"]?[MetaKeys.ProtocolVersion]?.GetValue<string>()
-                ?? parameters?["protocolVersion"]?.GetValue<string>();
-
-            return new McpRequestPeek(method, protocolVersion, DescribeEra(method, protocolVersion));
-        }
-        catch (Exception exception) when (exception is System.Text.Json.JsonException or InvalidOperationException or FormatException)
-        {
-            return McpRequestPeek.Empty;
+            return new McpRequestPeek(McpBodyStatus.Unreadable, [], Error: exception.Message);
         }
         finally
         {
             ArrayPool<byte>.Shared.Return(buffer);
+            // 一定要回卷，否则 MCP 处理器读到的是空体。
+            if (context.Request.Body.CanSeek) context.Request.Body.Position = 0;
+        }
+
+        if (body.Length == 0) return McpRequestPeek.Empty;
+        if (body.Length > maxBytes)
+        {
+            return new McpRequestPeek(McpBodyStatus.TooLarge, [],
+                Error: $"请求体超过上限 {maxBytes} 字节");
+        }
+
+        var json = Encoding.UTF8.GetString(body.GetBuffer(), 0, (int)body.Length);
+
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+
+            var isBatch = root.ValueKind == JsonValueKind.Array;
+            var messages = isBatch
+                ? root.EnumerateArray().ToList()
+                : [root];
+
+            if (messages.Any(message => message.ValueKind != JsonValueKind.Object))
+            {
+                return new McpRequestPeek(McpBodyStatus.Malformed, [], Error: "JSON-RPC 消息必须是对象");
+            }
+
+            var duplicate = messages
+                .Select(FindDuplicateProperty)
+                .FirstOrDefault(found => found is not null);
+            if (duplicate is not null)
+            {
+                return new McpRequestPeek(McpBodyStatus.Malformed, [], isBatch,
+                    Error: $"JSON 含重复属性名 '{duplicate}'，拒绝处理");
+            }
+
+            var calls = messages.Select(ParseCall).ToList();
+            var first = calls.Count > 0 ? calls[0] : null;
+
+            return new McpRequestPeek(
+                McpBodyStatus.Json,
+                calls,
+                isBatch,
+                first?.Method,
+                ReadProtocolVersion(messages[0]),
+                DescribeEra(first?.Method, ReadProtocolVersion(messages[0])));
+        }
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException or FormatException)
+        {
+            return new McpRequestPeek(McpBodyStatus.Malformed, [], Error: exception.Message);
+        }
+
+        static McpCallInfo ParseCall(JsonElement message)
+        {
+            var method = message.TryGetProperty("method", out var methodElement)
+                && methodElement.ValueKind == JsonValueKind.String
+                    ? methodElement.GetString()
+                    : null;
+
+            JsonNode? id = message.TryGetProperty("id", out var idElement)
+                ? JsonNode.Parse(idElement.GetRawText())
+                : null;
+
+            if (!string.Equals(method, "tools/call", StringComparison.Ordinal))
+                return new McpCallInfo(method, null, null, null, id);
+
+            if (!message.TryGetProperty("params", out var parameters)
+                || parameters.ValueKind != JsonValueKind.Object)
+                return new McpCallInfo(method, null, null, null, id);
+
+            var tool = parameters.TryGetProperty("name", out var nameElement)
+                && nameElement.ValueKind == JsonValueKind.String
+                    ? nameElement.GetString()
+                    : null;
+
+            Guid? knowledgeBaseId = null;
+            Guid? documentId = null;
+            if (parameters.TryGetProperty("arguments", out var arguments)
+                && arguments.ValueKind == JsonValueKind.Object)
+            {
+                knowledgeBaseId = ReadGuid(arguments, "knowledgeBaseId");
+                documentId = ReadGuid(arguments, "documentId");
+            }
+
+            return new McpCallInfo(method, tool, knowledgeBaseId, documentId, id);
+        }
+
+        static Guid? ReadGuid(JsonElement arguments, string name)
+        {
+            if (!arguments.TryGetProperty(name, out var element)) return null;
+            if (element.ValueKind != JsonValueKind.String) return null;
+            return Guid.TryParse(element.GetString(), out var id) && id != Guid.Empty ? id : null;
+        }
+
+        static string? ReadProtocolVersion(JsonElement message)
+        {
+            if (!message.TryGetProperty("params", out var parameters)
+                || parameters.ValueKind != JsonValueKind.Object)
+                return null;
+
+            if (parameters.TryGetProperty("_meta", out var meta)
+                && meta.ValueKind == JsonValueKind.Object
+                && meta.TryGetProperty(MetaKeys.ProtocolVersion, out var fromMeta)
+                && fromMeta.ValueKind == JsonValueKind.String)
+                return fromMeta.GetString();
+
+            if (parameters.TryGetProperty("protocolVersion", out var direct)
+                && direct.ValueKind == JsonValueKind.String)
+                return direct.GetString();
+
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 递归找同名（含仅大小写不同）属性。返回第一个冲突名，没有则 <c>null</c>。
+    /// </summary>
+    internal static string? FindDuplicateProperty(JsonElement element)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Object:
+            {
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var property in element.EnumerateObject())
+                {
+                    if (!seen.Add(property.Name)) return property.Name;
+                    if (FindDuplicateProperty(property.Value) is { } nested) return nested;
+                }
+
+                return null;
+            }
+
+            case JsonValueKind.Array:
+                foreach (var item in element.EnumerateArray())
+                {
+                    if (FindDuplicateProperty(item) is { } nested) return nested;
+                }
+
+                return null;
+
+            default:
+                return null;
         }
     }
 

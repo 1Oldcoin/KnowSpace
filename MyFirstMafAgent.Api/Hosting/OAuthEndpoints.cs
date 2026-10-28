@@ -69,6 +69,9 @@ public static class OAuthEndpoints
             IKnowledgeBaseDirectory knowledgeBases,
             CancellationToken cancellationToken) =>
         {
+            if (ConsentAccessGuard.Validate(http) is { } denied)
+                return WriteConsentAccessDenied(http, denied);
+
             var query = http.Request.Query;
             var pending = await oauth.BeginAuthorizationAsync(
                 new AuthorizeBeginRequest(
@@ -103,6 +106,10 @@ public static class OAuthEndpoints
             OAuthService oauth,
             CancellationToken cancellationToken) =>
         {
+            // POST 同样要过：少了这一道，攻击者可以直接伪造表单替用户"同意"。
+            if (ConsentAccessGuard.Validate(http) is { } denied)
+                return WriteConsentAccessDenied(http, denied);
+
             var form = await http.Request.ReadFormAsync(cancellationToken);
             var requestId = form["request_id"].ToString();
             var decision = form["decision"].ToString();
@@ -112,11 +119,11 @@ public static class OAuthEndpoints
 
             if (string.Equals(decision, "deny", StringComparison.OrdinalIgnoreCase))
             {
-                var denied = await oauth.DenyAsync(requestId, http.Connection.RemoteIpAddress?.ToString(), cancellationToken);
-                if (denied.Error is not null || denied.Request is null)
-                    return Results.BadRequest(new { error = denied.Error });
+                var deniedResult = await oauth.DenyAsync(requestId, http.Connection.RemoteIpAddress?.ToString(), cancellationToken);
+                if (deniedResult.Error is not null || deniedResult.Request is null)
+                    return Results.BadRequest(new { error = deniedResult.Error });
 
-                return RedirectWithError(denied.Request, OAuthError.AccessDenied, "用户拒绝了授权请求。");
+                return RedirectWithError(deniedResult.Request, OAuthError.AccessDenied, "用户拒绝了授权请求。");
             }
 
             var approved = await oauth.ApproveAsync(
@@ -545,6 +552,25 @@ public static class OAuthEndpoints
         return Results.Content(
             "<html><body style=\"font-family:system-ui;padding:32px\"><h1>授权请求无法继续</h1>" +
             $"<p>{WebUtility.HtmlEncode(error.Description)}</p></body></html>",
+            "text/html; charset=utf-8");
+    }
+
+    /// <summary>同意页被拒绝时的说明页：把三种可行做法直接写出来，避免用户只知道"403"。</summary>
+    private static IResult WriteConsentAccessDenied(HttpContext http, string reason)
+    {
+        WriteNoStore(http.Response);
+        http.Response.StatusCode = StatusCodes.Status403Forbidden;
+        return Results.Content(
+            "<html><body style=\"font-family:system-ui;padding:32px;max-width:640px\">" +
+            "<h1>授权页需要在受信任的通道上完成</h1>" +
+            $"<p>{WebUtility.HtmlEncode(reason)}</p>" +
+            "<p>当前版本（Phase 0）尚未提供账号登录，可选做法：</p><ul>" +
+            "<li>在本机（回环地址）打开本页完成授权；</li>" +
+            "<li>让反向代理在认证通过后注入 <code>X-Api-Token</code>（与 <code>Server:ApiToken</code> / " +
+            "<code>MAF_SERVER_TOKEN</code> 一致）；</li>" +
+            "<li>改用 <code>maf_</code> 客户端密钥接入（不需要浏览器授权）。</li></ul>" +
+            "<p>账号登录 + MFA 见 <code>docs/MCP-REMOTE-DESIGN.md</code> §3.2（Phase 1）。</p>" +
+            "</body></html>",
             "text/html; charset=utf-8");
     }
 

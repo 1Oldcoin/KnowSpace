@@ -4,6 +4,7 @@
 
 **本地优先的个人知识库** —— 资料入库、向量检索、带引用的问答，并把知识库通过 MCP 开放给外部 AI 工具。
 
+[![Release](https://img.shields.io/badge/release-1.0.1-2ea44f)](https://github.com/1Oldcoin/KnowSpace/releases/tag/v1.0.1)
 [![.NET](https://img.shields.io/badge/.NET-10.0-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
 [![Vue](https://img.shields.io/badge/Vue-3.5-42b883?logo=vuedotjs&logoColor=white)](https://vuejs.org/)
 [![Electron](https://img.shields.io/badge/Electron-33-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
@@ -115,7 +116,7 @@ graph TD
 git clone https://github.com/1Oldcoin/KnowSpace.git
 cd KnowSpace
 
-cp .env.example .env      # 然后编辑：LLM_API_KEY / MAF_SERVER_TOKEN / PG_PASSWORD / PUBLIC_BASE_URL
+cp .env.example .env      # 然后编辑：LLM_API_KEY（必填）/ MAF_SERVER_TOKEN（必填，否则拒绝启动）/ PG_PASSWORD / PUBLIC_BASE_URL
 docker compose up -d --build   # 一个容器：API + 前端 + PostgreSQL 17 + pgvector
 ```
 
@@ -147,7 +148,8 @@ docker compose up -d --build   # 一个容器：API + 前端 + PostgreSQL 17 + p
 docker compose exec app bash /app/scripts/Test-IntegratedStack.sh --pg-password "$PG_PASSWORD"
 ```
 
-> 默认只绑 `127.0.0.1`。**对外暴露前必读 [`docs/CLOUD-DEPLOYMENT.md`](docs/CLOUD-DEPLOYMENT.md)** —— 需要配反向代理、TLS 与 `MAF_SERVER_TOKEN`，否则 `/api` 是不鉴权的。
+> 默认只绑 `127.0.0.1`。**对外暴露前必读 [`docs/CLOUD-DEPLOYMENT.md`](docs/CLOUD-DEPLOYMENT.md)** —— 需要配反向代理与 TLS。
+> 1.0.1 起，容器（`Hosting__Profile=Server`）缺 `MAF_SERVER_TOKEN` 会**直接拒绝启动**而不是静默不鉴权，`docker compose logs` 里会写明缺哪一项。
 
 ### 方式三：Linux 裸机（systemd，不用 Docker）
 
@@ -305,6 +307,44 @@ powershell -ExecutionPolicy Bypass -File scripts\Publish-Release.ps1 -Version 1.
 > 或者用 `MAF_UPDATE_URL` 指向任意可访问的静态目录（generic 源，放 latest.yml + 安装包即可）。
 > 注意 `api.github.com` 通常可直连，被墙的是 `github.com` 主站与 raw 域名——所以「能 push 不能更新」是正常现象。
 
+## 版本与分支
+
+当前发布版本：**1.0.1**（Windows 安装包 / Linux 包 / Docker 镜像均来自同一份代码）。
+
+| 分支 | 定位 | 规则 |
+| --- | --- | --- |
+| `main` | **稳定分支**，只放已验证可发布的代码 | 不直接提交；只接受从 `dev` 合并 |
+| `dev` | **开发分支**，日常改动都落在这里 | 所有提交先推这里，手工验证通过后再合并到 `main` |
+
+```bash
+# 日常：改完推到 dev
+git checkout dev
+git add -A && git commit -m "feat: ..."
+git push github dev
+
+# 验证没问题后，合并到 main
+git checkout main && git merge --no-ff dev && git push github main
+```
+
+### 1.0.1 更新要点
+
+这一版的主题是**"部署到公网也不至于裸奔"**：把桌面形态下"本机即可信"的假设，从服务端形态里彻底剥掉。
+
+| 项 | 变化 |
+| --- | --- |
+| **新增宿主形态** | `Hosting:Profile = Auto / Desktop / Server`。容器与 systemd 显式 `Server`；`Auto` 只要监听非回环地址就按服务端处理 |
+| **启动守卫** | 服务端形态下缺 `MAF_SERVER_TOKEN`（或短于 32 字符）、`Mcp:RequireClientKey=false`、CIMD 调试开关、OAuth Issuer 非 https → **拒绝启动并打印中文原因**，不再带着漏洞跑起来 |
+| **`/mcp` 传输收紧** | 非 JSON → 415、超大 → 413、JSON 解析失败或含重复属性名 → 400、**JSON-RPC 批量请求一律拒绝**；`server/discover` 仅单条消息免认证 |
+| **DNS rebinding 防护** | `/mcp` 校验 `Host` 与 `Origin`（回环名、`Mcp:OAuth:Issuer`、`Server:PublicBaseUrl` 自动加入白名单，其余 403） |
+| **同意页加闸门** | `/oauth/authorize` 的 GET 与 POST 只接受本机来源或带有效 `X-Api-Token` 的请求，堵住"公网自助发令牌" |
+| **聊天历史范围** | 配了知识库白名单的客户端不再能读到其他知识库的问答、也读不到分身/伴侣对话（应用层 + SQL 双层收窄） |
+| **云端不暴露本机文件** | 服务端形态不注册 `local_*` 工具 —— 云上的"本机目录"是服务器的文件系统 |
+| **依赖 CVE** | 顶层钉 `System.Security.Cryptography.Pkcs 10.0.14`，消掉 SqlSugarCore 带进来的 2 条公告；新增 `scripts/Check-Dependencies.ps1` 门禁 |
+| **安装包瘦身** | 283 MB（上一版 297 MB） |
+
+桌面版行为不变：仍是回环随机端口 + 一次性令牌 + 便携数据库。完整设计、迁移路径与后续阶段见
+[`docs/MCP-REMOTE-DESIGN.md`](docs/MCP-REMOTE-DESIGN.md)。
+
 ## 文档
 
 | 文档 | 内容 |
@@ -314,6 +354,7 @@ powershell -ExecutionPolicy Bypass -File scripts\Publish-Release.ps1 -Version 1.
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | 技术债、待做功能、明确不做的事（留档避免反复讨论） |
 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | 跨平台部署口径：三种交付形态、平台矩阵、原生工具解析规则 |
 | [`docs/CLOUD-DEPLOYMENT.md`](docs/CLOUD-DEPLOYMENT.md) | **云服务器部署与 MCP 接入**：安全清单、Docker/systemd/Windows 三种形态、密钥生命周期 |
+| [`docs/MCP-REMOTE-DESIGN.md`](docs/MCP-REMOTE-DESIGN.md) | **远程 MCP 与云端安全设计**：Desktop/Server 双形态、启动守卫、`maf_`→`zjp_` 迁移路径、审计保留与分区、备份恢复、日志脱敏、多副本限流 |
 | [`docs/DOCKER-VERIFICATION-2026-10-27.md`](docs/DOCKER-VERIFICATION-2026-10-27.md) | 一次真实 Docker 环境验收的完整记录（已脱敏）：跑通了什么、踩了什么坑、修了什么 |
 | [`docs/MCP-ACCESS.md`](docs/MCP-ACCESS.md) | MCP 接入速查：三步接入、能力词表、排错 |
 | [`docs/MCP-INTEGRATION-MANUAL.md`](docs/MCP-INTEGRATION-MANUAL.md) | MCP 两个方向（服务端 / 客户端）的完整说明书 |

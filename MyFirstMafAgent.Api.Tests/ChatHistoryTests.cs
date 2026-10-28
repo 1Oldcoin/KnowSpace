@@ -122,6 +122,113 @@ public sealed class ChatHistoryTests
         Assert.Equal("c\\\\d", SqlSugarChatHistoryStore.EscapeLike("c\\d"));
     }
 
+    // ───────── 知识库范围（P1：不传 knowledgeBaseId 不能等于"全部"） ─────────
+
+    private static readonly Guid AllowedKb = Guid.Parse("11111111-1111-1111-1111-111111111111");
+    private static readonly Guid OtherKb = Guid.Parse("22222222-2222-2222-2222-222222222222");
+
+    [Fact]
+    public async Task Restricted_scope_drops_personal_sources()
+    {
+        var store = new RecordingStore();
+        var service = new ChatHistoryService(store);
+        var scope = new ChatHistoryScope([AllowedKb], AllowPersonalSources: false);
+
+        await service.ListSessionsAsync("all", null, null, 10, CancellationToken.None, scope);
+
+        // "all" 被收窄成只剩 knowledge，分身/伴侣/导入一律不出现。
+        Assert.Equal([ChatHistorySources.Knowledge], store.SessionQuery!.Sources);
+        Assert.Equal([AllowedKb], store.SessionQuery.AllowedKnowledgeBaseIds);
+    }
+
+    [Fact]
+    public async Task Restricted_scope_rejects_explicit_knowledge_base_outside_whitelist()
+    {
+        var store = new RecordingStore();
+        var service = new ChatHistoryService(store);
+        var scope = new ChatHistoryScope([AllowedKb], AllowPersonalSources: false);
+
+        var result = await service.SearchAsync("x", "knowledge", OtherKb, null, 10, CancellationToken.None, scope);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("未被授权", result.Error, StringComparison.Ordinal);
+        Assert.Null(store.MessageQuery);
+    }
+
+    [Fact]
+    public async Task Restricted_scope_allows_explicit_knowledge_base_inside_whitelist()
+    {
+        var store = new RecordingStore();
+        var service = new ChatHistoryService(store);
+        var scope = new ChatHistoryScope([AllowedKb], AllowPersonalSources: false);
+
+        var result = await service.ListSessionsAsync("knowledge", AllowedKb, null, 10, CancellationToken.None, scope);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(AllowedKb, store.SessionQuery!.KnowledgeBaseId);
+        Assert.Equal([AllowedKb], store.SessionQuery.AllowedKnowledgeBaseIds);
+    }
+
+    [Fact]
+    public async Task Restricted_scope_explains_when_only_personal_sources_were_requested()
+    {
+        var store = new RecordingStore();
+        var service = new ChatHistoryService(store);
+        var scope = new ChatHistoryScope([AllowedKb], AllowPersonalSources: false);
+
+        var result = await service.SearchAsync("x", "avatar", null, null, 10, CancellationToken.None, scope);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("source=knowledge", result.Error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Unrestricted_scope_keeps_all_sources_and_no_whitelist()
+    {
+        var store = new RecordingStore();
+        var service = new ChatHistoryService(store);
+        var scope = new ChatHistoryScope([], AllowPersonalSources: true);
+
+        await service.ListSessionsAsync("all", null, null, 10, CancellationToken.None, scope);
+
+        Assert.Empty(store.SessionQuery!.Sources);
+        Assert.Null(store.SessionQuery.AllowedKnowledgeBaseIds);
+    }
+
+    [Fact]
+    public void Scope_is_derived_from_client_knowledge_base_restriction()
+    {
+        var restricted = ClientWithKnowledgeBases([AllowedKb]);
+        var scope = ChatHistoryScope.FromClient(restricted);
+
+        Assert.NotNull(scope);
+        Assert.False(scope!.AllowPersonalSources);
+        Assert.Equal([AllowedKb], scope.AllowedKnowledgeBaseIds);
+
+        var unrestricted = ChatHistoryScope.FromClient(ClientWithKnowledgeBases([]));
+        Assert.NotNull(unrestricted);
+        Assert.True(unrestricted!.AllowPersonalSources);
+
+        // 本机直接调用（没有 MCP 客户端上下文）不做任何收窄。
+        Assert.Null(ChatHistoryScope.FromClient(null));
+    }
+
+    private static AgentClient ClientWithKnowledgeBases(IReadOnlyList<Guid> knowledgeBases) =>
+        new(
+            "ac_test",
+            "测试客户端",
+            null,
+            "maf_abcd",
+            [AgentClientCapabilities.ChatRead],
+            knowledgeBases,
+            [],
+            60,
+            Enabled: true,
+            DateTimeOffset.UtcNow,
+            DateTimeOffset.UtcNow,
+            null,
+            null);
+
     [Fact]
     public void Snippet_keeps_the_match_in_context_with_ellipses()
     {
