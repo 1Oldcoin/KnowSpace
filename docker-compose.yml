@@ -8,14 +8,17 @@
 #       两个容器：api（不含数据库）+ db（pgvector 官方镜像）
 #       适合：要独立备份/扩容、要跑多副本、或已有托管 PostgreSQL
 #
-#   浏览器打开 http://127.0.0.1:5056
+#   启动后自检：curl -s http://127.0.0.1:5056/api/health → {"status":"ok",...}
+#   ⚠ 不要期待浏览器界面：/api 需要 X-Api-Token，浏览器里没人注入它，页面只会一片 401。
+#     容器版的实际用途是跑 MCP 服务端 + curl 管理。要界面见 docs/CLOUD-DEPLOYMENT.md
+#     §3.1（反代注入令牌）或 §3.7.1（SSH 隧道 + 桌面形态）。
 #
 # 三条安全前提（对外暴露前必读 docs/CLOUD-DEPLOYMENT.md）：
 #   1. 端口默认只绑 127.0.0.1。对外请用 nginx/Caddy 上 TLS 再反代，别直接把 5056 映射到 0.0.0.0。
 #   2. 一体模式下 PG 只监听容器内的 127.0.0.1:55432，不对外；但默认口令是 postgres，
 #      务必要用 .env 里的 PG_PASSWORD 覆盖。
-#   3. MAF_SERVER_TOKEN 保护 /api。置空时 /api 不鉴权（仅适合「只映射回环地址的自用部署」）；
-#      一旦要走公网，必须设它，并由反代注入 X-Api-Token。
+#   3. MAF_SERVER_TOKEN 保护 /api，**不设就拒绝启动**（SecurityPostureGuard 判为致命错误，
+#      少于 32 字符同样拒绝）；一旦要走公网，还必须由反代注入 X-Api-Token。
 #
 # Whisper 模型（141 MB ~ 3 GB）不随镜像分发：首次使用会按需下载到 maf-app-data 卷；
 # 离线环境把 Media__AutoDownloadWhisperModel 设为 false，再从「设置 → 语音转写」导入本地 ggml 文件。
@@ -43,7 +46,7 @@ services:
       - "127.0.0.1:${APP_PORT:-5056}:5056"
     environment:
       # --- 身份与对外地址 ---
-      # 保护 /api（openssl rand -hex 32）。置空 = /api 不鉴权。
+      # 保护 /api（openssl rand -hex 32）。必须设，否则服务端形态拒绝启动。
       MAF_SERVER_TOKEN: "${MAF_SERVER_TOKEN:-}"
       # 宿主形态：容器里必须显式 Server。Auto 只在"监听非回环地址"时才推断为 Server，
       # 而 --urls 是 0.0.0.0，能推断出来；显式写死是为了让"漏配令牌就拒绝启动"始终生效。
