@@ -50,8 +50,8 @@ services:
       Hosting__Profile: "Server"
       # 放行未鉴权的 /api/health，给 HEALTHCHECK / 监控探活用。
       Server__AllowAnonymousHealth: "true"
-      # 只影响「一键复制」生成的 MCP 配置地址（不参与鉴权）。
-      # 未开 OAuth 时填上，否则生成的是 http://127.0.0.1:5056/mcp，别人本机连不上。
+      # 影响两件事：①「一键复制」生成的 MCP 配置地址；② /mcp 的 Host/Origin 允许列表
+      # （McpTransportGuard 会把它加入白名单）。反代后不填，/mcp 会因 Host 不在白名单返回 403。
       Server__PublicBaseUrl: "${PUBLIC_BASE_URL:-}"
       # 反代与 API 不同机时必填，否则按 IP 封禁会把代理地址当客户端（一个人爆破全体连坐）。
       Server__TrustForwardedHeaders: "${TRUST_FORWARDED_HEADERS:-false}"
