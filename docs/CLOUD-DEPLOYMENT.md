@@ -16,7 +16,9 @@ MCP 数据面（`/mcp`）的授权模型是完整的：密钥 + 能力 + 工具�
 CIMD 的调试开关、OAuth Issuer 非 https 等组合会让进程**拒绝启动**，而不是带着漏洞跑起来。
 所以现在的最低要求从"记得配令牌"变成了"不配就起不来"。
 
-即便如此，**令牌长度、反向代理、TLS 仍然必须自己配**。三件事的具体做法见 §3。
+即便如此，**令牌长度**与**传输加密**仍然必须自己配。
+反向代理只是拿到这两样东西的一种方式，不是唯一方式——没有域名、不需要网页界面时，
+SSH 隧道或直接开端口同样可行，见 §3.7；TLS 的三条实现路径见 §3.3。
 
 > 完整设计与后续阶段（账号登录 + TOTP、PAT 过期、审计保留期与分区、备份恢复、日志脱敏、
 > 多副本限流、依赖扫描）见 [`MCP-REMOTE-DESIGN.md`](MCP-REMOTE-DESIGN.md)。
@@ -84,11 +86,14 @@ CIMD 的调试开关、OAuth Issuer 非 https 等组合会让进程**拒绝启�
 
 ## 3. 暴露到公网前必须做的事项
 
+先明确一件事：**反向代理不是必须的**。它只解决一个问题——让浏览器里的界面能带上 `X-Api-Token`。
+如果你不需要网页界面，另外几条路同样成立，见 §3.7。
+
 ### 3.1 给 `/api` 配令牌（**必做**）
 
-两种用法，任选其一。
+服务端形态下缺令牌会**拒绝启动**（`SecurityPostureGuard`），所以这一项不是「可选加固」。
 
-**A. 反向代理注入**（推荐，浏览器端零改动）
+**A. 反向代理注入**（需要网页界面时用这个）
 
 前端不需要任何修改：nginx / Caddy 完成人类认证（Basic / OAuth / mTLS），
 再把 `X-Api-Token` 加进转发请求里。
@@ -104,19 +109,22 @@ location / {
     proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
     proxy_set_header   X-Forwarded-Proto $scheme;
 
-    # 关键：认证通过后由代理由注入后端令牌，浏览器拿不到它
+    # 关键：认证通过后由代理注入后端令牌，浏览器拿不到它
     proxy_set_header   X-Api-Token       "<用 openssl rand -hex 32 生成>";
 }
 ```
 
-**B. 客户端自带令牌**
+**B. 客户端自带令牌**（脚本 / CI / 只用 MCP 的场景）
 
 ```bash
 export MAF_SERVER_TOKEN="$(openssl rand -hex 32)"
 ```
 
 之后所有 `/api` 请求都要带 `X-Api-Token: $MAF_SERVER_TOKEN`。
-适合脚本、CI、自研前端；原生 Web 界面需要自己补一个「输入令牌」的门。
+
+> **注意**：当前前端**没有**任何注入令牌的代码（`services/api.ts` 里全部是裸 `fetch`），
+> 也没有登录页或令牌输入框。所以选 B 意味着**网页界面不可用**（`/api` 全部 401），
+> 只能用 curl 管理。要恢复界面，要么用 A，要么等前端补上令牌输入（见 §3.7 结尾）。
 
 > 令牌可用 `openssl rand -hex 32` 生成；配置校验要求非空时至少 16 字符。
 
@@ -147,9 +155,28 @@ environment:
 
 客户端密钥是 Bearer 型凭据，**明文 HTTP 上等于公开**。
 
-**应用进程本身不提供 TLS**：`Hosting/` 下没有 `UseHttpsRedirection` / `UseHsts`，
+**应用代码里没有 TLS**：`Hosting/` 下没有 `UseHttpsRedirection` / `UseHsts`，
 也没有 Kestrel 证书配置，`appsettings.json` 里只有 `"Urls": "http://127.0.0.1:5056"`。
-所以 HTTPS 只能由反向代理终结——这不是「推荐做法」，是唯一做法。
+但这不等于「只能靠反代」——三条路都行，按场景选：
+
+| 做法 | 适用 | 代价 |
+| --- | --- | --- |
+| 反向代理终结 TLS（本节） | 有域名、要给浏览器界面用 | 多一个进程 |
+| Kestrel 自己配证书 | 只想让 `/mcp` 走 HTTPS | 无域名只能自签；Node 客户端要设 `NODE_EXTRA_CA_CERTS` |
+| 根本不暴露端口（SSH 隧道 / Tailscale / Cloudflare Tunnel） | 个人使用 | 每个客户端要配隧道 |
+
+> 顺带一提：**Let's Encrypt 不给 IP 签发证书**。没有域名时，反代也只能用自签证书，
+> 所以「上反代才有 TLS」这个理由在无域名场景下并不成立——真要可信证书，
+> 得用 `sslip.io` / `nip.io` 这类把 IP 编码进域名的 DNS，或 Cloudflare Tunnel。
+
+Kestrel 直出 HTTPS 时，用配置即可，不用改代码（注意 `Kestrel:Endpoints` 一旦配置会覆盖 `Urls`，
+此时不要再传 `--urls`）：
+
+```yaml
+Kestrel__Endpoints__Https__Url: "https://0.0.0.0:5057"
+Kestrel__Endpoints__Https__Certificate__Path: "/data/cert.pfx"
+Kestrel__Endpoints__Https__Certificate__Password: "<口令>"
+```
 
 用 Caddy 自动证书最省事（默认透传 `Host` / `X-Forwarded-*`，且不对 SSE 做缓冲）：
 
@@ -362,6 +389,73 @@ curl -s "$BASE/mcp" \
 跑完第 3、4 条后，回到「设置 → 管理接入客户端」，该客户端应出现 `lastCallAt`
 与来源 IP。**如果 IP 显示 `127.0.0.1`**，说明 `Server:TrustForwardedHeaders`
 或 `Server:KnownProxies` 没配对（见 §3.2）。
+
+### 3.7 不用反向代理的部署方式
+
+没有域名、不要 WAF、只有自己用的时候，反代是多余一层。下面三条同样成立。
+
+#### 3.7.1 SSH 隧道 + Desktop 形态（个人使用最省事）
+
+服务器上不配任何东西，本机执行：
+
+```bash
+ssh -N -L 5056:127.0.0.1:5056 user@server
+```
+
+本机浏览器打开 `http://127.0.0.1:5056` 即可。为什么不用改配置：
+
+- 请求的 `Host` 是 `127.0.0.1`，**本来就在** `McpTransportGuard` 的固定白名单里，
+  不需要配 `Mcp:AllowedHosts`；
+- 链路已被 SSH 加密，不需要证书；
+- 容器里把 `Hosting__Profile` 设成 `Desktop`（配合 `ports: "127.0.0.1:5056:5056"` 绑回环），
+  就跳过「缺令牌拒绝启动」，`/api` 不设令牌也能用界面。
+
+> ⚠️ `Desktop` 形态**会**注册 `local_*` 文件工具（`McpModule.cs` 只在 `profile.IsServer` 时跳过）。
+> 服务器上的「本机目录」是服务器的文件系统，所以**不要**给客户端 `files:*` / `files:write` 能力。
+
+#### 3.7.2 Server 形态 + 直接开端口（只跑 MCP）
+
+```yaml
+environment:
+  MAF_SERVER_TOKEN: "<openssl rand -hex 32>"
+  Hosting__Profile: "Server"
+  Mcp__AllowedHosts__0: "1.2.3.4"     # 公网 IP，否则 /mcp 因 Host 校验 403
+ports:
+  - "0.0.0.0:5056:5056"
+```
+
+客户端配 `http://1.2.3.4:5056/mcp` + `Authorization: Bearer maf_...` 即可。
+管理端点用 curl：
+
+```bash
+curl -H "X-Api-Token: $MAF_SERVER_TOKEN" -X POST http://1.2.3.4:5056/api/agent-clients \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Cursor","capabilities":["knowledge:read"]}'
+```
+
+代价两条：**网页界面不可用**；`maf_` 密钥走明文 HTTP，同网段可被嗅探。
+只建议在内网 / VPN 内这么干。
+
+#### 3.7.3 Server 形态 + Kestrel 自签证书
+
+配置见 §3.3 的 `Kestrel__Endpoints__Https__*`。可行，但两点要注意：
+
+- Cursor / Claude 等 Node 客户端默认**拒绝**自签证书，需要给客户端进程设
+  `NODE_EXTRA_CA_CERTS=/path/to/ca.crt`；
+- 这只解决 `/mcp` 的加密，**网页界面仍然 401**（令牌问题与 TLS 是两件事）。
+
+#### 3.7.4 三者对比
+
+| 场景 | 推荐 | 网页界面 | MCP |
+| --- | --- | --- | --- |
+| 只有自己用，能开 SSH | §3.7.1 隧道 | ✅ | ✅ |
+| 只给 AI 工具连，命令行管理 | §3.7.2 直开端口 | ❌ | ✅（明文传输） |
+| 有域名，要公网访问界面 | §3.3 反代 | ✅ | ✅ |
+| 无域名但想让界面走公网 | 需要先补前端令牌输入 | ❌ | ✅ |
+
+最后一行是当前的**产品缺口**，不是配置问题：`services/api.ts` 里全是裸 `fetch`，
+令牌只能靠 Electron 主进程或反代注入。补法是加一个「服务地址 + 令牌」入口，
+把所有请求收口到一个带 `X-Api-Token` 的 `fetch` 包装里。
 
 ---
 
