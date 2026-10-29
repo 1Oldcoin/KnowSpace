@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Publish the built desktop installer to GitHub Releases (the auto-update feed).
 
@@ -118,7 +118,12 @@ catch {
         prerelease     = $false
         target_commitish = 'main'
     } | ConvertTo-Json
-    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Owner/$Repo/releases" -Headers $headers -Method Post -Body $payload -ContentType 'application/json'
+
+    # 必须自己转成 UTF-8 字节再发。Invoke-RestMethod 在 Windows PowerShell 5.1 上
+    # 用系统 ANSI 代码页编码字符串 body，发布说明里的中文会变成 GBK 字节，
+    # GitHub 按 UTF-8 解析 -> 400 "Problems parsing JSON"。传 byte[] 就绕开了这一步。
+    $payloadBytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
+    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Owner/$Repo/releases" -Headers $headers -Method Post -Body $payloadBytes -ContentType 'application/json; charset=utf-8'
     Write-Host "    release created (id $($release.id))."
 }
 
