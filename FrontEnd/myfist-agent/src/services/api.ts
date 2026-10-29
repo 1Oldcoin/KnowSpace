@@ -581,6 +581,159 @@ export async function getMcpStatus(): Promise<McpStatus> {
   return await response.json() as McpStatus
 }
 
+// ───────────────────────── 外部 Agent 接入客户端 ─────────────────────────
+//
+// 这里的「客户端」是**外部 Agent**（Cursor / Claude Desktop / 自研脚本）的接入凭据记录，
+// 不是浏览器。密钥明文只在创建与轮换的响应里出现一次，列表接口只给前缀。
+
+/** 一个外部接入客户端的持久化记录（不含密钥明文，也不含用量）。 */
+export interface AgentClientRecord {
+  id: string
+  name: string
+  description?: string | null
+  /** 密钥前缀，例如 `maf_a1b2c3d4`，只用于界面识别。 */
+  keyPrefix: string
+  capabilities: string[]
+  /** 空数组 = 不限制知识库。 */
+  allowedKnowledgeBaseIds: string[]
+  /** 空数组 = 该能力范围内的工具全放开。 */
+  allowedTools: string[]
+  requestsPerMinute: number
+  enabled: boolean
+  createdAt: string
+  updatedAt: string
+  lastSeenAt?: string | null
+  lastSeenAddress?: string | null
+}
+
+/** 统计窗口内一个客户端的调用汇总。 */
+export interface AgentClientUsage {
+  total: number
+  success: number
+  denied: number
+  failed: number
+  lastCallAt: string
+}
+
+export interface AgentClientOverviewEntry extends AgentClientRecord {
+  /** 「最近活跃」的近似值：最后活跃时间在 onlineWindowMinutes 分钟内。 */
+  online: boolean
+  /** 窗口内没有调用时为 null。 */
+  usage?: AgentClientUsage | null
+}
+
+export interface AgentClientOverviewTotals {
+  clients: number
+  enabled: number
+  disabled: number
+  online: number
+  calls: number
+  success: number
+  denied: number
+  failed: number
+}
+
+export interface AgentClientOverview {
+  windowHours: number
+  /** 「在线」判定的分钟数。MCP 是无状态传输，只能按最后请求时间近似。 */
+  onlineWindowMinutes: number
+  generatedAt: string
+  totals: AgentClientOverviewTotals
+  clients: AgentClientOverviewEntry[]
+}
+
+/** 新建/更新客户端的请求体；更新时省略的字段保持不变。 */
+export interface AgentClientPayload {
+  name?: string
+  description?: string | null
+  capabilities?: string[]
+  allowedKnowledgeBaseIds?: string[]
+  allowedTools?: string[]
+  requestsPerMinute?: number
+  enabled?: boolean
+  clearDescription?: boolean
+}
+
+export interface AgentClientMutationResult {
+  client: AgentClientRecord
+  /** 只在创建与轮换时出现，明文仅此一次。 */
+  key: string
+}
+
+export async function getAgentClientOverview(windowHours = 24): Promise<AgentClientOverview> {
+  const response = await fetch(`${apiBaseUrl}/api/agent-clients/overview?windowHours=${windowHours}`)
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  return await response.json() as AgentClientOverview
+}
+
+/** 能力词表与工具清单：界面据此渲染勾选项。 */
+export interface AgentClientCatalog {
+  capabilities: string[]
+  defaults: string[]
+  tools: { name: string; capability: string; isWrite: boolean; usesKnowledgeBase: boolean }[]
+}
+
+export async function getAgentClientCatalog(): Promise<AgentClientCatalog> {
+  const response = await fetch(`${apiBaseUrl}/api/agent-clients/catalog`)
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  return await response.json() as AgentClientCatalog
+}
+
+export async function createAgentClient(payload: AgentClientPayload): Promise<AgentClientMutationResult> {
+  const response = await fetch(`${apiBaseUrl}/api/agent-clients`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  return await response.json() as AgentClientMutationResult
+}
+
+export async function updateAgentClient(id: string, payload: AgentClientPayload): Promise<AgentClientRecord> {
+  const response = await fetch(`${apiBaseUrl}/api/agent-clients/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  return await response.json() as AgentClientRecord
+}
+
+/** 轮换密钥：旧密钥立即失效，新密钥只返回一次。 */
+export async function rotateAgentClientKey(id: string): Promise<AgentClientMutationResult> {
+  const response = await fetch(`${apiBaseUrl}/api/agent-clients/${encodeURIComponent(id)}/rotate`, { method: 'POST' })
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  return await response.json() as AgentClientMutationResult
+}
+
+export async function deleteAgentClient(id: string): Promise<void> {
+  const response = await fetch(`${apiBaseUrl}/api/agent-clients/${encodeURIComponent(id)}`, { method: 'DELETE' })
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+}
+
+/** 一条 MCP 调用审计（不含请求正文与参数值）。 */
+export interface AgentCallRecordView {
+  id: number
+  occurredAt: string
+  clientId: string
+  tool?: string | null
+  knowledgeBaseId?: string | null
+  /** success / denied / failed。 */
+  outcome: string
+  statusCode: number
+  durationMs: number
+  error?: string | null
+}
+
+export async function listAgentCalls(clientId?: string, limit = 50): Promise<AgentCallRecordView[]> {
+  const params = new URLSearchParams({ limit: String(limit) })
+  if (clientId) params.set('clientId', clientId)
+  const response = await fetch(`${apiBaseUrl}/api/agent-clients/calls?${params.toString()}`)
+  if (!response.ok) throw new Error(await getErrorMessage(response))
+  const result = await response.json() as { calls?: AgentCallRecordView[] }
+  return result.calls || []
+}
+
 /** 一键复制的本地 MCP 配置（Cursor / Claude Desktop）。 */
 export interface LocalMcpConfig {
   endpoint: string

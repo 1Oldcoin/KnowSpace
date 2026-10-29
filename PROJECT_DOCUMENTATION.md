@@ -211,7 +211,7 @@ ASP.NET Core 10 Minimal API
 
 开发环境映射 OpenAPI JSON 与 Scalar 页面：`/openapi/v1.json`、`/scalar/v1`。两者仅在 Development 环境开启。
 
-前端以 `App.vue` 管理当前页面、知识库选择和问答数据；各视图由独立 Vue 组件实现（`components/` 下按页面命名，如 `JobsView.vue`、`PluginsView.vue`、`LibraryView.vue`）；`services/api.ts` 统一封装 API 请求。前后端通过 HTTP/JSON 通信，问答接口当前返回完整响应，不使用 SSE 流式传输；唯一的 SSE 是任务中心的 `/api/jobs/stream`（单向进度推送，断开自动退回轮询）。插件的安装、授权、配置（按 manifest 的 JSON Schema 渲染）、作用域、同步与审计全在 `PluginsView.vue` 里完成，不需要 curl。
+前端以 `App.vue` 管理当前页面、知识库选择和问答数据；各视图由独立 Vue 组件实现（`components/` 下按页面命名，如 `JobsView.vue`、`PluginsView.vue`、`McpClientsView.vue`、`LibraryView.vue`）；`services/api.ts` 统一封装 API 请求。前后端通过 HTTP/JSON 通信，问答接口当前返回完整响应，不使用 SSE 流式传输；唯一的 SSE 是任务中心的 `/api/jobs/stream`（单向进度推送，断开自动退回轮询）。插件的安装、授权、配置（按 manifest 的 JSON Schema 渲染）、作用域、同步与审计全在 `PluginsView.vue` 里完成，不需要 curl。外部 AI 工具接入（MCP 客户端）同理集中在 `McpClientsView.vue`：新建客户端、勾选能力与工具白名单、限定可见知识库、轮换密钥、查看调用统计与审计，入口在设置页“AI 工具与 MCP”卡片。
 
 ## 4. 核心业务流程
 
@@ -299,7 +299,7 @@ ASP.NET Core 10 Minimal API
 
 - **本机知识库作为 MCP 服务端**：`KnowledgeMcpTools`（`Mcp/KnowledgeMcpTools.cs`）、`LocalFileMcpTools`（`Mcp/LocalFileMcpTools.cs`）、`AvatarMcpTools`（`Mcp/AvatarMcpTools.cs`）与 `ChatHistoryMcpTools`（`Mcp/ChatHistoryMcpTools.cs`）通过 `ModelContextProtocol.AspNetCore` 以 Streamable HTTP 暴露在 `Mcp:ServerPath`（默认 `/mcp`，无状态模式）。其他大模型/智能体可调用 `list_knowledge_bases`、`list_documents`、`search_knowledge_base`、`get_document_content`、`get_document_summary`、`upload_document`、`workspace_*`、`list_file_roots`、`local_*`、`avatar_get_persona`、`avatar_feed`、`avatar_search_memories`、`avatar_digest`、`avatar_ask_as_me`、`avatar_list_fragments`，以及 `list_chat_sessions`、`chat_search_history`（共 **24** 个工具，能力与准入见 `docs/MCP-ACCESS.md`）。
 - **本机作为 MCP 客户端**：`Mcp/McpClientRegistry.cs` 按 `Mcp:Servers` 惰性连接外部服务器（`http` Streamable HTTP 或 `stdio`），工具列表缓存 30 秒；`Mcp/McpToolSource.cs` 把远端工具桥接为 `mcp__{server}__{tool}`（名称清洗、去重、≤64 字符）供聊天模型调用。
-- 连接失败只影响对应服务器，状态通过 `GET /api/mcp/status` 暴露；设置页“AI 工具与 MCP”卡片展示 MCP 端点、连接数与工具清单。
+- 连接失败只影响对应服务器，状态通过 `GET /api/mcp/status` 暴露；设置页“AI 工具与 MCP”卡片展示 MCP 端点、连接数与工具清单；接入方（外部 MCP 客户端）的创建与统计在“设置 → 管理接入客户端”（`McpClientsView.vue`）里完成，服务端聚合由 `GET /api/agent-clients/overview` 提供。
 
 典型配置（`appsettings.json`）：
 

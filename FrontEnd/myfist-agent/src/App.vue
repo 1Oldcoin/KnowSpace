@@ -12,6 +12,7 @@ import JobsView from './components/JobsView.vue'
 import LibraryView from './components/LibraryView.vue'
 import NotesView from './components/NotesView.vue'
 import OverviewView from './components/OverviewView.vue'
+import McpClientsView from './components/McpClientsView.vue'
 import PluginsView from './components/PluginsView.vue'
 import SearchOverlay from './components/SearchOverlay.vue'
 import SettingsView from './components/SettingsView.vue'
@@ -131,7 +132,7 @@ function openCitationMedia(payload: { documentId: string; fileName: string; seco
 
 const chatMessages = ref<AssistantMessage[]>([])
 const pendingJobCount = ref(0)
-const pageTitle = computed(() => ({ overview: '总览', materials: '我的资料', notes: '学习笔记', assistant: 'AI 知识问答', companions: 'AI 伴侣', avatar: '我的分身', topics: '我的专题', jobs: '任务中心', plugins: '插件', settings: '设置' })[currentView.value])
+const pageTitle = computed(() => ({ overview: '总览', materials: '我的资料', notes: '学习笔记', assistant: 'AI 知识问答', companions: 'AI 伴侣', avatar: '我的分身', topics: '我的专题', jobs: '任务中心', plugins: '插件', mcp: '接入的 AI 工具', settings: '设置' })[currentView.value])
 const displayName = computed(() => appSettings.value?.preferences.displayName || 'Lin')
 const dailyGoalMinutes = computed(() => appSettings.value?.preferences.dailyGoalMinutes ?? 60)
 const knowledgeBaseNameMap = computed<Record<string, string>>(() =>
@@ -1278,11 +1279,12 @@ async function exportHistorySession(sessionId: string) {
         <LibraryView v-else-if="currentView === 'materials'" :materials="materials" :query="searchQuery" :topics="topics" :active-topic-id="activeTopicId" @upload="receiveFiles" @retry="retryProcessing" @delete="deleteMaterial" @download="downloadMaterial" @notice="showToast" @select-topic="selectTopic" @assign-topic="changeDocumentTopic" @read="openReaderFromMaterial" />
         <NotesView v-else-if="currentView === 'notes'" :notes="notes" :query="searchQuery" :api-online="apiOnline" :busy="notesSaving" :loading="notesLoading" :active-knowledge-base-id="activeKnowledgeBaseId" :topics="topics" @create="createNoteHandler" @update="updateNoteHandler" @delete="deleteNoteHandler" @pin="pinNoteHandler" @export-notes="exportNotesHandler" @read-source="openReaderById" @notice="showToast" />
         <TopicsView v-else-if="currentView === 'topics'" :topics="topics" :materials="materials" :api-online="apiOnline" :active-topic-id="activeTopicId" @create="requestCreateTopic" @rename="renameTopic" @delete="removeTopic" @open="selectTopic" />
-        <SettingsView v-else-if="currentView === 'settings'" :settings="appSettings" :api-online="apiOnline" :busy="isSettingsSaving" :loading="isSettingsLoading" :knowledge-base-names="knowledgeBaseNameMap" :knowledge-bases="knowledgeBases" :active-knowledge-base-id="activeKnowledgeBaseId" @save="saveSettings" @reload="loadAppSettings" @imported="onKnowledgeBaseImported" />
+        <SettingsView v-else-if="currentView === 'settings'" :settings="appSettings" :api-online="apiOnline" :busy="isSettingsSaving" :loading="isSettingsLoading" :knowledge-base-names="knowledgeBaseNameMap" :knowledge-bases="knowledgeBases" :active-knowledge-base-id="activeKnowledgeBaseId" @save="saveSettings" @reload="loadAppSettings" @imported="onKnowledgeBaseImported" @navigate="navigate" />
         <AssistantView v-else-if="currentView === 'assistant'" :messages="chatMessages" :busy="isChatBusy || isChatHistoryMutating" :api-online="apiOnline" :sessions="knowledgeChatSessions" :active-session-id="activeKnowledgeChatSessionId" :sessions-loading="isChatSessionListLoading" :history-loading="isChatHistoryLoading" :tool-options="chatToolOptions" :tools-available="chatToolsAvailable" @send="sendMessage" @new-chat="startNewChat" @select-session="selectKnowledgeChatSession" @rename-session="renameHistorySession" @delete-session="deleteHistorySession" @delete-sessions="deleteSelectedHistorySessions" @export-session="exportHistorySession" @save-as-note="saveAssistantNoteHandler" @play-media="openCitationMedia" @update:tool-options="updateChatToolOptions" />
         <AvatarView v-else-if="currentView === 'avatar'" :api-online="apiOnline" @notice="showToast" />
         <JobsView v-else-if="currentView === 'jobs'" :api-online="apiOnline" @notice="showToast" @counts="pendingJobCount = $event" />
         <PluginsView v-else-if="currentView === 'plugins'" :api-online="apiOnline" :knowledge-bases="knowledgeBases" :active-knowledge-base-id="activeKnowledgeBaseId" @notice="showToast" />
+        <McpClientsView v-else-if="currentView === 'mcp'" :api-online="apiOnline" :knowledge-bases="knowledgeBases" :active-knowledge-base-id="activeKnowledgeBaseId" @notice="showToast" @back="navigate('settings')" />
         <CompanionView v-else />
       </div>
       <footer v-if="currentView !== 'assistant'" class="page-footer"><span>知间 <span>·</span> 让每一份学习都有迹可循</span><span>本地优先，安心记录 <span class="footer-leaf">✳</span></span></footer>

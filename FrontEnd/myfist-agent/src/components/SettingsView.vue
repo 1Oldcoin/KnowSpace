@@ -6,6 +6,7 @@ import { getAgentInfo, getMcpStatus, importLocalEmbeddingSpec, listAgentTools, p
 import { getLocalMcpConfig } from '../services/api'
 import { normalizeAgentSettings } from '../services/api'
 import type { AgentInfo, AgentSettings, AgentToolInfo, AppSettings, EmbeddingSpec, KnowledgeBase, KnowledgePackageImportResult, McpStatus, SaveSettingsPayload, WhisperModelStatus } from '../services/api'
+import type { ViewName } from '../types'
 
 const props = defineProps<{
   settings: AppSettings | null
@@ -20,6 +21,8 @@ const emit = defineEmits<{
   save: [payload: SaveSettingsPayload]
   reload: []
   imported: [knowledgeBaseId: string]
+  /** 设置页只做参数，不放大表格：客户端列表在独立页面里编辑。 */
+  navigate: [view: ViewName]
 }>()
 
 const useCloudApi = ref(true)
@@ -918,6 +921,9 @@ const whisperReady = computed(() => whisperStatus.value?.exists === true)
         <header class="settings-card-head">
           <span class="settings-icon settings-icon-blue"><Plug :size="18" /></span>
           <div><h2>AI 工具与 MCP</h2><p>聊天模型可以通过 function calling 检索知识库、读写本地工作目录，并调用外部 MCP 工具；本机知识库也可作为 MCP 服务端被其他模型使用。</p></div>
+          <button class="button button-soft settings-head-action" :disabled="!apiOnline" @click="emit('navigate', 'mcp')">
+            <KeyRound :size="14" /> 管理接入客户端
+          </button>
           <button class="button button-soft settings-head-action" :disabled="agentBusy || !apiOnline" @click="loadAgentInfo">
             <LoaderCircle v-if="agentBusy" :size="14" class="spinning" /><RefreshCw v-else :size="14" /> 刷新
           </button>
@@ -979,7 +985,7 @@ const whisperReady = computed(() => whisperStatus.value?.exists === true)
             <p v-if="mcpCopyMessage" class="settings-hint"><Check :size="13" /> {{ mcpCopyMessage }}</p>
             <p v-if="mcpBaseUrlWarning" class="settings-hint settings-hint-error">{{ mcpBaseUrlWarning }}</p>
             <p v-if="mcpCopyError" class="settings-hint settings-hint-error">{{ mcpCopyError }}</p>
-            <span class="settings-spec-meta">密钥只需要建一次（POST /api/agent-clients，明文只出现一次）。配置里不填密钥也能复制，之后再补。</span>
+            <span class="settings-spec-meta">密钥只需要建一次，明文只出现一次；建密钥、改权限、看调用统计都在“管理接入客户端”里完成。配置里不填密钥也能复制，之后再补。</span>
           </div>
         </div>
 

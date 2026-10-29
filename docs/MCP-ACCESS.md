@@ -26,6 +26,20 @@
 
 ### 第一步：建一个客户端，拿到密钥
 
+最省事的方式是界面：**设置 → AI 工具与 MCP → 管理接入客户端**（左侧导航「接入的 AI 工具」）。
+那里能新建客户端、勾选能力与工具白名单、限制可见知识库、轮换密钥、看调用统计与审计明细，全部不用敲命令。
+
+单页一次拿全量统计：
+
+```powershell
+curl.exe -s "http://127.0.0.1:5056/api/agent-clients/overview?windowHours=24"
+```
+
+返回每个客户端的 `online`（**近似值**：`enabled` 且最近 5 分钟内有调用）、`usage.total/success/denied/failed/lastCallAt`，
+以及 `totals`。MCP 服务端是无状态的（`Stateless = true`），没有长连接可查，所以界面上写的是「最近活跃」而不是「已连接」。
+
+脚本化建客户端：
+
 ```powershell
 curl.exe -s -X POST http://127.0.0.1:5056/api/agent-clients `
   -H "Content-Type: application/json" `
@@ -290,6 +304,7 @@ curl.exe -s $mcp -H "Content-Type: application/json" -H "X-Api-Key: maf_xxx" `
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/agent-clients` | 列表（只给前缀，不含密钥） |
+| GET | `/api/agent-clients/overview?windowHours=` | 列表 + 在线近似值 + 窗口内调用统计（界面用的单请求聚合） |
 | GET | `/api/agent-clients/catalog` | 能力与工具清单 |
 | GET | `/api/agent-clients/{id}` | 单个客户端 |
 | GET | `/api/agent-clients/calls?clientId=&limit=` | 调用审计（时间倒序） |
