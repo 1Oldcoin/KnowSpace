@@ -489,13 +489,22 @@ curl.exe -s http://127.0.0.1:5056/api/mcp/diagnostics
 
 ## 10. 本地配置：一键复制
 
-桌面版端口是**随机回环端口**，只有后端知道。设置页「AI 工具与 MCP → MCP 接入配置」里有两个按钮，直接把带真实端口的配置复制到剪贴板：
+桌面版默认使用**专属端口 5056**（`Server:FixedLocalPort`）。它被占用时会自动回退到随机回环端口，
+所以别把地址写死——设置页「设置 → AI 工具与 MCP → MCP 接入配置」里有两个按钮，
+直接把带**真实当前端口**的配置复制到剪贴板：
 
 - **Cursor**：`url` + `headers.Authorization`
 - **Claude Desktop**：`npx -y mcp-remote <url> --header "Authorization: Bearer maf_…"`
 
-对应的接口是 `GET /api/mcp/local-config?clientKey=maf_…`（不传 `clientKey` 就生成不含鉴权头的版本，之后自己补）。
-需要固定端口时设 `Server:FixedLocalPort`（默认 `0` = 随机）；这只影响端口可预测性，**监听地址仍然只有回环**，文档标注「仅建议单机可信环境」。
+对应的接口是 `GET /api/mcp/local-config?clientKey=maf_…`（不传 `clientKey` 就生成不含鉴权头的本，之后自己补）。
+
+| `Server:FixedLocalPort` | 行为 |
+| --- | --- |
+| `5056`（默认） | 每次启动都用 5056；**被占用时自动改用随机端口** |
+| `0` | 每次启动由系统分配随机端口 |
+
+两种都只绑 `127.0.0.1`。想临时改成随机而不改文件：设环境变量 `MAF_FIXED_LOCAL_PORT=0`（它优先于配置文件）。
+注意安装目录里的 `appsettings.json` 会在升级时被替换，想长期生效请用环境变量。
 
 ### 服务端部署：`Server:PublicBaseUrl`
 
@@ -505,7 +514,7 @@ curl.exe -s http://127.0.0.1:5056/api/mcp/diagnostics
 | --- | --- | --- | --- |
 | 1 | `Mcp:OAuth:Issuer` | `oauth-issuer` | 开了 OAuth：`aud` 按 issuer 签发，配置片段必须与之一致 |
 | 2 | `Server:PublicBaseUrl` | `public-base-url` | 服务端部署、未开 OAuth |
-| 3 | Kestrel 监听地址 | `kestrel` | 桌面版随机回环端口 |
+| 3 | Kestrel 监听地址 | `kestrel` | 桌面版：默认 5056，被占用时是随机回环端口 |
 | 4 | 请求的 scheme/host | `request` | 兜底 |
 
 ```jsonc
@@ -514,7 +523,10 @@ curl.exe -s http://127.0.0.1:5056/api/mcp/diagnostics
 }
 ```
 
-它**只影响生成给人看的配置字符串**，不参与任何鉴权判定，也不影响令牌的 `iss`/`aud`（后者只认 `Mcp:OAuth:Issuer`，且绝不从请求头推导）。
+它同时影响两件事：①生成给人看的配置字符串；②`/mcp` 的 `Host`/`Origin` 允许列表
+（`McpTransportGuard` 会把它和 `Mcp:OAuth:Issuer` 的主机一起加进白名单）。
+它**不影响令牌的 `iss`/`aud`**（后者只认 `Mcp:OAuth:Issuer`，且绝不从请求头推导）。
+反代后不填它，`/mcp` 会因为 `Host` 不在白名单返回 403。
 如果既没开 OAuth 又没填它，而你又从别的机器打开管理页，`notes[]` 里会出现一条「回环地址只在本机有效」的提醒，前端会把它显示成黄色警告。
 
 ---
@@ -531,5 +543,5 @@ curl.exe -s http://127.0.0.1:5056/api/mcp/diagnostics
 - [`CLOUD-DEPLOYMENT.md`](CLOUD-DEPLOYMENT.md) —— 云服务器部署与 MCP 接入（安全清单、三种部署形态、密钥生命周期）
 - [`MCP-OAUTH.md`](MCP-OAUTH.md) —— OAuth 2.1 实现、CIMD/SSRF 防线、验收清单与风险
 - [`MCP-INTEGRATION-MANUAL.md`](MCP-INTEGRATION-MANUAL.md) —— MCP 两个方向的完整说明书
-- [`MCP-INTEGRATION.md`](MCP-INTEGRATION.md) —— 速查版
+- [`MCP-INTEGRATION-MANUAL.md`](MCP-INTEGRATION-MANUAL.md) —— 反方向（把现成 MCP server 接进来 / 做成插件）的完整说明书
 - [`../ARCHITECTURE.md`](../ARCHITECTURE.md) §9.10 —— 授权模型的设计取舍

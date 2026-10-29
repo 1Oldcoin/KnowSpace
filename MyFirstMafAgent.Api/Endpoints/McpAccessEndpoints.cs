@@ -178,8 +178,8 @@ public static class McpAccessEndpoints
         }
 
         notes.Add(fixedPort > 0
-            ? $"已开启固定回环端口 {fixedPort}（Server:FixedLocalPort），仅建议单机可信环境。"
-            : "桌面版的端口是随机回环端口：重启后可能变化，重新复制即可。");
+            ? $"桌面版使用专属端口 {fixedPort}（Server:FixedLocalPort），正常情况下长期不变；被占用时会自动改用随机端口，届时以本页显示的地址为准。"
+            : "桌面版当前使用随机回环端口：重启后可能变化，地址变了重新复制即可。");
 
         return notes;
     }

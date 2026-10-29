@@ -207,7 +207,7 @@ MCP 自己没有权限概念。不补的后果很直接：
 
 **建议做法**：首跑先不写权限，看它失败在哪，再按需补。声明了 `network` 的插件会停在 `PermissionRequired`，需要用户授权后才启动。
 
-权限词与别名（`fs`、`net.outbound`、`exec` 等）见 `docs/PLUGIN-AUTHOR-GUIDE.md` §3.1。
+权限词与别名（`fs`、`net.outbound`、`exec` 等）见 `docs/PLUGIN-DEVELOPER-MANUAL.md` §5。
 
 ## 1.5 核心怎么驱动它（握手全流程）
 
@@ -668,8 +668,6 @@ curl.exe -s http://127.0.0.1:5056/api/agent-clients/catalog
 
 | 文档 | 内容 |
 | --- | --- |
-| `docs/PLUGIN-DEVELOPER-MANUAL.md` | 插件开发完整教程（自有协议、能力、打包、签名、排错） |
-| `docs/PLUGIN-AUTHOR-GUIDE.md` | 清单字段、协议方法、错误码速查 |
+| `docs/PLUGIN-DEVELOPER-MANUAL.md` | 插件开发完整教程（自有协议、能力、清单字段、错误码、打包、签名、排错、发布） |
 | `docs/PLUGIN-LIFECYCLE.md` | 状态机、四道闸门、隔离、审计、并发限流 |
-| `docs/MCP-ACCESS.md` | 方向 B 的原始运维手册（更偏端点与配置细节） |
-| `docs/MCP-INTEGRATION.md` | 方向 A 的原始速查 |
+| `docs/MCP-ACCESS.md` | 方向 B 的运维手册（更偏端点与配置细节） |

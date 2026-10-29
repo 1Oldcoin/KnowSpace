@@ -106,8 +106,12 @@ powershell -ExecutionPolicy Bypass -File scripts\Publish-Portable.ps1 -Target co
 
 ```bash
 docker compose up -d --build
-# 浏览器打开 http://localhost:5056
+# 自检：curl -s http://127.0.0.1:5056/api/health
 ```
+
+> 容器与 systemd 形态下 `MAF_SERVER_TOKEN` 会保护 `/api`，而浏览器里没有注入 `X-Api-Token` 的代码，
+> 所以**打开页面会是全 401**。这两种形态的实际用途是跑 MCP 服务端 + curl 管理；
+> 要界面请用反向代理注入令牌，或 SSH 隧道 + 桌面形态，见 [`CLOUD-DEPLOYMENT.md`](CLOUD-DEPLOYMENT.md) §3.1 / §3.7。
 
 要改成「API + 独立数据库」：
 

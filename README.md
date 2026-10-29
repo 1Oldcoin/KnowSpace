@@ -4,7 +4,7 @@
 
 **本地优先的个人知识库** —— 资料入库、向量检索、带引用的问答，并把知识库通过 MCP 开放给外部 AI 工具。
 
-[![Release](https://img.shields.io/badge/release-1.0.1-2ea44f)](https://github.com/1Oldcoin/KnowSpace/releases/tag/v1.0.1)
+[![Release](https://img.shields.io/badge/release-1.0.3-2ea44f)](https://github.com/1Oldcoin/KnowSpace/releases/tag/v1.0.3)
 [![.NET](https://img.shields.io/badge/.NET-10.0-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
 [![Vue](https://img.shields.io/badge/Vue-3.5-42b883?logo=vuedotjs&logoColor=white)](https://vuejs.org/)
 [![Electron](https://img.shields.io/badge/Electron-33-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
@@ -70,14 +70,14 @@ graph LR
 | **我的分身** | 投喂日记、聊天记录、性格与形象描述，提炼可复用人格洞察，用第一人称回答「如果是我会怎么做」 |
 | **任务中心** | 长任务并发调度、类型配额、租约与重试、事件流 |
 | **插件平台** | 独立子进程 + JSON-RPC over stdio；Windows AppContainer / Linux bubblewrap 真隔离；清单签名校验、权限授予、调用配额、审计 |
-| **MCP** | 既是**服务端**（把知识库开放给 Cursor / Claude / 自研 Agent），也是**客户端**（让聊天模型调用外部 MCP 工具） |
+| **MCP** | 既是**服务端**（把知识库开放给 Cursor / Claude / 自研 Agent），也是**客户端**（让聊天模型调用外部 MCP 工具）。接入方（外部 Agent）在「设置 → 管理接入客户端」里新建、改能力与工具白名单、限定可见知识库、轮换密钥、看调用统计与审计，不需要 curl |
 
 ## 架构
 
 ```mermaid
 graph TD
     A["Vue 3 + TypeScript + Vite<br/>上传 / 资料 / 笔记 / 问答 / 伴侣 UI"]
-    B["Electron 主进程<br/>窗口 · 随机端口 · 一次性令牌 · sidecar 生命周期"]
+    B["Electron 主进程<br/>窗口 · 专属端口 · 一次性令牌 · sidecar 生命周期"]
     C["ASP.NET Core (.NET 10)<br/>API · 校验 · MAF Agent · RAG 编排"]
     D["后台任务<br/>解析 → 分块 → Embedding · FFmpeg + Whisper 转写"]
     E["本地文件系统<br/>原始资料 / 上传件"]
@@ -95,7 +95,7 @@ graph TD
 **关键设计取舍**
 
 - **后端是一体的**：API + 零部件 + Embedding 模型打成一个可分发单元（Windows 上含便携 PostgreSQL 与 ffmpeg；Linux 上这两个由系统包提供，见「方式三」）。装完即用，不需要用户自己装数据库。
-- **Electron 只是壳**：只负责窗口、端口分配、令牌注入与子进程生命周期，不含业务逻辑。同一份后端可以跑成桌面版、控制台版或容器。
+- **Electron 只是壳**：只负责窗口、端口分配、令牌注入与子进程生命周期，不含业务逻辑。同一份后端可以跑成桌面版、控制台版或容器。后端丢失（崩溃 / 被安全软件结束）后会自动重连并把窗口接回新地址，不需要重启整个应用。
 - **单一组合根**：桌面宿主与控制台宿主共用 `ApiHost.BuildAsync`，避免两套 HTTP 行为。
 - **启动有指纹快路径**：数据库结构未变时跳过全部 DDL 与目录查询，后端就绪从 3.8–5.1s 降到 1.4s 左右。
 
@@ -121,7 +121,16 @@ cp .env.example .env      # 然后编辑：LLM_API_KEY（必填）/ MAF_SERVER_T
 docker compose up -d --build   # 一个容器：API + 前端 + PostgreSQL 17 + pgvector
 ```
 
-浏览器打开 <http://localhost:5056>。首启动要 `initdb` + 全量建表，约 30~90 秒（`docker compose logs -f app` 能看到进度）。
+首启动要 `initdb` + 全量建表，约 30~90 秒（`docker compose logs -f app` 能看到进度）。
+
+> ⚠️ **容器形态下浏览器界面不可用，这是有意的。** `/api` 由 `X-Api-Token` 保护，而前端代码
+> 只会裸 `fetch`（令牌由 Electron 主进程注入，浏览器里没有）。所以容器版的实际用途是
+> **跑 MCP 服务端 + 用 curl 管理**；拿 curl 建密钥、调工具见
+> [`docs/MCP-ACCESS.md`](docs/MCP-ACCESS.md) §4.4。
+>
+> 一定要在浏览器里用界面，只有两条路：① 反向代理认证后注入 `X-Api-Token`
+> （[`docs/CLOUD-DEPLOYMENT.md`](docs/CLOUD-DEPLOYMENT.md) §3.1 A）；
+> ② SSH 隧道 + 桌面形态（同文档 §3.7.1）。
 
 `LLM_API_KEY` **必须填**（DeepSeek 或任何 OpenAI 兼容端点）。留空时上传、切块、向量化都正常，只有问答与摘要会在调用时报 401 —— 启动日志里也会有一条 warning 直接点名缺哪个配置项。
 
@@ -172,8 +181,12 @@ sudo ./deploy/linux/install.sh --source /tmp/console-linux-x64
 装到 `/opt/myfirstmafagent`，数据在 `/var/lib/myfirstmafagent`，配置在 `/etc/myfirstmafagent/myfirstmafagent.env`。
 `deploy/linux/README-LINUX.md` 是完整说明书（含「这台机器上没验证过」清单）。
 
-> **Linux 只有这一份产物**：前端是 `wwwroot/` 里的静态文件，由 API 自己托管，浏览器打开就是完整界面，
-> 不存在「有 UI 版 / 无 UI 版」的区分。Electron 壳只服务 Windows 安装包。
+> **Linux 只有这一份产物**：前端是 `wwwroot/` 里的静态文件，由 API 自己托管，不存在「有 UI 版 / 无 UI 版」的区分。
+> Electron 壳只服务 Windows 安装包。
+>
+> 但**裸机上浏览器打不开可用界面**：`install.sh` 写入的 env 里有 `MAF_SERVER_TOKEN`，`/api` 因此要求
+> `X-Api-Token`，而浏览器里没人注入它。日常用 curl 管理（见 `docs/MCP-ACCESS.md` §4.4），
+> 或按 `docs/CLOUD-DEPLOYMENT.md` §3.7.1 用 SSH 隧道 + Desktop 形态把界面接到本机。
 
 两件必须知道的事：
 
@@ -253,7 +266,8 @@ powershell -ExecutionPolicy Bypass -File scripts\Download-ExternalTools.ps1 -Tar
 
 ## 把知识库接给外部 AI（MCP）
 
-三步。先在应用内「设置 → MCP 客户端」建一个密钥（明文只显示一次）：
+三步。先在应用内「设置 → AI 工具与 MCP → 管理接入客户端」建一个密钥（明文只显示一次），
+或直接在左侧导航「接入的 AI 工具」里更精细地设能力 / 工具白名单 / 可见知识库：
 
 ```jsonc
 // Cursor: ~/.cursor/mcp.json
@@ -293,11 +307,11 @@ curl -X POST http://127.0.0.1:5056/mcp \
 安装包内 `resources/app-update.yml` 指向本仓库的 GitHub Releases（`electron-builder.yml` 的 `publish: provider: github`）。发新版的完整流程：
 
 ```powershell
-# 1. 改 desktop-electron\package.json 的 version（例如 1.0.2）
+# 1. 改 desktop-electron\package.json 的 version（例如 1.0.4）
 # 2. 打包（默认在 %TEMP% 构建再拷回 publish\releases，见脚本注释）
 powershell -ExecutionPolicy Bypass -File scripts\Build-ElectronInstaller.ps1
 # 3. 建 GitHub Release 并上传 latest.yml + 安装包 + blockmap
-powershell -ExecutionPolicy Bypass -File scripts\Publish-Release.ps1 -Version 1.0.2
+powershell -ExecutionPolicy Bypass -File scripts\Publish-Release.ps1 -Version 1.0.4
 ```
 
 客户端启动 20 秒后自动查一次，之后每 6 小时复查；也可在「设置 → 关于/更新」或菜单「帮助 → 检查更新」手动触发。
@@ -310,7 +324,7 @@ powershell -ExecutionPolicy Bypass -File scripts\Publish-Release.ps1 -Version 1.
 
 ## 版本与分支
 
-当前发布版本：**1.0.1**（Windows 安装包 / Linux 包 / Docker 镜像均来自同一份代码）。
+当前发布版本：**1.0.3**（Windows 安装包 / Linux 包 / Docker 镜像均来自同一份代码）。
 
 | 分支 | 定位 | 规则 |
 | --- | --- | --- |
@@ -341,10 +355,25 @@ powershell -ExecutionPolicy Bypass -File scripts\Merge-To-Main.ps1 -DryRun
 powershell -ExecutionPolicy Bypass -File scripts\Merge-To-Main.ps1
 
 # 顺带重打版本标签
-powershell -ExecutionPolicy Bypass -File scripts\Merge-To-Main.ps1 -TagName v1.0.2
+powershell -ExecutionPolicy Bypass -File scripts\Merge-To-Main.ps1 -TagName v1.0.4
 ```
 
 脚本做的事：检查工作区干净 → `fetch` → 本地 `master` 快进到 `github/main` → `merge --no-ff dev` → 推送 `master:main` → 把 `dev` 也指到合并提交并推送（避免下次出现「假落后」）→ 可选重打标签。默认会列出待合并的提交并要求确认，`-Yes` 跳过；`-NoPush` 只做本地合并；本地 `master` 有未推送提交时默认拒绝继续。
+
+### 1.0.3 更新要点
+
+这一版的主题是**"桌面端不再需要手动重启"**，外加补齐 MCP 接入的缺口。
+
+| 项 | 变化 |
+| --- | --- |
+| **后端自动重连** | 新增 15 秒存活看护。后端崩溃、被安全软件结束、或换了端口之后，窗口会**自动接回新地址**并刷新，不再表现为「挂一阵子就用不了」。恢复失败 5 次才弹框 | |
+| **专属端口** | 桌面版默认监听 **5056**（`Server:FixedLocalPort`），不再每次启动随机，手写的 MCP 配置可以长期有效；**端口被占用时自动回退随机端口**，不会起不来。设 `0` 恢复随机，或用环境变量 `MAF_FIXED_LOCAL_PORT` 覆盖 |
+| **接入客户端管理页** | 新增「接入的 AI 工具」页（设置页有入口）：新建客户端、勾能力与工具白名单、限定可见知识库、轮换密钥、看调用统计与审计明细。同时新增 `GET /api/agent-clients/overview` 聚合接口 |
+| **删除知识库** | 侧栏知识库右侧新增删除按钮，会连同资料、切片、向量、笔记、专题、问答历史与磁盘文件一起清理；默认知识库不可删 |
+| **安装包瘦身** | 283 → 278 MB：不再把构建机上跑过的 PostgreSQL 数据目录打进安装包 |
+
+关于「统计当前被连接的应用」：MCP 是**无状态** Streamable HTTP，服务端没有长连接可查，
+所以页面上的口径是「**最近活跃**」= 已启用且最近 5 分钟内有有效调用，不写成「已连接」。
 
 ### 1.0.1 更新要点
 
@@ -362,7 +391,7 @@ powershell -ExecutionPolicy Bypass -File scripts\Merge-To-Main.ps1 -TagName v1.0
 | **依赖 CVE** | 顶层钉 `System.Security.Cryptography.Pkcs 10.0.14`，消掉 SqlSugarCore 带进来的 2 条公告；新增 `scripts/Check-Dependencies.ps1` 门禁 |
 | **安装包瘦身** | 283 MB（上一版 297 MB） |
 
-桌面版行为不变：仍是回环随机端口 + 一次性令牌 + 便携数据库。完整设计、迁移路径与后续阶段见
+桌面版当时行为不变：回环随机端口 + 一次性令牌 + 便携数据库（端口已在 1.0.3 改为默认固定 5056，并加了自动重连）。完整设计、迁移路径与后续阶段见
 [`docs/MCP-REMOTE-DESIGN.md`](docs/MCP-REMOTE-DESIGN.md)。
 
 ## 文档
@@ -375,14 +404,12 @@ powershell -ExecutionPolicy Bypass -File scripts\Merge-To-Main.ps1 -TagName v1.0
 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | 跨平台部署口径：三种交付形态、平台矩阵、原生工具解析规则 |
 | [`docs/CLOUD-DEPLOYMENT.md`](docs/CLOUD-DEPLOYMENT.md) | **云服务器部署与 MCP 接入**：安全清单、Docker/systemd/Windows 三种形态、密钥生命周期 |
 | [`docs/MCP-REMOTE-DESIGN.md`](docs/MCP-REMOTE-DESIGN.md) | **远程 MCP 与云端安全设计**：Desktop/Server 双形态、启动守卫、`maf_`→`zjp_` 迁移路径、审计保留与分区、备份恢复、日志脱敏、多副本限流 |
-| [`docs/DOCKER-VERIFICATION-2026-10-27.md`](docs/DOCKER-VERIFICATION-2026-10-27.md) | 一次真实 Docker 环境验收的完整记录（已脱敏）：跑通了什么、踩了什么坑、修了什么 |
+| [`docs/archive/DOCKER-VERIFICATION-2026-10-27.md`](docs/archive/DOCKER-VERIFICATION-2026-10-27.md) | 一次真实 Docker 环境验收的完整记录（历史存档，已脱敏） |
 | [`docs/MCP-ACCESS.md`](docs/MCP-ACCESS.md) | MCP 接入速查：三步接入、能力词表、排错 |
 | [`docs/MCP-INTEGRATION-MANUAL.md`](docs/MCP-INTEGRATION-MANUAL.md) | MCP 两个方向（服务端 / 客户端）的完整说明书 |
 | [`docs/JOBS.md`](docs/JOBS.md) | 任务中心：并发、配额、租约、重试与事件流 |
-| [`docs/PLUGIN-DEVELOPER-MANUAL.md`](docs/PLUGIN-DEVELOPER-MANUAL.md) | 插件开发说明书（从零到发布） |
-| [`docs/PLUGIN-DEVELOPMENT-GUIDE.md`](docs/PLUGIN-DEVELOPMENT-GUIDE.md) | 插件开发分阶段教程 |
-| [`docs/PLUGIN-LIFECYCLE.md`](docs/PLUGIN-LIFECYCLE.md) | 插件生命周期与安全口径 |
-| [`docs/PLUGIN-AUTHOR-GUIDE.md`](docs/PLUGIN-AUTHOR-GUIDE.md) | 插件清单速查 |
+| [`docs/PLUGIN-DEVELOPER-MANUAL.md`](docs/PLUGIN-DEVELOPER-MANUAL.md) | 插件开发说明书：15 分钟上手、manifest 字段、能力、打包发布 |
+| [`docs/PLUGIN-LIFECYCLE.md`](docs/PLUGIN-LIFECYCLE.md) | 插件生命周期与安全口径（核心侧如何校验、隔离、审计） |
 | [`docs/PHASE0-BASELINE.md`](docs/PHASE0-BASELINE.md) | 阶段 0 的延迟/索引基线（历史存档） |
 | [`desktop-electron/README.md`](desktop-electron/README.md) | 桌面壳：启动/退出时序、启动画面定制、自动更新 |
 
@@ -424,9 +451,15 @@ docs/                         文档
 
 项目处于**自用演进**阶段：功能完整可用，接口与配置项仍可能调整。
 
-- ✅ 已完成：知识库全链路、混合检索、MCP 双向、插件平台、桌面安装包、Docker 部署
-- 🚧 进行中：自动更新发布链路（安装包与 `latest.yml` 已产出，尚未接真实更新源）
-- ⚠️ 已知限制：安装包未代码签名；单用户（无多用户体系）；MCP 密钥无有效期字段
+- ✅ 已完成：知识库全链路、多知识库与删除、混合检索、MCP 双向（含接入客户端管理页）、
+  插件平台、桌面安装包 + 自动更新发布链路、Linux 包、Docker 部署
+- ⚠️ 已知限制：
+  - 安装包**未做代码签名**，首次运行会触发 SmartScreen 提示
+  - **单用户**：没有账号体系，管理面靠一次性令牌 / 长期令牌
+  - MCP 密钥**无有效期字段**，目前只能靠手动轮换
+  - **Linux / Docker 形态没有可用的浏览器界面**（`/api` 要 `X-Api-Token`，浏览器里没有注入点），
+    只能 curl 管理或按 `docs/CLOUD-DEPLOYMENT.md` §3.1/§3.7 自行接界面
+  - 云端**只支持单副本**（限流与诊断都在进程内）
 
 详见 [`docs/ROADMAP.md`](docs/ROADMAP.md)。
 

@@ -16,6 +16,7 @@ const { app, BrowserWindow, Menu, dialog, shell, session, ipcMain } = require('e
 const { spawn } = require('node:child_process');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const net = require('node:net');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { createUpdater } = require('./updater');
@@ -167,13 +168,23 @@ function resolveApiExecutable() {
 /**
  * 读取 sidecar 的 appsettings.json 里的 Server:FixedLocalPort。
  *
- * 0 / 缺省 = 随机回环端口（安全默认：端口不可预测）。
- * 设成固定端口只是「配置可以写死」的便利，不改变「只绑回环地址」的安全前提，
- * 因此这里不做任何自动广播或对外监听。
+ * 默认 5056（本产品的「专属端口」），便于把 MCP 配置、书签、脚本里的地址写死；
+ * 设成 0 = 每次随机回环端口。两种都只绑 127.0.0.1，不改变安全前提。
+ *
+ * 优先级：环境变量 > appsettings.json > 0。
+ * 环境变量显式设成 0 时**直接返回 0**（表示「我要随机」），不再回落到配置文件——
+ * 否则用户想临时恢复随机端口却做不到，只能去改安装目录里的 json。
  */
 function resolveFixedLocalPort(exePath) {
-  const fromEnv = Number.parseInt(process.env.MAF_FIXED_LOCAL_PORT || '', 10);
-  if (Number.isInteger(fromEnv) && fromEnv > 0 && fromEnv < 65536) return fromEnv;
+  const rawFromEnv = process.env.MAF_FIXED_LOCAL_PORT;
+  if (rawFromEnv !== undefined && String(rawFromEnv).trim() !== '') {
+    const fromEnv = Number.parseInt(rawFromEnv, 10);
+    if (Number.isInteger(fromEnv) && fromEnv >= 0 && fromEnv < 65536) {
+      if (fromEnv === 0) log('MAF_FIXED_LOCAL_PORT=0 — using a random loopback port');
+      return fromEnv;
+    }
+    log(`ignoring invalid MAF_FIXED_LOCAL_PORT='${rawFromEnv}'`);
+  }
 
   try {
     const settingsPath = path.join(path.dirname(exePath), 'appsettings.json');
@@ -181,10 +192,7 @@ function resolveFixedLocalPort(exePath) {
 
     const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
     const port = Number.parseInt(settings?.Server?.FixedLocalPort, 10);
-    if (Number.isInteger(port) && port > 0 && port < 65536) {
-      log(`fixed local port enabled: ${port} (only recommended on trusted single-user machines)`);
-      return port;
-    }
+    if (Number.isInteger(port) && port > 0 && port < 65536) return port;
   } catch (error) {
     log(`failed to read Server:FixedLocalPort: ${error.message}`);
   }
@@ -192,17 +200,49 @@ function resolveFixedLocalPort(exePath) {
   return 0;
 }
 
-function startApi(exePath, readyFile) {
+/**
+ * 端口现在能不能绑上。
+ *
+ * 只用来**提前**发现「专属端口被别的程序占了」，好回退到随机端口；
+ * 探测与真正 spawn 之间仍有毫秒级竞态，但后端 bind 失败会退出、走恢复流程，
+ * 那时会再探测一次并回退，所以不会卡死。
+ */
+function canBindPort(port) {
+  return new Promise((resolve) => {
+    const probe = net.createServer();
+    probe.once('error', () => resolve(false));
+    probe.once('listening', () => probe.close(() => resolve(true)));
+    // 显式绑 127.0.0.1：与后端一致，避免「0.0.0.0 上被占但回环可用」这类误判。
+    probe.listen(port, '127.0.0.1');
+  });
+}
+
+/**
+ * 决定这次启动的监听地址。
+ *
+ * 专属端口可用就用它；被占用时**自动回退随机端口**，而不是让应用起不来。
+ * 这一点比"端口绝对固定"更重要：一次端口冲突不该演变成「应用打不开」。
+ */
+async function chooseListenUrl(exePath) {
+  const fixedPort = resolveFixedLocalPort(exePath);
+  if (fixedPort <= 0) return 'http://127.0.0.1:0';
+
+  if (await canBindPort(fixedPort)) {
+    log(`using fixed local port ${fixedPort}`);
+    return `http://127.0.0.1:${fixedPort}`;
+  }
+
+  log(`fixed local port ${fixedPort} is already in use; falling back to a random loopback port`);
+  return 'http://127.0.0.1:0';
+}
+
+function startApi(exePath, readyFile, listenUrl) {
   // 令牌经环境变量传入，不出现在命令行（命令行可被同机其它进程读到）。
   const environment = {
     ...process.env,
     DESKTOP_API_TOKEN: apiToken,
     DESKTOP_STRICT_CSP: '1'
   };
-
-  // 默认随机端口；只有显式配置固定端口时才写死（见 resolveFixedLocalPort）。
-  const fixedPort = resolveFixedLocalPort(exePath);
-  const listenUrl = fixedPort > 0 ? `http://127.0.0.1:${fixedPort}` : 'http://127.0.0.1:0';
 
   log(`starting API sidecar on ${listenUrl}`);
 
@@ -745,7 +785,10 @@ async function ensureBackend() {
 
   apiToken = crypto.randomBytes(32).toString('hex');
   apiOwned = true;
-  apiProcess = startApi(exePath, readyFile);
+  // 先选地址再 spawn：专属端口被占用时在这里就回退到随机端口，
+  // 而不是让后端 bind 失败、再走一轮恢复流程。
+  const listenUrl = await chooseListenUrl(exePath);
+  apiProcess = startApi(exePath, readyFile, listenUrl);
   apiBaseUrl = await waitForReadyFile(readyFile);
   await waitForHealth(apiBaseUrl);
   return apiBaseUrl;

@@ -8,12 +8,47 @@
 
 | 进程 | 负责 |
 | --- | --- |
-| Electron 主进程 | 窗口、菜单、单实例锁、应用退出、随机端口、一次性令牌、API 子进程生命周期、外链拦截、**自动更新** |
+| Electron 主进程 | 窗口、菜单、单实例锁、应用退出、专属端口（占用时回退随机）、一次性令牌、API 子进程生命周期、**存活看护与自动重连**、外链拦截、**自动更新** |
 | Preload | 只暴露 `window.desktopHost.{platform, openExternal, getAppInfo, getUpdateState, checkForUpdates, downloadUpdate, installUpdate, onUpdateStatus}`（全部是白名单化的极窄接口） |
 | Renderer | Vue 构建产物，由 Kestrel 托管，`contextIsolation` 开启、`nodeIntegration` 关闭、`sandbox` 开启 |
 | .NET API | REST、MCP、业务编排、后台 Worker、便携 PostgreSQL |
 
 令牌既不在 URL、日志、ready 文件里，也不下发给渲染进程：主进程通过 `webRequest.onBeforeSendHeaders` 注入 `X-Api-Token`。
+
+## 端口：默认固定，占用则回退
+
+| `Server:FixedLocalPort` | 行为 |
+| --- | --- |
+| `5056`（默认） | 每次启动都用 5056，手写的 MCP 配置可长期有效 |
+| `0` | 每次启动由系统分配随机回环端口 |
+
+端口在启动前先**探测一次**（`canBindPort`）：被别的程序占用时自动回退到随机端口并在日志里记一行，
+**不会**因端口冲突导致应用打不开（曾经的表现是“一次端口冲突 = 应用起不来”）。
+
+优先级：环境变量 `MAF_FIXED_LOCAL_PORT` > `appsettings.json` > `0`。
+环境变量显式设 `0` 表示“要随机”，不再回落到配置文件。
+注意：安装目录下的 `appsettings.json` 会在升级时被整体替换，想长期生效请用环境变量：
+
+```powershell
+[Environment]::SetEnvironmentVariable('MAF_FIXED_LOCAL_PORT', '5056', 'User')
+```
+
+## 后端丢失后自动重连
+
+窗口在启动时就把地址固化（`loadURL` + 令牌头过滤器 + 导航拦截），
+而桌面版端口可能变。所以主进程内置三层保护：
+
+1. **存活看护**：每 15 秒探一次 `GET /api/desktop/info`（比 `/api/health` 更能证明“这个端口上是我们自己的后端”），
+   连续 **3 次**失败才判定丢失，避开数据库 checkpoint 卡顿造成的误判。
+2. **恢复**：先尝试接管（可能已有别的实例），否则重新拉起后端；成功后把窗口 `loadURL` 到新地址。
+   互斥（看护与 `exit` 回调同时报障只跑一份）+ 5 秒冷却 + 最多 5 次，彻底失败才弹框。
+3. **不自相残杀**：若运行时文件指向的进程还活着但不应答，给它 10 秒宽限期；
+   仍不行就报错交给上层重试，**绝不起第二个后端**去抢同一个便携 PostgreSQL。
+
+令牌头过滤器只限定 `127.0.0.1`，具体端口在回调里与当前 `apiBaseUrl` 比对，
+所以恢复后换端口依然能注入令牌。`stopApi()` 会置 `intentionalStop`，
+避免退出应用 / 安装更新时的预期 `exit` 触发恢复、把安装器要替换的文件重新锁住。
+
 
 ## 启动
 
@@ -80,7 +115,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Test-DesktopContract
     -ApiExe C:\Temp\mafapi\Zhijian.Api.exe
 ```
 
-检查项：随机回环端口、ready 文件不含令牌、无令牌 401、错误令牌 401、正确令牌 200、`/mcp` 无令牌 401、静态首页 200、严格 CSP 头存在、`POST /api/desktop/shutdown` 后进程自行退出。
+检查项：专属端口（被占用时回退随机）、ready 文件不含令牌、无令牌 401、错误令牌 401、正确令牌 200、`/mcp` 无令牌 401、静态首页 200、严格 CSP 头存在、`POST /api/desktop/shutdown` 后进程自行退出。
 
 ## 打包
 

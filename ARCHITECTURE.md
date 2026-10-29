@@ -366,7 +366,7 @@ Electron.NET 现阶段不能作为基线：`ElectronNET.Core` 最新为 `0.6.0`�
 
 | 组件 | 位置 | 说明 |
 | --- | --- | --- |
-| Electron 主进程 | `desktop-electron/main.js` | 单实例锁、随机端口、一次性令牌、子进程生命周期、外链拦截、菜单与退出 |
+| Electron 主进程 | `desktop-electron/main.js` | 单实例锁、专属端口（默认 5056，占用时回退随机）、一次性令牌、子进程生命周期、**15 秒存活看护与自动重连**、外链拦截、菜单与退出 |
 | Preload | `desktop-electron/preload.js` | 白名单：`desktopHost.platform`、`desktopHost.openExternal`；**不**下发令牌 |
 | 本机鉴权 | `Hosting/DesktopSecurity.cs` | `X-Api-Token` 仅覆盖 `/api`；固定时间比较；未配置令牌时整体禁用。`/mcp` 走独立的客户端密钥体系（见 §9.10.3） |
 | 启动契约 | `Hosting/DesktopHostArguments.cs` | `--desktop-ready-file`、`--desktop-data-root`；ready 文件只含 `url`/`pid`，不含令牌 |
@@ -451,7 +451,7 @@ Windows 上用 **AppContainer** 启动插件子进程——不是受限令牌，
 
 **调用准入（阶段 11）**：`Application/Plugins/PluginInvocationLimiter.cs` 是唯一的准入点，取代了 `PluginProcessHost` 里那个**排队无上限**的 `SemaphoreSlim`。四层限制（插件队列 → 能力队列 → 能力并发 → 插件并发）中任何一层不满足都立刻返回 `-32006` / HTTP 429，而不是让调用方挂到自己的超时。三个必须保持的约束：**在途上限 = 并发 + 队列**（因此 `queue=0` 是「没有空位就拒绝」而不是「一律拒绝」）；**先拿能力闸门再拿插件闸门**（反了会让调用一边占插件容量一边空等，且插件级 `running` 虚高）；**任何失败路径都要把计数与信号量还回去**。计数在进程内，多进程部署时是「每进程上限」。
 
-**验证**：`scripts/Test-PluginContract.ps1` 以真实子进程跑完握手、能力发现、健康、两类调用、结构化错误与关闭（18 项检查）。插件作者文档：`docs/PLUGIN-AUTHOR-GUIDE.md`；准入控制细节与实测数据见 `docs/PLUGIN-LIFECYCLE.md` §14。
+**验证**：`scripts/Test-PluginContract.ps1` 以真实子进程跑完握手、能力发现、健康、两类调用、结构化错误与关闭（18 项检查）。插件作者文档：`docs/PLUGIN-DEVELOPER-MANUAL.md`；准入控制细节与实测数据见 `docs/PLUGIN-LIFECYCLE.md` §14。
 
 **插件数量**：扫描不截断、列表不分页、注册表不设配额——**没有数量上限**。唯一收敛的是 `Plugins:StartupConcurrency`（默认 4）控制的“同时 spawn 多少进程”，因为每个插件就是一个子进程。`POST /api/plugins/rescan` 支持热发现（把文件夹拷进去即可，不必重启 API），且**扫描不覆盖用户的停用意图**。
 
@@ -804,7 +804,7 @@ Embedding 使用 `Microsoft.ML.OnnxRuntime` 和 `Microsoft.ML.Tokenizers` NuGet 
 
 ### 9.14 容器化验收后修掉的两处缺陷
 
-外部同事在真实 Docker 环境跑通全链路（记录见 `docs/DOCKER-VERIFICATION-2026-10-27.md`）后，暴露出两个**不会导致启动失败、只会静默降级**的问题。它们的共同教训是：日志里出现的错误信息如果指不出"该改哪个配置项"，就等于没提供信息。
+外部同事在真实 Docker 环境跑通全链路（记录见 `docs/archive/DOCKER-VERIFICATION-2026-10-27.md`）后，暴露出两个**不会导致启动失败、只会静默降级**的问题。它们的共同教训是：日志里出现的错误信息如果指不出"该改哪个配置项"，就等于没提供信息。
 
 | 缺陷 | 表象 | 根因 | 修法 |
 | --- | --- | --- | --- |

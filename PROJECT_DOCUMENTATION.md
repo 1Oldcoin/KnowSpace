@@ -77,7 +77,7 @@ MyFirstMafAgent/
 | `docs/PLUGIN-DEVELOPER-MANUAL.md` | 插件开发说明书：快速开始、manifest、两类能力、权限与沙箱、打包签名、升级排空、排错、Python/Node 实现 |
 | `docs/MCP-INTEGRATION-MANUAL.md` | MCP 接入说明书：把现成 MCP server 当插件载入，以及把本应用当 MCP server 给外部 Agent 用 |
 
-需要更细的运行时内部行为：`docs/PLUGIN-AUTHOR-GUIDE.md`（字段速查）、`docs/PLUGIN-LIFECYCLE.md`（状态机/隔离/审计）、`docs/MCP-ACCESS.md`、`docs/MCP-INTEGRATION.md`。
+需要更细的运行时内部行为：`docs/PLUGIN-LIFECYCLE.md`（状态机/隔离/审计）、`docs/MCP-ACCESS.md`（对外暴露）、`docs/MCP-INTEGRATION-MANUAL.md`（接入进来）；插件字段与协议契约见 `docs/PLUGIN-DEVELOPER-MANUAL.md`。
 
 ### 主要后端文件职责
 
@@ -758,7 +758,7 @@ docker compose --profile external up -d --build
 
 - 静态文件采用外置 `wwwroot`（发布脚本写入），不使用嵌入资源；不启用 AOT，因此不受嵌入文件提供程序限制。
 - 应用图标统一放在仓库根 `assets/app.ico`（ICO 格式，含 16/32/48/64/128/256 六种尺寸）：Electron 主进程用它作为窗口图标，打包器用它生成 exe 与快捷方式图标；前端 `public/favicon.ico` 是同一文件的副本。**替换图标：覆盖 `assets/app.ico` 并同步 `FrontEnd/myfist-agent/public/favicon.ico`，再重新发布即可。**
-- 桌面版窗口加载 `http://127.0.0.1:<随机端口>/`，API 是独立子进程：令牌经环境变量传入、由主进程通过 `X-Api-Token` 请求头注入；退出时先 `POST /api/desktop/shutdown`，超时再强杀。
+- 桌面版窗口加载 `http://127.0.0.1:<端口>/`（默认 5056，被占用时回退随机端口），API 是独立子进程：令牌经环境变量传入、由主进程通过 `X-Api-Token` 请求头注入；退出时先 `POST /api/desktop/shutdown`，超时再强杀。主进程每 15 秒探活，连续 3 次失败会重新拉起后端并把窗口 `loadURL` 到新地址。
 - 便携库随 API 启动，退出时走 `pg_ctl stop -D <pgdata> -m fast -w -t 60` 优雅停止；异常退出后下次启动会读 `pgdata/postmaster.pid`，若那个 `postgres.exe` 还活着就直接复用它的端口，不再起第二个实例。
 - 便携库**就地**从发布目录的 `ExternalTools/pgSQL/<rid>/` 运行（不再复制到 `%LOCALAPPDATA%`），数据与日志写在 `%LOCALAPPDATA%\MyFirstMafAgentData` 下的 `pgdata`/`pglogs`：所以升级/卸载必须先把 `postgres.exe` 停掉，否则它占住安装目录——`Zhijian.Api.exe --stop-portable-postgres` 就是给安装器用的。
 - **文件夹版不要放在桌面、文档或下载目录**：安全软件（火绒/360 的文件防护）与 Windows「受控文件夹访问」会拦截从这些位置启动的未签名程序写入用户目录，便携数据库因此初始化失败（表现为 `Access is denied`）。推荐 `D:\Apps\MyFirstMafAgent`。

@@ -67,7 +67,11 @@ docker compose up -d --build
 docker compose ps           # 等到 app 变成 healthy（首次约 1~2 分钟，含 initdb）
 ```
 
-浏览器打开 `http://<主机IP>:5056`。
+容器起来后 `curl -s http://127.0.0.1:5056/api/health` 应返回 `{"status":"ok",...}`。
+
+> ⚠️ **不要期待浏览器界面**：`/api` 需要 `X-Api-Token`，浏览器里没人注入它，打开页面会看到
+> 一片 401。容器版的实际用途是跑 MCP 服务端 + curl 管理；要界面请看
+> `docs/CLOUD-DEPLOYMENT.md` §3.1（反代注入令牌）或 §3.7.1（SSH 隧道 + 桌面形态）。
 
 自检：
 
@@ -184,7 +188,8 @@ ConnectionStrings__KnowledgeBase=Host=pg.example.com;Port=5432;Database=zhijian;
 ## 关于 Electron（Windows 桌面版）
 
 `desktop-electron/` 那套**只在 Windows 上有意义**，且配的是 NSIS 安装包（`win: target: nsis`）。
-Linux 上没有对应产物 —— 因为不需要：浏览器打开就是完整界面。
+Linux 上没有对应产物。（注意：这不代表 Linux 上浏览器就能直接用界面 —— 令牌仍需要一个注入点，
+见前面的警告。）
 
 如果以后确实想要"Linux 桌面应用"（双击图标、独立窗口、托盘），那要另做
 `electron-builder` 的 `linux:` target（AppImage/deb），需要处理：
