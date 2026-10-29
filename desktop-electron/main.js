@@ -32,6 +32,21 @@ const READY_TIMEOUT_MS = 180_000;
 const HEALTH_TIMEOUT_MS = 180_000;
 const SHUTDOWN_TIMEOUT_MS = 20_000;
 /**
+ * 后端存活看护。
+ *
+ * 为什么需要：窗口在 createWindow 时就把地址固化了（loadURL、令牌头过滤器、will-navigate
+ * 判定都依赖它），而桌面版默认用随机回环端口，后端一旦重启就会换端口。
+ * 以前没有任何重连逻辑，于是“挂着不动一段时间就用不了”——其实后端在另一个端口上活着，
+ * 只是这个窗口永远指着旧地址。
+ */
+const WATCHDOG_INTERVAL_MS = 15_000;
+/** 连续失败这么多次才判定“后端丢了”，避免单次抖动或数据库 checkpoint 卡顿触发重连。 */
+const WATCHDOG_FAILURE_THRESHOLD = 3;
+/** 自动恢复的冷却时间，避免恢复失败时高频重试。 */
+const RECOVERY_COOLDOWN_MS = 5_000;
+/** 连续恢复失败上限：达到后弹框告知用户，而不是无限重启。 */
+const RECOVERY_MAX_ATTEMPTS = 5;
+/**
  * 启动画面延迟出现的时间。
  *
  * 后端已经在后台跑（关窗不关服务）时，从双击到窗口出现只有几百毫秒；这种情况下再闪一个
@@ -52,6 +67,19 @@ let apiToken = null;
 let apiOwned = false;
 let isQuitting = false;
 let updater = null;
+/** 看护定时器与连续失败计数（见 WATCHDOG_* 常量）。 */
+let watchdogTimer = null;
+let probeFailures = 0;
+/** 恢复流程互斥：同一时刻只跑一个，避免定时器与 exit 回调同时触发拉起两个后端。 */
+let recoveryInFlight = null;
+let lastRecoveryAt = 0;
+let recoveryAttempts = 0;
+/**
+ * 主动停止（退出应用、安装更新）时置真。
+ * 此时 child 的 exit 是预期内的，不能当成“后端崩了”去恢复，否则会重拉一个后端
+ * 把安装器要替换的文件重新锁住。
+ */
+let intentionalStop = false;
 /** 进程启动时刻：启动画面与日志用它算「用户等了多久」。 */
 const startupBeganAt = Date.now();
 
@@ -195,10 +223,12 @@ function startApi(exePath, readyFile) {
 
   child.on('exit', (code, signal) => {
     log(`API sidecar exited (code=${code}, signal=${signal})`);
-    if (isQuitting) return;
-    dialog.showErrorBox('知识库服务已停止',
-      `后端进程意外退出（code=${code}）。日志：${path.join(userDataRoot(), 'logs')}`);
-    app.exit(1);
+    if (apiProcess === child) apiProcess = null;
+    if (isQuitting || intentionalStop) return;
+
+    // 以前这里直接 dialog.showErrorBox + app.exit(1)：后端一崩，窗口连同未保存的输入
+    // 一起被强杀。现在先尝试自动恢复（重新拉起，或接管另一个还活着的实例）。
+    void recoverBackend('后端进程意外退出', { allowSpawn: true });
   });
 
   // 让本进程可以退出而不等待子进程；后台服务的生命周期不挂在窗口上。
@@ -259,15 +289,33 @@ async function waitForHealth(baseUrl) {
   throw new Error('API 健康检查超时。');
 }
 
-function installTokenHeader(baseUrl) {
-  // 接管已有后台时可能没有令牌（命令行 / 服务方式启动），此时不要发一个空头。
-  if (!apiToken) return;
-
-  const filter = { urls: [`${baseUrl}/*`] };
-  session.defaultSession.webRequest.onBeforeSendHeaders(filter, (details, callback) => {
-    details.requestHeaders[TOKEN_HEADER] = apiToken;
-    callback({ requestHeaders: details.requestHeaders });
-  });
+/**
+ * 给发往本机后端的请求注入令牌。
+ *
+ * <p>
+ * 关键是**只注册一次、地址动态判断**：以前的实现把 `baseUrl` 闭包进过滤器 URL，
+ * 后端换了端口（重启必然换，因为默认是随机端口）之后这个过滤器就再也匹配不上，
+ * 于是所有请求都缺令牌、界面直接 401/离线。现在过滤器只限定 `127.0.0.1`，
+ * 具体端口在回调里跟当前的 `apiBaseUrl` 比对。
+ * </p>
+ *
+ * <p>
+ * Chrome 匹配模式不含端口（端口被当作通配），所以 `http://127.0.0.1/*` 能覆盖任意端口。
+ * </p>
+ */
+function installTokenHeader() {
+  session.defaultSession.webRequest.onBeforeSendHeaders(
+    { urls: ['http://127.0.0.1/*', 'http://localhost/*'] },
+    (details, callback) => {
+      // apiToken 为空（接管命令行启动的实例）时不发头；
+      // 也不能提前 return 不注册监听器——那样一旦后期自动恢复拉起了带令牌的新后端，
+      // 就再也没机会补上注入，界面会变成全部 401。
+      if (apiToken && apiBaseUrl && details.url.startsWith(apiBaseUrl)) {
+        details.requestHeaders[TOKEN_HEADER] = apiToken;
+      }
+      callback({ requestHeaders: details.requestHeaders });
+    }
+  );
 }
 
 function createWindow(baseUrl) {
@@ -297,7 +345,9 @@ function createWindow(baseUrl) {
   });
 
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (!url.startsWith(baseUrl)) {
+    // 比对当前的 apiBaseUrl 而不是启动时捕获的那个：自动恢复后地址会变，
+    // 用旧值会把恢复后的正常导航也拦下来。
+    if (!apiBaseUrl || !url.startsWith(apiBaseUrl)) {
       event.preventDefault();
       openExternal(url);
     }
@@ -551,6 +601,11 @@ function installMenu() {
 async function stopApi() {
   if (!apiBaseUrl) return;
 
+  // 标记这是「主动停止」：期间 child 的 exit 属预期，不能触发自动恢复，
+  // 否则安装器要替换的文件会被新拉起的后端重新锁住。
+  intentionalStop = true;
+  stopWatchdog();
+
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 5000);
@@ -637,6 +692,167 @@ async function attachExistingBackend() {
   return info.url;
 }
 
+/**
+ * 进程是否还活着。
+ * 用于在“探活失败”时区分「后端真的没了」与「后端还活着但一时没应答」：
+ * 后者绝不能拉起第二个实例。信号 0 不做任何事，只做存在性检查；
+ * EPERM 表示进程存在但无权限，同样算活着。
+ */
+function isProcessAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+}
+
+/**
+ * 确保有一个可用的后端，返回它的地址；失败抛错。
+ *
+ * 顺序：先接管已经跑着的实例（可能刚被自动恢复拉起，端口与上次不同），
+ * 再自己拉起。绝不并存两个后端——它们会抢同一个便携 PostgreSQL、同一份数据目录与端口。
+ */
+async function ensureBackend() {
+  if (await attachExistingBackend()) return apiBaseUrl;
+
+  // 运行时文件指向的进程还活着，却探活失败：可能是数据库 checkpoint / GC 卡了一下。
+  // 这时**绝对不能**再拉一个后端——两个实例会抢同一个便携 PostgreSQL 与数据目录。
+  // 给它一个宽限期，实在不行就报错交给上层去重试，而不是盲目 spawn。
+  const recorded = readJsonFile(runtimeInfoPath());
+  if (recorded && isProcessAlive(recorded.processId)) {
+    log(`runtime file points at live pid=${recorded.processId} but no response; waiting for it`);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await sleep(2000);
+      if (await attachExistingBackend()) return apiBaseUrl;
+    }
+    throw new Error(
+      `已有后端进程（pid=${recorded.processId}）但不响应请求；为避免两个实例争抢数据库，不再启动第二个。`);
+  }
+
+  const exePath = resolveApiExecutable();
+  if (!exePath) {
+    throw new Error(`未找到 ${API_EXE_NAME}。请先执行 scripts\\Publish-Portable.ps1，或设置 MAF_API_EXE 指向已发布的可执行文件。`);
+  }
+
+  const readyFile = path.join(app.getPath('userData'), 'api-ready.json');
+  try {
+    fs.rmSync(readyFile, { force: true });
+  } catch {
+    // 忽略：下次写入会覆盖。
+  }
+
+  apiToken = crypto.randomBytes(32).toString('hex');
+  apiOwned = true;
+  apiProcess = startApi(exePath, readyFile);
+  apiBaseUrl = await waitForReadyFile(readyFile);
+  await waitForHealth(apiBaseUrl);
+  return apiBaseUrl;
+}
+
+/**
+ * 后端丢失后把窗口接回一个新实例。
+ *
+ * 存在的理由：桌面版默认监听随机回环端口，后端重启就换端口，而窗口的地址是启动时
+ * 固化的。没有这一步，用户只能手动重启整个应用——这正是“挂着不动就用不了”的成因。
+ *
+ * @param {string} reason 日志里的原因
+ * @param {{ allowSpawn?: boolean }} [options] 是否允许拉起新进程（看护发现的故障允许；exit 回调里也已允许）
+ */
+function recoverBackend(reason, options = {}) {
+  // 同一时刻只跑一个恢复流程：看护定时器与 exit 回调可能同时报障。
+  if (recoveryInFlight) return recoveryInFlight;
+  if (isQuitting || intentionalStop) return Promise.resolve(false);
+
+  recoveryInFlight = (async () => {
+    const sinceLast = Date.now() - lastRecoveryAt;
+    if (sinceLast < RECOVERY_COOLDOWN_MS) {
+      await sleep(RECOVERY_COOLDOWN_MS - sinceLast);
+    }
+    lastRecoveryAt = Date.now();
+
+    if (recoveryAttempts >= RECOVERY_MAX_ATTEMPTS) {
+      log(`recovery: giving up after ${recoveryAttempts} attempts`);
+      stopWatchdog();
+      dialog.showErrorBox('知识库服务无法恢复',
+        `${reason}。已自动重试 ${recoveryAttempts} 次仍未成功。\n\n` +
+        `日志：${path.join(userDataRoot(), 'logs')}\n\n` +
+        '请确认没有安全软件拦截后端进程，然后重新启动应用。');
+      return false;
+    }
+
+    recoveryAttempts += 1;
+    log(`recovery attempt ${recoveryAttempts}: ${reason}`);
+
+    try {
+      // 先看有没有别的实例顶上来了（例如服务方式启动的那个），有就直接接管。
+      const attached = await attachExistingBackend();
+      if (!attached) {
+        if (!options.allowSpawn) return false;
+        await ensureBackend();
+      }
+
+      // 地址可能变了：令牌头过滤器按 apiBaseUrl 动态匹配，只要更新变量即可。
+      // 恢复过程可能新建了带新令牌的后端，所以这里再调一次（幂等，同过滤器会替换旧监听器）。
+      probeFailures = 0;
+      recoveryAttempts = 0;
+      installTokenHeader();
+
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        log(`recovery: reloading window onto ${apiBaseUrl}`);
+        await mainWindow.loadURL(apiBaseUrl);
+        mainWindow.show();
+      }
+
+      log(`recovery succeeded, backend at ${apiBaseUrl}`);
+      return true;
+    } catch (error) {
+      log(`recovery failed: ${error.message}`);
+      return false;
+    } finally {
+      recoveryInFlight = null;
+    }
+  })();
+
+  return recoveryInFlight;
+}
+
+/** 开始看护：连续 WATCHDOG_FAILURE_THRESHOLD 次探活失败才判定后端丢失。 */
+function startWatchdog() {
+  stopWatchdog();
+
+  watchdogTimer = setInterval(async () => {
+    if (isQuitting || intentionalStop || recoveryInFlight) return;
+    if (!apiBaseUrl) return;
+
+    // 用 /api/desktop/info 而不是 /api/health：前者还能证明「这个端口上是我们自己的后端」，
+    // 避免端口被别的程序占用时误判为健康。
+    const probe = await probeBackend(apiBaseUrl, apiToken);
+    if (probe) {
+      probeFailures = 0;
+      return;
+    }
+
+    probeFailures += 1;
+    log(`watchdog: probe failed (${probeFailures}/${WATCHDOG_FAILURE_THRESHOLD})`);
+    if (probeFailures >= WATCHDOG_FAILURE_THRESHOLD) {
+      probeFailures = 0;
+      await recoverBackend('长时间没有响应', { allowSpawn: true });
+    }
+  }, WATCHDOG_INTERVAL_MS);
+
+  // 定时器不应阻止进程退出。
+  watchdogTimer.unref?.();
+}
+
+function stopWatchdog() {
+  if (watchdogTimer) {
+    clearInterval(watchdogTimer);
+    watchdogTimer = null;
+  }
+}
+
 async function bootstrap() {
   if (!app.requestSingleInstanceLock()) {
     app.quit();
@@ -684,12 +900,8 @@ async function bootstrap() {
     return await updater.installNow();
   });
 
-  const readyFile = path.join(app.getPath('userData'), 'api-ready.json');
-  try {
-    fs.rmSync(readyFile, { force: true });
-  } catch {
-    // 忽略：下次写入会覆盖。
-  }
+  // readyFile 的重建与清理已移进 ensureBackend（自动恢复会再次用到它），
+  // 这里不再预先删除，避免两处各删一次、行为分叉。
 
   try {
     // 启动画面先建：它是文件页，不依赖后端，~100ms 就能画出来。
@@ -698,30 +910,21 @@ async function bootstrap() {
     setSplashPhase('正在准备运行环境…');
 
     // 先看有没有已经在跑的后台服务；有就接管，没有才自己拉起。
+    // 逻辑收在 ensureBackend 里，自动恢复时复用同一份，避免两处行为分叉。
     if (await attachExistingBackend()) {
       setSplashPhase('已连接到正在运行的知识库服务…');
     } else {
-      const exePath = resolveApiExecutable();
-      if (!exePath) {
-        closeSplash();
-        dialog.showErrorBox('缺少后端服务',
-          `未找到 ${API_EXE_NAME}。请先执行 scripts\\Publish-Portable.ps1，或设置 MAF_API_EXE 指向已发布的可执行文件。`);
-        app.exit(1);
-        return;
-      }
-
-      apiToken = crypto.randomBytes(32).toString('hex');
-      apiOwned = true;
       setSplashPhase('正在启动知识库服务…');
-      apiProcess = startApi(exePath, readyFile);
-      apiBaseUrl = await waitForReadyFile(readyFile);
-      setSplashPhase('正在校验服务状态…');
+      await ensureBackend();
     }
 
+    setSplashPhase('正在校验服务状态…');
     await waitForHealth(apiBaseUrl);
     setSplashPhase('正在载入界面…');
-    installTokenHeader(apiBaseUrl);
+    // 令牌头只注册一次，之后按当前 apiBaseUrl 动态匹配（见 installTokenHeader）。
+    installTokenHeader();
     createWindow(apiBaseUrl);
+    startWatchdog();
     log(`API ready at ${apiBaseUrl} (${apiOwned ? 'spawned' : 'attached'}) after ${Date.now() - startupBeganAt}ms`);
 
     // 自动更新：窗口就绪后再启用，避免和首屏抢资源。
@@ -746,6 +949,7 @@ async function bootstrap() {
     if (isQuitting) return;
     event.preventDefault();
     isQuitting = true;
+    stopWatchdog();
     updater?.dispose();
 
     // 默认关窗口不关后台：用户可能把它当常驻服务用。

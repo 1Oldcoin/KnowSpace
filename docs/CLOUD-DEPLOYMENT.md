@@ -444,6 +444,12 @@ curl -H "X-Api-Token: $MAF_SERVER_TOKEN" -X POST http://1.2.3.4:5056/api/agent-c
   `NODE_EXTRA_CA_CERTS=/path/to/ca.crt`；
 - 这只解决 `/mcp` 的加密，**网页界面仍然 401**（令牌问题与 TLS 是两件事）。
 
+> **`Server:FixedLocalPort` 与 Linux / Docker 无关。** 那一项只被 Electron 主进程读取
+> （`desktop-electron/main.js` 的 `resolveFixedLocalPort`），作用是让桌面版后端固定绑某个
+> 回环端口。Linux / Docker 的端口本来就固定：Dockerfile 的 `CMD` 是 `--urls http://0.0.0.0:5056`，
+> systemd 单元用 `--urls http://127.0.0.1:5056`，前端 `apiBaseUrl` 又是空字符串（同源相对路径）。
+> 所以云端不需要配、也别配它。
+
 #### 3.7.4 三者对比
 
 | 场景 | 推荐 | 网页界面 | MCP |

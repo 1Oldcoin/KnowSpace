@@ -159,9 +159,13 @@ $token = $env:MAF_SERVER_TOKEN
 
 后面所有 `curl` 示例都假设你已经有了这两个变量。
 
-### 4.2 建库不需要 `curl`
+### 4.2 建库不需要 `curl`（桌面版）
 
 上一节那句 `POST /api/knowledge-bases` 只是接口事实，**日常不需要手敲**：界面侧栏工作区那一行的 **「+」** 就是"新建知识库"，**垃圾桶图标**是"删除当前知识库"（默认库置灰）。curl 只在写脚本或排查时用。
+
+> **无界面部署（Linux / Docker）不适用**：那种环境下没有可用的浏览器界面
+> （`services/api.ts` 里全是裸 `fetch`，没有任何注入 `X-Api-Token` 的代码），
+> 建库、建客户端、改白名单全部要走 `curl` 并带 `X-Api-Token`。见 §4.4 开头的一键脚本。
 
 ### 4.3 客户端配置长什么样
 
@@ -185,7 +189,60 @@ $token = $env:MAF_SERVER_TOKEN
 
 ### 4.4 三条路具体怎么操作
 
-先说一个现状：**前端目前没有 MCP 客户端管理界面**。设置页只有"粘贴 `maf_` 密钥 → 生成客户端配置"这一块，`allowedKnowledgeBaseIds` 的编辑入口只在插件页（那是给插件用的，不是给外部 Agent）。所以今天能改白名单的实际路径只有下面三条里的 A 和 B——C 是应急手段。
+先说清现状：**桌面版有完整的管理界面**——设置页「AI 工具与 MCP」卡片里的
+「管理接入客户端」（左侧导航「接入的 AI 工具」）能新建客户端、勾选能力与工具白名单、
+限定可见知识库、轮换密钥、看调用统计与审计明细，`allowedKnowledgeBaseIds` 也在那里编辑。
+所以桌面用户不需要下面任何一条路。
+
+**Linux / Docker 没有可用界面**（`/api` 全部 401，前端没有令牌输入口），
+只能走路 A（curl + `X-Api-Token`）；路 B 需要能打开同意页；路 C 是应急手段。
+
+#### 路 A 的前置：先把下面两个变量准备好
+
+```bash
+BASE=http://127.0.0.1:5056
+TOKEN=<MAF_SERVER_TOKEN 的值>
+```
+
+#### 路 A 一键脚本（无界面部署推荐）
+
+```bash
+# 1) 拿知识库 GUID（建客户端时要填；空数组 = 不限全部库，别留空）
+curl -s "$BASE/api/knowledge-bases" -H "X-Api-Token: $TOKEN" \
+  | jq -r '.[] | "\(.id)\t\(.name)"'
+
+# 2) 看能力名与工具名（拼错会被创建接口直接拒掉）
+curl -s "$BASE/api/agent-clients/catalog" -H "X-Api-Token: $TOKEN" \
+  | jq '{capabilities, tools: [.tools[].name]}'
+
+# 3) 建客户端 —— 明文密钥只在这一步出现一次
+curl -s -X POST "$BASE/api/agent-clients" \
+  -H "X-Api-Token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{
+        "name": "本地Agent",
+        "capabilities": ["knowledge:read"],
+        "allowedKnowledgeBaseIds": ["<步骤1的GUID>"],
+        "allowedTools": ["list_knowledge_bases","search_knowledge_base","get_document_content"],
+        "requestsPerMinute": 60
+      }' | jq -r '.key'
+```
+
+> 请求体与响应体用的是**同一个**字段名 `allowedKnowledgeBaseIds`（不是 `knowledgeBaseIds`）。
+> 拼错不会报错，会被当成没传 → 变成"不限全部知识库"，这比报错更危险。
+> 建完用 `GET /api/agent-clients/{id}` 复核一眼 `allowedKnowledgeBaseIds`。
+
+| 日常操作 | 命令 |
+| --- | --- |
+| 改能力 / 库 / 工具 | `PUT /api/agent-clients/{id}`，未给出的字段保持原值 |
+| 密钥丢了 | `POST /api/agent-clients/{id}/rotate` → 返回新 `key`，旧的立即失效 |
+| 看调用统计 | `GET /api/agent-clients/overview?windowHours=24` |
+| 看调用明细 | `GET /api/agent-clients/calls?clientId={id}&limit=50` |
+| 临时停用 | `PUT` 带 `{"enabled": false}`，不用删记录 |
+
+Server 形态下 `files:*` / `files:write` **不要给**：`McpModule.cs` 只在 `!profile.IsServer` 时注册
+`LocalFileMcpTools`，这两个能力在云端根本没有对应工具，给了是空权限，但会让人误以为存在本机文件访问能力。
+
+下面三条路里的 PowerShell 版本适用于桌面版（本机 `127.0.0.1:5056`）。
 
 | 路 | 需要什么 | 适合 |
 | --- | --- | --- |
