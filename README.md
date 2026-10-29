@@ -111,11 +111,22 @@ graph TD
 
 > 安装包目前**未做代码签名**，首次运行 Windows SmartScreen 会提示「未知发布者」，选择「更多信息 → 仍要运行」即可。
 
+每个 Release 固定附三份产物，对三种部署形态：
+
+| 产物 | 给谁 |
+| --- | --- |
+| `Zhijian-x.y.z-setup.exe` | Windows 桌面版（自带便携 PostgreSQL，双击即用） |
+| `Zhijian-linux-x64-x.y.z.tar.gz` | Linux 裸机 / systemd（自包含，目标机不需要装 .NET） |
+| `Zhijian-x.y.z-docker-context.tar.gz` | Docker（完整构建上下文，解压即 `docker compose up -d --build`，本机无需 .NET SDK / Node） |
+
+`latest.yml` 与 `.blockmap` 只服务于 Electron 自动更新，手工部署不用管。
+
 ### 方式二：Docker（Linux 服务器，一体包）
 
 ```bash
-git clone https://github.com/1Oldcoin/KnowSpace.git
-cd KnowSpace
+# 取源码，两种都行：
+#   ① 直接下载 Release 里的 Zhijian-x.y.z-docker-context.tar.gz 并解开（已剔除 Windows 专用二进制）
+#   ② git clone https://github.com/1Oldcoin/KnowSpace.git && cd KnowSpace
 
 cp .env.example .env      # 然后编辑：LLM_API_KEY（必填）/ MAF_SERVER_TOKEN（必填，否则拒绝启动）/ PG_PASSWORD / PUBLIC_BASE_URL
 docker compose up -d --build   # 一个容器：API + 前端 + PostgreSQL 17 + pgvector
@@ -163,23 +174,33 @@ docker compose exec app bash /app/scripts/Test-IntegratedStack.sh --pg-password 
 
 ### 方式三：Linux 裸机（systemd，不用 Docker）
 
-Linux 只有**一份**产物：一个自包含的 tar.gz（目标机不需要装 .NET）。它是 `publish/` 下的**构建产物**，
-`publish/` 被 `.gitignore` 挡在仓库外，所以 clone 下来**没有**这个文件，得自己打一次：
-
-```powershell
-# 在 Windows 开发机上执行（需要 .NET 10 SDK + Node 22）
-.\scripts\Publish-Portable.ps1 -Target console -Runtime linux-x64
-# 产物：publish\console-linux-x64\（约 310 MB）
-```
-
-把那个目录拷到服务器后：
+Linux 只有**一份**产物：一个自包含的 tar.gz（目标机不需要装 .NET），直接从
+[Releases](https://github.com/1Oldcoin/KnowSpace/releases) 下载 `Zhijian-linux-x64-x.y.z.tar.gz` 即可，
+不需要自己打包。
 
 ```bash
-sudo ./deploy/linux/install.sh --source /tmp/console-linux-x64
+scp Zhijian-linux-x64-1.0.3.tar.gz user@host:/tmp/
+ssh user@host
+tar xzf /tmp/Zhijian-linux-x64-1.0.3.tar.gz -C /tmp/
+sudo bash /tmp/Zhijian-linux-x64/deploy/linux/install.sh --source /tmp/Zhijian-linux-x64/app
 ```
 
 装到 `/opt/myfirstmafagent`，数据在 `/var/lib/myfirstmafagent`，配置在 `/etc/myfirstmafagent/myfirstmafagent.env`。
 `deploy/linux/README-LINUX.md` 是完整说明书（含「这台机器上没验证过」清单）。
+
+<details>
+<summary>想自己从源码重打包（需要 .NET 10 SDK + Node 22）</summary>
+
+```powershell
+.\scripts\Publish-Portable.ps1 -Target console -Runtime linux-x64
+# 产物：publish\console-linux-x64\（约 310 MB，扁平结构）
+```
+
+发布包额外把 `deploy/linux/` 与 `scripts/Test-IntegratedStack.sh` 收进去、并把后端放进 `app/`
+子目录，所以两种目录布局的 `--source` 不同：直接拷 `console-linux-x64` 时用
+`--source /tmp/console-linux-x64`，用 Release 包时用 `--source /tmp/Zhijian-linux-x64/app`。
+
+</details>
 
 > **Linux 只有这一份产物**：前端是 `wwwroot/` 里的静态文件，由 API 自己托管，不存在「有 UI 版 / 无 UI 版」的区分。
 > Electron 壳只服务 Windows 安装包。
