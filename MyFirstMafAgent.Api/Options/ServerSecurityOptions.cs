@@ -110,13 +110,26 @@ public sealed class ServerSecurityOptions
     public string PublicBaseUrl { get; set; } = string.Empty;
 
     /// <summary>
-    /// 桌面版固定回环端口。默认 <c>0</c> = 随机端口（安全默认值：端口不可预测）。
+    /// 桌面版固定回环端口。默认 <c>5056</c>（本产品的「专属端口」），设为 <c>0</c> 则每次启动
+    /// 由操作系统分配随机端口。
     ///
     /// <para>
-    /// 设为非 0 时，桌面版会绑到固定端口，方便把 MCP 配置写死。
-    /// <b>仅建议单机可信环境</b>：固定端口 + 回环地址仍然只对本机可见，
-    /// 但会降低「别的本机进程扫端口」的成本。
+    /// 为什么默认固定：端口随机变化会让用户手写的 MCP 配置、书签、脚本里的地址失效。
+    /// 固定端口便于「一次配置长期可用」；<b>只绑回环地址</b>这一安全前提不变，
+    /// 代价仅是降低了别的本机进程扫到端口的成本。
+    /// </para>
+    ///
+    /// <para>
+    /// 端口被占用时不会导致启动失败：Electron 主进程会先探测，
+    /// 占用了就自动回退到随机端口（见 <c>desktop-electron/main.js</c> 的 startApi）。
+    /// 想恢复「每次随机」只需把本项改成 <c>0</c>，或设环境变量
+    /// <c>MAF_FIXED_LOCAL_PORT=0</c>。
+    /// </para>
+    ///
+    /// <para>
+    /// <b>仅桌面版（Electron）读取本项</b>；Linux / Docker / systemd 的监听地址由
+    /// <c>--urls</c> 决定，与本项无关。
     /// </para>
     /// </summary>
-    public int FixedLocalPort { get; set; }
+    public int FixedLocalPort { get; set; } = 5056;
 }

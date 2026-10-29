@@ -8,15 +8,24 @@
 ## 0. 一句话结论
 
 MCP 数据面（`/mcp`）的授权模型是完整的：密钥 + 能力 + 工具白名单 + 知识库范围 + 限流 + 审计，
-默认拒绝清单外的工具。**但 REST 数据面（`/api`）在云端默认是不鉴权的** ——
-它原本只为「Electron 窗口访问自己拉起的后端」设计。
+默认拒绝清单外的工具。
+
+REST 数据面（`/api`）**必须**配 `MAF_SERVER_TOKEN`：它原本只为「Electron 窗口访问自己拉起的后端」设计，
+服务端形态下缺令牌会让进程**拒绝启动**（2026-10-28 起的启动守卫），而不是带着漏洞跑起来。
+
+> ⚠️ **由此带来一个必须先接受的事实**：`/api` 要 `X-Api-Token`，而前端代码只会裸 `fetch`
+> （令牌由 Electron 主进程注入，浏览器里没有）。所以**云端形态下浏览器界面不可用**——
+> 打开页面会看到一片 401。云端的实际用途是跑 MCP 服务端 + 用 `curl` 管理；
+> 想在这种部署上也要界面，看 §3.1 A（反代注入令牌）或 §3.7.1（SSH 隧道 + 桌面形态）。
 
 2026-10-28 起加了**启动守卫**：只要进程按服务端形态运行（`Hosting:Profile=Server`，
 或 `Auto` 推断出"监听了非回环地址"），缺 `MAF_SERVER_TOKEN`、`RequireClientKey=false`、
 CIMD 的调试开关、OAuth Issuer 非 https 等组合会让进程**拒绝启动**，而不是带着漏洞跑起来。
 所以现在的最低要求从"记得配令牌"变成了"不配就起不来"。
 
-即便如此，**令牌长度、反向代理、TLS 仍然必须自己配**。三件事的具体做法见 §3。
+即便如此，**令牌长度**与**传输加密**仍然必须自己配。
+反向代理只是拿到这两样东西的一种方式，不是唯一方式——没有域名、不需要网页界面时，
+SSH 隧道或直接开端口同样可行，见 §3.7；TLS 的三条实现路径见 §3.3。
 
 > 完整设计与后续阶段（账号登录 + TOTP、PAT 过期、审计保留期与分区、备份恢复、日志脱敏、
 > 多副本限流、依赖扫描）见 [`MCP-REMOTE-DESIGN.md`](MCP-REMOTE-DESIGN.md)。
@@ -82,13 +91,16 @@ CIMD 的调试开关、OAuth Issuer 非 https 等组合会让进程**拒绝启�
 
 ---
 
-## 3. 暴露到公网前必须做的四件事
+## 3. 暴露到公网前必须做的事项
+
+先明确一件事：**反向代理不是必须的**。它只解决一个问题——让浏览器里的界面能带上 `X-Api-Token`。
+如果你不需要网页界面，另外几条路同样成立，见 §3.7。
 
 ### 3.1 给 `/api` 配令牌（**必做**）
 
-两种用法，任选其一。
+服务端形态下缺令牌会**拒绝启动**（`SecurityPostureGuard`），所以这一项不是「可选加固」。
 
-**A. 反向代理注入**（推荐，浏览器端零改动）
+**A. 反向代理注入**（需要网页界面时用这个）
 
 前端不需要任何修改：nginx / Caddy 完成人类认证（Basic / OAuth / mTLS），
 再把 `X-Api-Token` 加进转发请求里。
@@ -104,19 +116,22 @@ location / {
     proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
     proxy_set_header   X-Forwarded-Proto $scheme;
 
-    # 关键：认证通过后由代理由注入后端令牌，浏览器拿不到它
+    # 关键：认证通过后由代理注入后端令牌，浏览器拿不到它
     proxy_set_header   X-Api-Token       "<用 openssl rand -hex 32 生成>";
 }
 ```
 
-**B. 客户端自带令牌**
+**B. 客户端自带令牌**（脚本 / CI / 只用 MCP 的场景）
 
 ```bash
 export MAF_SERVER_TOKEN="$(openssl rand -hex 32)"
 ```
 
 之后所有 `/api` 请求都要带 `X-Api-Token: $MAF_SERVER_TOKEN`。
-适合脚本、CI、自研前端；原生 Web 界面需要自己补一个「输入令牌」的门。
+
+> **注意**：当前前端**没有**任何注入令牌的代码（`services/api.ts` 里全部是裸 `fetch`），
+> 也没有登录页或令牌输入框。所以选 B 意味着**网页界面不可用**（`/api` 全部 401），
+> 只能用 curl 管理。要恢复界面，要么用 A，要么等前端补上令牌输入（见 §3.7 结尾）。
 
 > 令牌可用 `openssl rand -hex 32` 生成；配置校验要求非空时至少 16 字符。
 
@@ -145,13 +160,98 @@ environment:
 
 ### 3.3 上 TLS
 
-客户端密钥是 Bearer 型凭据，**明文 HTTP 上等于公开**。用 Caddy 自动证书最省事：
+客户端密钥是 Bearer 型凭据，**明文 HTTP 上等于公开**。
+
+**应用代码里没有 TLS**：`Hosting/` 下没有 `UseHttpsRedirection` / `UseHsts`，
+也没有 Kestrel 证书配置，`appsettings.json` 里只有 `"Urls": "http://127.0.0.1:5056"`。
+但这不等于「只能靠反代」——三条路都行，按场景选：
+
+| 做法 | 适用 | 代价 |
+| --- | --- | --- |
+| 反向代理终结 TLS（本节） | 有域名、要给浏览器界面用 | 多一个进程 |
+| Kestrel 自己配证书 | 只想让 `/mcp` 走 HTTPS | 无域名只能自签；Node 客户端要设 `NODE_EXTRA_CA_CERTS` |
+| 根本不暴露端口（SSH 隧道 / Tailscale / Cloudflare Tunnel） | 个人使用 | 每个客户端要配隧道 |
+
+> 顺带一提：**Let's Encrypt 不给 IP 签发证书**。没有域名时，反代也只能用自签证书，
+> 所以「上反代才有 TLS」这个理由在无域名场景下并不成立——真要可信证书，
+> 得用 `sslip.io` / `nip.io` 这类把 IP 编码进域名的 DNS，或 Cloudflare Tunnel。
+
+Kestrel 直出 HTTPS 时，用配置即可，不用改代码（注意 `Kestrel:Endpoints` 一旦配置会覆盖 `Urls`，
+此时不要再传 `--urls`）：
+
+```yaml
+Kestrel__Endpoints__Https__Url: "https://0.0.0.0:5057"
+Kestrel__Endpoints__Https__Certificate__Path: "/data/cert.pfx"
+Kestrel__Endpoints__Https__Certificate__Password: "<口令>"
+```
+
+用 Caddy 自动证书最省事（默认透传 `Host` / `X-Forwarded-*`，且不对 SSE 做缓冲）：
 
 ```
 knowspace.example.com {
     reverse_proxy 127.0.0.1:5056
 }
 ```
+
+nginx 需要显式写出下面这些（`/mcp` 的 `proxy_buffering off` 与超时**不能省**，理由见 §3.6）：
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name knowspace.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/knowspace.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/knowspace.example.com/privkey.pem;
+
+    # 视频上限 5 GB（Storage:MaxVideoFileSizeBytes），regular 请求 50 MB
+    client_max_body_size 6g;
+
+    # 通用转发头：每一段都必须有，缺一个都会让审计/限流看到错误的 IP 或协议
+    proxy_http_version 1.1;
+    proxy_set_header Connection          "";
+    proxy_set_header Host                $host;
+    proxy_set_header X-Real-IP           $remote_addr;
+    proxy_set_header X-Forwarded-For     $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto   $scheme;
+
+    # ① 浏览器界面：外面必须有人类认证，再由代理注入后端令牌
+    location / {
+        auth_basic           "KnowSpace";
+        auth_basic_user_file /etc/nginx/.htpasswd;
+
+        proxy_pass http://127.0.0.1:5056;
+        proxy_set_header X-Api-Token "<MAF_SERVER_TOKEN 的值>";
+
+        proxy_buffering    off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # ② MCP 数据面：不要加 auth_basic（客户端带的是 Authorization: Bearer）
+    location /mcp {
+        proxy_pass http://127.0.0.1:5056;
+
+        # 必须透传，否则 OAuth 与工具调用都会失败
+        proxy_set_header Authorization     $http_authorization;
+        proxy_set_header Accept            $http_accept;
+
+        # 关键：EventStream 不能被缓存/缓冲，否则响应被攒住不出流
+        proxy_buffering    off;
+        proxy_cache        off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # ③ OAuth 元数据：客户端在此之前没有任何凭据，必须匿名可达
+    location ~ ^/(oauth|\.well-known)/ {
+        proxy_pass http://127.0.0.1:5056;
+    }
+}
+```
+
+> `/` 那段注入了 `X-Api-Token`，所以**必须**配人类认证（`auth_basic` / OAuth 门户 / mTLS），
+> 否则等于把管理面令牌送给任何扫到端口的人。反过来，`/mcp` 与 `/oauth` 不能配 `auth_basic`：
+> 它们自带 Bearer 认证，Basic 弹窗会和 `Authorization` 头互相覆盖。
 
 不要直接把 5056 映射到公网：
 
@@ -178,7 +278,8 @@ ports:
   }
 },
 "Server": {
-  // 只影响「一键复制」生成的地址（不参与鉴权）。开了 OAuth 时可以省略（Issuer 优先）。
+  // 同时影响两件事：①「一键复制」生成的 MCP 地址；② /mcp 的 Host/Origin 允许列表（见 §3.6）。
+  // 开了 OAuth 时 Issuer 已经提供同一来源，可以省略。
   "PublicBaseUrl": "https://knowspace.example.com"
 }
 ```
@@ -210,6 +311,165 @@ powershell -NoProfile -File scripts\Test-McpOAuth.ps1 -BaseUrl https://knowspace
 
 细节与风险清单见 [`MCP-OAUTH.md`](MCP-OAUTH.md)。
 
+### 3.6 反向代理下 `/mcp` 的两个硬性约束
+
+这一节是踩过的坑，两个都不报错、只「不工作」，排查起来很费时间。
+
+#### 3.6.1 `Host` 不在白名单 → 403，连不上
+
+`Hosting/McpTransportGuard.cs` 把请求的 `Host` 与 `Origin` 跟一张白名单比对，不在表里直接 403
+（MCP 规范要求防 DNS rebinding）。白名单由这几处拼成：
+
+```csharp
+"localhost", "127.0.0.1", "::1", "[::1]"   // 永远在
+Mcp:AllowedHosts                            // 显式配置
+Mcp:OAuth:Issuer 的主机 + origin            // 开了 OAuth 时
+Server:PublicBaseUrl 的主机 + origin        // ← 容易忽略
+```
+
+因此：
+
+- **直接用 `http://<公网IP>:5056/mcp`** 一定失败，返回
+  `Host '1.2.3.4' 不在允许列表内（Mcp:AllowedHosts）`。这不是 bug，是设计如此。
+- **反代改了 `Host` 头也一样失败**。nginx 默认 `proxy_set_header Host $host`，
+  转发过去是 `knowspace.example.com`，所以 `Server__PublicBaseUrl`
+  （或 `Mcp__AllowedHosts__0`）必须配成同一个值。
+- `Origin` 只有**出现时**才校验。浏览器和部分客户端会带，命令行 `curl` 不带，
+  所以「curl 能通、客户端不能通」这种情况通常就是 `Origin` 被拒。
+
+报错信息会直接说明该配哪个键，照抄即可。
+
+#### 3.6.2 `text/event-stream` 被缓冲 → `tools/list` 通、`tools/call` 卡住
+
+`/mcp` 的响应是 Server-Sent Events 流。nginx 默认开启 `proxy_buffering`，会把流攒在缓冲区里，
+典型症状是**握手成功、`tools/list` 有返回，但 `tools/call` 一直挂着直到超时**。
+`proxy_read_timeout` 默认 60 秒，长一点的检索或上传也会被切断。
+
+必须显式关掉：
+
+```nginx
+proxy_buffering    off;
+proxy_cache        off;
+proxy_read_timeout 3600s;
+proxy_send_timeout 3600s;
+```
+
+Caddy 不需要配这些（默认不缓冲流式响应）。
+
+#### 3.6.3 还要确认的几项
+
+| 项 | 要求 | 不满足的后果 |
+| --- | --- | --- |
+| `proxy_http_version 1.1` + `Connection ""` | 必须 | SSE 走不了分块传输，退化成缓冲 |
+| `Authorization` 透传 | 默认透传，但配了 `auth_basic` 会覆盖 | 客户端拿到 401 |
+| `client_max_body_size` | ≥ 视频上限（默认 5 GB） | `413 Request Entity Too Large`（nginx 先于应用拒绝） |
+| `/mcp` 请求体上限 | 应用侧 `Mcp:MaxRequestBodyBytes` 只有 8 MB | 大文件请走 `/api/uploads`，不要塞进 MCP 工具参数 |
+| `X-Forwarded-Proto` | 必须 | OAuth `Issuer` 拼出 `http://`，令牌 `aud` 对不上 |
+| `/oauth/*`、`/.well-known/*` | 不能加 `auth_basic` | 客户端拿不到元数据，OAuth 流程起不来 |
+
+#### 3.6.4 上线自检
+
+```bash
+BASE=https://knowspace.example.com
+
+# 1. 健康检查应匿名可访问
+curl -s "$BASE/api/health"
+
+# 2. /api 不带令牌应为 401（不是 200）—— 返回 200 说明反代没注入令牌、应用也没开鉴权
+curl -s -o /dev/null -w '%{http_code}\n' "$BASE/api/settings"
+
+# 3. /mcp 用密钥能列出工具（同时验证 Host 校验与 SSE 不缓冲）
+curl -s "$BASE/mcp" \
+  -H "Authorization: Bearer maf_你的密钥" \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+
+# 4. 调一次真实工具，确认不会卡住
+curl -s "$BASE/mcp" \
+  -H "Authorization: Bearer maf_你的密钥" \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_knowledge_bases","arguments":{}}}'
+```
+
+跑完第 3、4 条后，回到「设置 → 管理接入客户端」，该客户端应出现 `lastCallAt`
+与来源 IP。**如果 IP 显示 `127.0.0.1`**，说明 `Server:TrustForwardedHeaders`
+或 `Server:KnownProxies` 没配对（见 §3.2）。
+
+### 3.7 不用反向代理的部署方式
+
+没有域名、不要 WAF、只有自己用的时候，反代是多余一层。下面三条同样成立。
+
+#### 3.7.1 SSH 隧道 + Desktop 形态（个人使用最省事）
+
+服务器上不配任何东西，本机执行：
+
+```bash
+ssh -N -L 5056:127.0.0.1:5056 user@server
+```
+
+本机浏览器打开 `http://127.0.0.1:5056` 即可。为什么不用改配置：
+
+- 请求的 `Host` 是 `127.0.0.1`，**本来就在** `McpTransportGuard` 的固定白名单里，
+  不需要配 `Mcp:AllowedHosts`；
+- 链路已被 SSH 加密，不需要证书；
+- 容器里把 `Hosting__Profile` 设成 `Desktop`（配合 `ports: "127.0.0.1:5056:5056"` 绑回环），
+  就跳过「缺令牌拒绝启动」，`/api` 不设令牌也能用界面。
+
+> ⚠️ `Desktop` 形态**会**注册 `local_*` 文件工具（`McpModule.cs` 只在 `profile.IsServer` 时跳过）。
+> 服务器上的「本机目录」是服务器的文件系统，所以**不要**给客户端 `files:*` / `files:write` 能力。
+
+#### 3.7.2 Server 形态 + 直接开端口（只跑 MCP）
+
+```yaml
+environment:
+  MAF_SERVER_TOKEN: "<openssl rand -hex 32>"
+  Hosting__Profile: "Server"
+  Mcp__AllowedHosts__0: "1.2.3.4"     # 公网 IP，否则 /mcp 因 Host 校验 403
+ports:
+  - "0.0.0.0:5056:5056"
+```
+
+客户端配 `http://1.2.3.4:5056/mcp` + `Authorization: Bearer maf_...` 即可。
+管理端点用 curl：
+
+```bash
+curl -H "X-Api-Token: $MAF_SERVER_TOKEN" -X POST http://1.2.3.4:5056/api/agent-clients \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Cursor","capabilities":["knowledge:read"]}'
+```
+
+代价两条：**网页界面不可用**；`maf_` 密钥走明文 HTTP，同网段可被嗅探。
+只建议在内网 / VPN 内这么干。
+
+#### 3.7.3 Server 形态 + Kestrel 自签证书
+
+配置见 §3.3 的 `Kestrel__Endpoints__Https__*`。可行，但两点要注意：
+
+- Cursor / Claude 等 Node 客户端默认**拒绝**自签证书，需要给客户端进程设
+  `NODE_EXTRA_CA_CERTS=/path/to/ca.crt`；
+- 这只解决 `/mcp` 的加密，**网页界面仍然 401**（令牌问题与 TLS 是两件事）。
+
+> **`Server:FixedLocalPort` 与 Linux / Docker 无关。** 那一项只被 Electron 主进程读取
+> （`desktop-electron/main.js` 的 `resolveFixedLocalPort`），作用是让桌面版后端固定绑某个
+> 回环端口。Linux / Docker 的端口本来就固定：Dockerfile 的 `CMD` 是 `--urls http://0.0.0.0:5056`，
+> systemd 单元用 `--urls http://127.0.0.1:5056`，前端 `apiBaseUrl` 又是空字符串（同源相对路径）。
+> 所以云端不需要配、也别配它。
+
+#### 3.7.4 三者对比
+
+| 场景 | 推荐 | 网页界面 | MCP |
+| --- | --- | --- | --- |
+| 只有自己用，能开 SSH | §3.7.1 隧道 | ✅ | ✅ |
+| 只给 AI 工具连，命令行管理 | §3.7.2 直开端口 | ❌ | ✅（明文传输） |
+| 有域名，要公网访问界面 | §3.3 反代 | ✅ | ✅ |
+| 无域名但想让界面走公网 | 需要先补前端令牌输入 | ❌ | ✅ |
+
+最后一行是当前的**产品缺口**，不是配置问题：`services/api.ts` 里全是裸 `fetch`，
+令牌只能靠 Electron 主进程或反代注入。补法是加一个「服务地址 + 令牌」入口，
+把所有请求收口到一个带 `X-Api-Token` 的 `fetch` 包装里。
+
 ---
 
 ## 4. 三种部署形态
@@ -234,7 +494,7 @@ docker compose exec app bash /app/scripts/Test-IntegratedStack.sh --pg-password 
 
 | 变量 | 作用 |
 | --- | --- |
-| `Server__PublicBaseUrl` | 只影响「一键复制」生成的 MCP 地址（不参与鉴权）；不填会生成 `http://127.0.0.1:5056/mcp`，别人本机连不上 |
+| `Server__PublicBaseUrl` | 影响两件事：①「一键复制」生成的 MCP 地址；② `/mcp` 的 `Host`/`Origin` 允许列表（`McpTransportGuard` 会把它加进去，见 §3.6）。不填会生成 `http://127.0.0.1:5056/mcp`，且反代后 `/mcp` 会因 `Host` 不在白名单返回 403 |
 | `Server__TrustForwardedHeaders` | 反代后面**必开**，否则审计 IP 全变 `127.0.0.1`，且按 IP 封禁会把代理当成客户端（一个人爆破全体连坐） |
 
 反代与 API **不同机**时还要加 `Server__KnownProxies__0=<代理真实 IP>`（多个用 `__1` 递增）。

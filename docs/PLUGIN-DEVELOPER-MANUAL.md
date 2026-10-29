@@ -2,9 +2,9 @@
 
 > 面向**第一次**为本应用写插件的开发者。按 §1 走，15 分钟内你能得到一个真的跑起来的插件。
 >
-> 本文是"教程 + 契约"的整合版：该抄的代码、该填的字段、该避的坑都在这里。
+> 本文是"教程 + 契约 + 字段速查"的整合版：该抄的代码、该填的字段、该避的坑都在这里。
 > 需要更深一层的运行时内部行为（状态机细节、隔离实现、审计表结构）时，再看
-> `docs/PLUGIN-LIFECYCLE.md`；需要字段速查时看 `docs/PLUGIN-AUTHOR-GUIDE.md`。
+> `docs/PLUGIN-LIFECYCLE.md`。
 >
 > 已经有一个 stdio MCP server，只想接进来？直接看 `docs/MCP-INTEGRATION-MANUAL.md`。
 
@@ -1284,7 +1284,7 @@ rl.on('line', (line) => {
 
 | 文档 | 内容 |
 | --- | --- |
-| `docs/PLUGIN-AUTHOR-GUIDE.md` | 字段、协议方法、错误码速查 |
+| `docs/PLUGIN-LIFECYCLE.md` | 核心侧如何校验、隔离、审计插件（运维视角） |
 | `docs/PLUGIN-LIFECYCLE.md` | 状态机、四道闸门、隔离实现、审计、并发限额 |
 | `docs/MCP-INTEGRATION-MANUAL.md` | MCP 两个方向的接入教程 |
 | `docs/ROADMAP.md` | 尚未实现的能力与排期（**不要依赖**） |

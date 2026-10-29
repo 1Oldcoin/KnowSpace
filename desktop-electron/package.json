@@ -1,9 +1,9 @@
 {
   "name": "myfirstmafagent-desktop",
-  "version": "1.0.1",
+  "version": "1.0.3",
   "private": true,
-  "description": "知间-本地知识库 桌面壳：原生 Electron 主进程 + .NET API sidecar",
-  "author": "知间",
+  "description": "鐭ラ棿-鏈湴鐭ヨ瘑搴?妗岄潰澹筹細鍘熺敓 Electron 涓昏繘绋?+ .NET API sidecar",
+  "author": "鐭ラ棿",
   "main": "main.js",
   "scripts": {
     "start": "electron .",

@@ -1,8 +1,10 @@
 # 知间（Zhijian）— Linux 交付包
 
-> **只有一份 Linux 产物。** 前端是 Vue 构建出的静态文件（`wwwroot/`），由 API 进程自己托管，
-> 用**浏览器**访问 `http://<主机>:5056`。所以不存在"有 UI 版 / 无 UI 版"的区分 ——
-> 装了就有界面，不装就什么都没有。Electron 桌面壳只服务 Windows 安装包（见文末）。
+> **只有一份 Linux 产物。** 前端是 Vue 构建出的静态文件（`wwwroot/`），由 API 进程自己托管。
+> 但 `/api` 需要 `X-Api-Token`，而裸浏览器里没有任何地方注入它 —— **部署完直接打开浏览器只会看到一片 401**，
+> 这是预期行为，不是装错了。Linux 交付的真正用途是让本地 Agent 通过 `/mcp` 连上来；
+> 真要界面，得配反代注入令牌（`docs/CLOUD-DEPLOYMENT.md` §3.1）或走 SSH 隧道 + 桌面形态（§3.7.1）。
+> Electron 桌面壳只服务 Windows 安装包（见文末）。
 
 ---
 
@@ -67,7 +69,11 @@ docker compose up -d --build
 docker compose ps           # 等到 app 变成 healthy（首次约 1~2 分钟，含 initdb）
 ```
 
-浏览器打开 `http://<主机IP>:5056`。
+容器起来后 `curl -s http://127.0.0.1:5056/api/health` 应返回 `{"status":"ok",...}`。
+
+> ⚠️ **不要期待浏览器界面**：`/api` 需要 `X-Api-Token`，浏览器里没人注入它，打开页面会看到
+> 一片 401。容器版的实际用途是跑 MCP 服务端 + curl 管理；要界面请看
+> `docs/CLOUD-DEPLOYMENT.md` §3.1（反代注入令牌）或 §3.7.1（SSH 隧道 + 桌面形态）。
 
 自检：
 
@@ -96,9 +102,9 @@ docker compose --profile external up -d --build
 
 ```bash
 # 1) 把包传上去并解开
-scp Zhijian-linux-x64-1.0.1.tar.gz user@host:/tmp/
+scp Zhijian-linux-x64-1.0.3.tar.gz user@host:/tmp/
 ssh user@host
-tar xzf /tmp/Zhijian-linux-x64-1.0.1.tar.gz -C /tmp/
+tar xzf /tmp/Zhijian-linux-x64-1.0.3.tar.gz -C /tmp/
 
 # 2) 装
 sudo bash /tmp/Zhijian-linux-x64/deploy/linux/install.sh \
@@ -117,14 +123,15 @@ journalctl -u myfirstmafagent -f
 
 | 变量 | 为什么必须改 |
 | --- | --- |
-| `MAF_SERVER_TOKEN` | 不设则 `/api` 不鉴权。`openssl rand -hex 32` |
+| `MAF_SERVER_TOKEN` | **服务端形态下不设会直接拒绝启动**（`SecurityPostureGuard` 判为致命错误，进程非 0 退出）。`openssl rand -hex 32` |
 | `Server__PublicBaseUrl` | 不设则「一键复制 MCP 配置」给的是 `127.0.0.1`，别人连不上 |
 
 数据库口令脚本会自动生成随机值并写进 env。
 
 改完 `sudo systemctl restart myfirstmafagent`。
 
-**服务只监听 `127.0.0.1:5056`**。要让外面能访问，前面挂 nginx/Caddy 上 TLS，
+**服务只监听 `127.0.0.1:5056`**（端口由 systemd 单元的 `--urls` 决定，和桌面版的
+`Server:FixedLocalPort` 无关，Linux 上那个配置项不参与）。要让外面能访问，前面挂 nginx/Caddy 上 TLS，
 并把 `Server__TrustForwardedHeaders=true` + `Server__KnownProxies__0=<代理IP>` 打开 ——
 否则审计日志里所有 IP 都是 127.0.0.1，而且 `/api/desktop/shutdown` 的回环校验会被骗过。
 
@@ -184,7 +191,8 @@ ConnectionStrings__KnowledgeBase=Host=pg.example.com;Port=5432;Database=zhijian;
 ## 关于 Electron（Windows 桌面版）
 
 `desktop-electron/` 那套**只在 Windows 上有意义**，且配的是 NSIS 安装包（`win: target: nsis`）。
-Linux 上没有对应产物 —— 因为不需要：浏览器打开就是完整界面。
+Linux 上没有对应产物。（注意：这不代表 Linux 上浏览器就能直接用界面 —— 令牌仍需要一个注入点，
+见前面的警告。）
 
 如果以后确实想要"Linux 桌面应用"（双击图标、独立窗口、托盘），那要另做
 `electron-builder` 的 `linux:` target（AppImage/deb），需要处理：

@@ -159,9 +159,13 @@ $token = $env:MAF_SERVER_TOKEN
 
 后面所有 `curl` 示例都假设你已经有了这两个变量。
 
-### 4.2 建库不需要 `curl`
+### 4.2 建库不需要 `curl`（桌面版）
 
 上一节那句 `POST /api/knowledge-bases` 只是接口事实，**日常不需要手敲**：界面侧栏工作区那一行的 **「+」** 就是"新建知识库"，**垃圾桶图标**是"删除当前知识库"（默认库置灰）。curl 只在写脚本或排查时用。
+
+> **无界面部署（Linux / Docker）不适用**：那种环境下没有可用的浏览器界面
+> （`services/api.ts` 里全是裸 `fetch`，没有任何注入 `X-Api-Token` 的代码），
+> 建库、建客户端、改白名单全部要走 `curl` 并带 `X-Api-Token`。见 §4.4 开头的一键脚本。
 
 ### 4.3 客户端配置长什么样
 
@@ -185,7 +189,60 @@ $token = $env:MAF_SERVER_TOKEN
 
 ### 4.4 三条路具体怎么操作
 
-先说一个现状：**前端目前没有 MCP 客户端管理界面**。设置页只有"粘贴 `maf_` 密钥 → 生成客户端配置"这一块，`allowedKnowledgeBaseIds` 的编辑入口只在插件页（那是给插件用的，不是给外部 Agent）。所以今天能改白名单的实际路径只有下面三条里的 A 和 B——C 是应急手段。
+先说清现状：**桌面版有完整的管理界面**——设置页「AI 工具与 MCP」卡片里的
+「管理接入客户端」（左侧导航「接入的 AI 工具」）能新建客户端、勾选能力与工具白名单、
+限定可见知识库、轮换密钥、看调用统计与审计明细，`allowedKnowledgeBaseIds` 也在那里编辑。
+所以桌面用户不需要下面任何一条路。
+
+**Linux / Docker 没有可用界面**（`/api` 全部 401，前端没有令牌输入口），
+只能走路 A（curl + `X-Api-Token`）；路 B 需要能打开同意页；路 C 是应急手段。
+
+#### 路 A 的前置：先把下面两个变量准备好
+
+```bash
+BASE=http://127.0.0.1:5056
+TOKEN=<MAF_SERVER_TOKEN 的值>
+```
+
+#### 路 A 一键脚本（无界面部署推荐）
+
+```bash
+# 1) 拿知识库 GUID（建客户端时要填；空数组 = 不限全部库，别留空）
+curl -s "$BASE/api/knowledge-bases" -H "X-Api-Token: $TOKEN" \
+  | jq -r '.[] | "\(.id)\t\(.name)"'
+
+# 2) 看能力名与工具名（拼错会被创建接口直接拒掉）
+curl -s "$BASE/api/agent-clients/catalog" -H "X-Api-Token: $TOKEN" \
+  | jq '{capabilities, tools: [.tools[].name]}'
+
+# 3) 建客户端 —— 明文密钥只在这一步出现一次
+curl -s -X POST "$BASE/api/agent-clients" \
+  -H "X-Api-Token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{
+        "name": "本地Agent",
+        "capabilities": ["knowledge:read"],
+        "allowedKnowledgeBaseIds": ["<步骤1的GUID>"],
+        "allowedTools": ["list_knowledge_bases","search_knowledge_base","get_document_content"],
+        "requestsPerMinute": 60
+      }' | jq -r '.key'
+```
+
+> 请求体与响应体用的是**同一个**字段名 `allowedKnowledgeBaseIds`（不是 `knowledgeBaseIds`）。
+> 拼错不会报错，会被当成没传 → 变成"不限全部知识库"，这比报错更危险。
+> 建完用 `GET /api/agent-clients/{id}` 复核一眼 `allowedKnowledgeBaseIds`。
+
+| 日常操作 | 命令 |
+| --- | --- |
+| 改能力 / 库 / 工具 | `PUT /api/agent-clients/{id}`，未给出的字段保持原值 |
+| 密钥丢了 | `POST /api/agent-clients/{id}/rotate` → 返回新 `key`，旧的立即失效 |
+| 看调用统计 | `GET /api/agent-clients/overview?windowHours=24` |
+| 看调用明细 | `GET /api/agent-clients/calls?clientId={id}&limit=50` |
+| 临时停用 | `PUT` 带 `{"enabled": false}`，不用删记录 |
+
+Server 形态下 `files:*` / `files:write` **不要给**：`McpModule.cs` 只在 `!profile.IsServer` 时注册
+`LocalFileMcpTools`，这两个能力在云端根本没有对应工具，给了是空权限，但会让人误以为存在本机文件访问能力。
+
+下面三条路里的 PowerShell 版本适用于桌面版（本机 `127.0.0.1:5056`）。
 
 | 路 | 需要什么 | 适合 |
 | --- | --- | --- |
@@ -432,13 +489,22 @@ curl.exe -s http://127.0.0.1:5056/api/mcp/diagnostics
 
 ## 10. 本地配置：一键复制
 
-桌面版端口是**随机回环端口**，只有后端知道。设置页「AI 工具与 MCP → MCP 接入配置」里有两个按钮，直接把带真实端口的配置复制到剪贴板：
+桌面版默认使用**专属端口 5056**（`Server:FixedLocalPort`）。它被占用时会自动回退到随机回环端口，
+所以别把地址写死——设置页「设置 → AI 工具与 MCP → MCP 接入配置」里有两个按钮，
+直接把带**真实当前端口**的配置复制到剪贴板：
 
 - **Cursor**：`url` + `headers.Authorization`
 - **Claude Desktop**：`npx -y mcp-remote <url> --header "Authorization: Bearer maf_…"`
 
-对应的接口是 `GET /api/mcp/local-config?clientKey=maf_…`（不传 `clientKey` 就生成不含鉴权头的版本，之后自己补）。
-需要固定端口时设 `Server:FixedLocalPort`（默认 `0` = 随机）；这只影响端口可预测性，**监听地址仍然只有回环**，文档标注「仅建议单机可信环境」。
+对应的接口是 `GET /api/mcp/local-config?clientKey=maf_…`（不传 `clientKey` 就生成不含鉴权头的本，之后自己补）。
+
+| `Server:FixedLocalPort` | 行为 |
+| --- | --- |
+| `5056`（默认） | 每次启动都用 5056；**被占用时自动改用随机端口** |
+| `0` | 每次启动由系统分配随机端口 |
+
+两种都只绑 `127.0.0.1`。想临时改成随机而不改文件：设环境变量 `MAF_FIXED_LOCAL_PORT=0`（它优先于配置文件）。
+注意安装目录里的 `appsettings.json` 会在升级时被替换，想长期生效请用环境变量。
 
 ### 服务端部署：`Server:PublicBaseUrl`
 
@@ -448,7 +514,7 @@ curl.exe -s http://127.0.0.1:5056/api/mcp/diagnostics
 | --- | --- | --- | --- |
 | 1 | `Mcp:OAuth:Issuer` | `oauth-issuer` | 开了 OAuth：`aud` 按 issuer 签发，配置片段必须与之一致 |
 | 2 | `Server:PublicBaseUrl` | `public-base-url` | 服务端部署、未开 OAuth |
-| 3 | Kestrel 监听地址 | `kestrel` | 桌面版随机回环端口 |
+| 3 | Kestrel 监听地址 | `kestrel` | 桌面版：默认 5056，被占用时是随机回环端口 |
 | 4 | 请求的 scheme/host | `request` | 兜底 |
 
 ```jsonc
@@ -457,7 +523,10 @@ curl.exe -s http://127.0.0.1:5056/api/mcp/diagnostics
 }
 ```
 
-它**只影响生成给人看的配置字符串**，不参与任何鉴权判定，也不影响令牌的 `iss`/`aud`（后者只认 `Mcp:OAuth:Issuer`，且绝不从请求头推导）。
+它同时影响两件事：①生成给人看的配置字符串；②`/mcp` 的 `Host`/`Origin` 允许列表
+（`McpTransportGuard` 会把它和 `Mcp:OAuth:Issuer` 的主机一起加进白名单）。
+它**不影响令牌的 `iss`/`aud`**（后者只认 `Mcp:OAuth:Issuer`，且绝不从请求头推导）。
+反代后不填它，`/mcp` 会因为 `Host` 不在白名单返回 403。
 如果既没开 OAuth 又没填它，而你又从别的机器打开管理页，`notes[]` 里会出现一条「回环地址只在本机有效」的提醒，前端会把它显示成黄色警告。
 
 ---
@@ -474,5 +543,5 @@ curl.exe -s http://127.0.0.1:5056/api/mcp/diagnostics
 - [`CLOUD-DEPLOYMENT.md`](CLOUD-DEPLOYMENT.md) —— 云服务器部署与 MCP 接入（安全清单、三种部署形态、密钥生命周期）
 - [`MCP-OAUTH.md`](MCP-OAUTH.md) —— OAuth 2.1 实现、CIMD/SSRF 防线、验收清单与风险
 - [`MCP-INTEGRATION-MANUAL.md`](MCP-INTEGRATION-MANUAL.md) —— MCP 两个方向的完整说明书
-- [`MCP-INTEGRATION.md`](MCP-INTEGRATION.md) —— 速查版
+- [`MCP-INTEGRATION-MANUAL.md`](MCP-INTEGRATION-MANUAL.md) —— 反方向（把现成 MCP server 接进来 / 做成插件）的完整说明书
 - [`../ARCHITECTURE.md`](../ARCHITECTURE.md) §9.10 —— 授权模型的设计取舍
