@@ -93,9 +93,14 @@ if ($ymlText -notmatch [regex]::Escape("version: $Version")) {
 }
 
 # Get-ChildItem -Include only matches when the path itself has a wildcard, so the
-# assets are collected explicitly: latest.yml + the installer + its blockmap.
+# assets are collected explicitly: latest.yml + the installer + its blockmap,
+# plus the non-Windows deliverables (Linux tar.gz + Docker build context). Those
+# are NOT auto-update feed files -- they ride along so all three platforms are
+# downloadable from the same release. latest.yml stays the only feed descriptor,
+# so electron-updater ignores the tarballs.
 $assets = @($latest.FullName, $installer.FullName)
 $assets += @(Get-ChildItem -Path $ReleasesDir -Filter '*.blockmap' -File | ForEach-Object { $_.FullName })
+$assets += @(Get-ChildItem -Path $ReleasesDir -Filter '*.tar.gz' -File | ForEach-Object { $_.FullName })
 $assets = $assets | Select-Object -Unique
 
 $tag = "v$Version"
