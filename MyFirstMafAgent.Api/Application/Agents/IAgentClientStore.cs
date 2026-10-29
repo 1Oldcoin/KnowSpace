@@ -79,6 +79,18 @@ public interface IAgentCallLogStore
         string? clientId,
         int limit,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// 按客户端汇总 <paramref name="since"/> 之后的调用次数。
+    ///
+    /// <para>
+    /// 单独开这个方法而不是让调用方拉 <see cref="QueryAsync"/> 自己数：明细接口有 500 条上限，
+    /// 拿它做统计会在调用量上来之后静默少数（界面上却看不出来），比没有统计更糟。
+    /// </para>
+    /// </summary>
+    Task<IReadOnlyList<AgentCallSummary>> SummarizeAsync(
+        DateTimeOffset since,
+        CancellationToken cancellationToken);
 }
 
 /// <summary>新建客户端的命令。密钥由服务生成，不接受外部传入。</summary>

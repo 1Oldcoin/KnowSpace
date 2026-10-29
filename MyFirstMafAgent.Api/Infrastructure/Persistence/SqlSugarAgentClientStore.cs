@@ -173,6 +173,42 @@ public sealed class SqlSugarAgentClientStore(SqlSugarScope database)
             row.Error)).ToList();
     }
 
+    /// <summary>
+    /// 按客户端汇总窗口内调用次数。
+    ///
+    /// <para>
+    /// 走一条聚合 SQL 而不是把明细拉回来数：明细接口有 500 条上限，用它做统计会静默少数；
+    /// 而且窗口拉长到 30 天时，明细行数可能是几十万。
+    /// </para>
+    ///
+    /// <para>
+    /// 列名用 <c>"PascalCase"</c> 显式别名，因为 SqlSugar 的 <c>SqlQueryAsync</c> 按列名匹配属性，
+    /// <c>client_id</c> 不会自动映射到 <c>ClientId</c>。
+    /// </para>
+    /// </summary>
+    public async Task<IReadOnlyList<AgentCallSummary>> SummarizeAsync(
+        DateTimeOffset since,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT client_id AS "ClientId",
+                   count(*)::int AS "Total",
+                   (count(*) FILTER (WHERE outcome = 'success'))::int AS "Success",
+                   (count(*) FILTER (WHERE outcome = 'denied'))::int AS "Denied",
+                   (count(*) FILTER (WHERE outcome = 'failed'))::int AS "Failed",
+                   max(occurred_at) AS "LastCallAt"
+            FROM agent_client_calls
+            WHERE occurred_at >= @since
+            GROUP BY client_id
+            """;
+
+        var rows = await database.Ado.SqlQueryAsync<AgentCallSummaryRow>(sql, new { since }, cancellationToken);
+        return rows
+            .Select(row => new AgentCallSummary(
+                row.ClientId, row.Total, row.Success, row.Denied, row.Failed, row.LastCallAt))
+            .ToList();
+    }
+
     // ───────────────────────── 映射 ─────────────────────────
 
     private static AgentClient ToClient(AgentClientSchemaEntity row) => new(
@@ -231,4 +267,17 @@ public sealed class SqlSugarAgentClientStore(SqlSugarScope database)
             return [Guid.Empty];
         }
     }
+}
+
+/// <summary>聚合查询的投影行。<c>SqlQueryAsync</c> 要求无参构造 + 可写属性。</summary>
+internal sealed class AgentCallSummaryRow
+{
+    public AgentCallSummaryRow() { }
+
+    public string ClientId { get; set; } = string.Empty;
+    public int Total { get; set; }
+    public int Success { get; set; }
+    public int Denied { get; set; }
+    public int Failed { get; set; }
+    public DateTimeOffset LastCallAt { get; set; }
 }

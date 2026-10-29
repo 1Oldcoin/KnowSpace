@@ -27,6 +27,8 @@ public static class KnowledgeModule
         services.AddScoped<SummaryService>();
         services.AddScoped<KnowledgeSearchService>();
         services.AddScoped<DocumentContentService>();
+        // 知识库删除：数据库、磁盘两侧都要清理，因此单独成一个应用服务而不是塞进端点。
+        services.AddScoped<KnowledgeBaseDeletionService>();
 
         // 知识库包：导出是纯读，导入会写文件与数据库，按请求生命周期注册。
         services.AddScoped<KnowledgePackageExporter>();

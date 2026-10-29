@@ -36,6 +36,30 @@ public static class KnowledgeEndpoints
                 : Results.Ok(knowledgeBase);
         });
 
+        // 删除知识库是破坏性且不可恢复的动作：资料、切片、向量、笔记、专题、问答历史一起消失。
+        // 默认知识库由应用服务拒绝（409），这里只负责把三种结果翻译成状态码。
+        knowledgeBaseRoutes.MapDelete("/{knowledgeBaseId:guid}", async (
+            Guid knowledgeBaseId,
+            KnowledgeBaseDeletionService deletion,
+            CancellationToken cancellationToken) =>
+        {
+            var outcome = await deletion.DeleteAsync(knowledgeBaseId, cancellationToken);
+            if (outcome.NotFound) return Results.NotFound(new { error = outcome.Error });
+            if (!outcome.Deleted) return Results.Conflict(new { error = outcome.Error });
+
+            var report = outcome.Report!;
+            return Results.Ok(new
+            {
+                knowledgeBaseId = report.KnowledgeBaseId,
+                name = report.Name,
+                deletedDocuments = report.DocumentCount,
+                deletedChunks = report.ChunkCount,
+                deletedNotes = report.NoteCount,
+                deletedTopics = report.TopicCount,
+                deletedChatSessions = report.ChatSessionCount
+            });
+        });
+
         documentRoutes.MapGet("", async (
             Guid? knowledgeBaseId,
             KnowledgeBaseStore store,

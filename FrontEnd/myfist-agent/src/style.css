@@ -48,6 +48,8 @@ button { cursor: pointer; }
 .workspace-label select { width: 100%; padding: 0; border: 0; color: #97a19b; background: transparent; font-size: 10px; outline: 0; }
 .workspace-add-button { width: 28px; height: 28px; flex: 0 0 auto; display: grid; place-items: center; border: 0; border-radius: 8px; color: #75817b; background: transparent; }
 .workspace-add-button:hover { color: #397c65; background: #edf4ee; }
+.workspace-delete-button:hover { color: #b4544f; background: #fbeeed; }
+.workspace-delete-button:disabled { color: #c3cbc6; background: transparent; cursor: not-allowed; }
 .muted-icon { color: #a2aaa5; }
 .sidebar-label, .sidebar-section-heading { padding: 0 10px; color: #a3aaa5; font-size: 10px; letter-spacing: .7px; font-weight: 700; text-transform: uppercase; }
 .sidebar-label { margin-bottom: 9px; }

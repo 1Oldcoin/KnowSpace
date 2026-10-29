@@ -34,6 +34,7 @@ public static class PersistenceModule
         // 旧结构（Documents/Chats/Companions）仍使用这两个聚合根存储。
         services.AddSingleton<KnowledgeBaseStore>();
         services.AddSingleton<IDocumentIndexSource>(sp => sp.GetRequiredService<KnowledgeBaseStore>());
+        services.AddSingleton<IKnowledgeBaseMaintenanceStore>(sp => sp.GetRequiredService<KnowledgeBaseStore>());
         services.AddSingleton<KnowledgeChatStore>();
         services.AddSingleton<CompanionStore>();
 

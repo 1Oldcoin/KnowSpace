@@ -162,7 +162,10 @@ MyFirstMafAgent/
 | `Infrastructure/Persistence/SqlSugarJobQueue.cs` | 任务队列的 SqlSugar 实现：乐观 CAS 领取、租约续期、退避重试、僵尸回收。 |
 | `Endpoints/JobEndpoints.cs` | 任务中心接口：列表/计数/类型/详情/取消/重跑与 SSE 实时进度。 |
 | `Hosting/JobsModule.cs` | 任务系统的依赖注入组合（调度器、队列、处理器索引、补投器）。 |
-| `Persistence/KnowledgeBaseStore.cs` | 知识库、资料、上传状态、分块和向量检索数据访问。 |
+| `Persistence/KnowledgeBaseStore.cs` | 知识库、资料、上传状态、分块和向量检索数据访问；并实现 `IKnowledgeBaseMaintenanceStore`，在一个事务内按「子表 → 父表」删除整个知识库。 |
+| `Domain/Knowledge/KnowledgeBaseDefaults.cs` | 默认知识库 ID 与名称常量：既是「未指定知识库」的兜底目标，也是唯一不允许删除的知识库。 |
+| `Domain/Knowledge/IKnowledgeBaseMaintenanceStore.cs` | 知识库整体删除端口与删除结果统计，避免应用层依赖持久化实现。 |
+| `Application/Knowledge/KnowledgeBaseDeletionService.cs` | 删除知识库：先拒默认库、再删数据库、最后删磁盘目录；两项顺序不可颠倒（文件系统不在事务里）。 |
 | `Persistence/KnowledgeChatStore.cs` | 知识库问答会话及消息持久化和历史管理（含引用与答案元数据列）。 |
 | `Persistence/KnowledgeChatCitations.cs` | 引用元数据模型（引用 / 检索上下文 / 答案元数据）与 JSON 编解码。 |
 | `Domain/Notes/NoteSource.cs` | 笔记引用的一条资料依据（资料 ID / 文件名 / 切片序号 / 相似度 / 片段）。 |
@@ -208,7 +211,7 @@ ASP.NET Core 10 Minimal API
 
 开发环境映射 OpenAPI JSON 与 Scalar 页面：`/openapi/v1.json`、`/scalar/v1`。两者仅在 Development 环境开启。
 
-前端以 `App.vue` 管理当前页面、知识库选择和问答数据；各视图由独立 Vue 组件实现（`components/` 下按页面命名，如 `JobsView.vue`、`PluginsView.vue`、`LibraryView.vue`）；`services/api.ts` 统一封装 API 请求。前后端通过 HTTP/JSON 通信，问答接口当前返回完整响应，不使用 SSE 流式传输；唯一的 SSE 是任务中心的 `/api/jobs/stream`（单向进度推送，断开自动退回轮询）。插件的安装、授权、配置（按 manifest 的 JSON Schema 渲染）、作用域、同步与审计全在 `PluginsView.vue` 里完成，不需要 curl。
+前端以 `App.vue` 管理当前页面、知识库选择和问答数据；各视图由独立 Vue 组件实现（`components/` 下按页面命名，如 `JobsView.vue`、`PluginsView.vue`、`McpClientsView.vue`、`LibraryView.vue`）；`services/api.ts` 统一封装 API 请求。前后端通过 HTTP/JSON 通信，问答接口当前返回完整响应，不使用 SSE 流式传输；唯一的 SSE 是任务中心的 `/api/jobs/stream`（单向进度推送，断开自动退回轮询）。插件的安装、授权、配置（按 manifest 的 JSON Schema 渲染）、作用域、同步与审计全在 `PluginsView.vue` 里完成，不需要 curl。外部 AI 工具接入（MCP 客户端）同理集中在 `McpClientsView.vue`：新建客户端、勾选能力与工具白名单、限定可见知识库、轮换密钥、查看调用统计与审计，入口在设置页“AI 工具与 MCP”卡片。
 
 ## 4. 核心业务流程
 
@@ -296,7 +299,7 @@ ASP.NET Core 10 Minimal API
 
 - **本机知识库作为 MCP 服务端**：`KnowledgeMcpTools`（`Mcp/KnowledgeMcpTools.cs`）、`LocalFileMcpTools`（`Mcp/LocalFileMcpTools.cs`）、`AvatarMcpTools`（`Mcp/AvatarMcpTools.cs`）与 `ChatHistoryMcpTools`（`Mcp/ChatHistoryMcpTools.cs`）通过 `ModelContextProtocol.AspNetCore` 以 Streamable HTTP 暴露在 `Mcp:ServerPath`（默认 `/mcp`，无状态模式）。其他大模型/智能体可调用 `list_knowledge_bases`、`list_documents`、`search_knowledge_base`、`get_document_content`、`get_document_summary`、`upload_document`、`workspace_*`、`list_file_roots`、`local_*`、`avatar_get_persona`、`avatar_feed`、`avatar_search_memories`、`avatar_digest`、`avatar_ask_as_me`、`avatar_list_fragments`，以及 `list_chat_sessions`、`chat_search_history`（共 **24** 个工具，能力与准入见 `docs/MCP-ACCESS.md`）。
 - **本机作为 MCP 客户端**：`Mcp/McpClientRegistry.cs` 按 `Mcp:Servers` 惰性连接外部服务器（`http` Streamable HTTP 或 `stdio`），工具列表缓存 30 秒；`Mcp/McpToolSource.cs` 把远端工具桥接为 `mcp__{server}__{tool}`（名称清洗、去重、≤64 字符）供聊天模型调用。
-- 连接失败只影响对应服务器，状态通过 `GET /api/mcp/status` 暴露；设置页“AI 工具与 MCP”卡片展示 MCP 端点、连接数与工具清单。
+- 连接失败只影响对应服务器，状态通过 `GET /api/mcp/status` 暴露；设置页“AI 工具与 MCP”卡片展示 MCP 端点、连接数与工具清单；接入方（外部 MCP 客户端）的创建与统计在“设置 → 管理接入客户端”（`McpClientsView.vue`）里完成，服务端聚合由 `GET /api/agent-clients/overview` 提供。
 
 典型配置（`appsettings.json`）：
 
@@ -497,6 +500,7 @@ Embedding 与聊天模型采用分离配置：切换本地/云端聊天模型不
 | --- | --- | --- |
 | `GET` | `/api/health` | 检查 API 与 PostgreSQL 连接。 |
 | `GET` / `POST` | `/api/knowledge-bases` | 列出/创建知识库。 |
+| `DELETE` | `/api/knowledge-bases/{knowledgeBaseId}` | 删除知识库及其全部从属数据（资料、切片、向量、笔记、专题、问答历史），并清理磁盘资料目录；默认知识库拒绝删除（409）。 |
 | `GET` / `POST` | `/api/embedding-specs` | 列出/注册向量模型规格。 |
 | `POST` | `/api/embedding-specs/import-local` | multipart 导入本地 ONNX 模型（`modelFile` + `tokenizerFile`），自动识别维度并验证推理。 |
 | `POST` | `/api/embedding-specs/register-cloud` | 注册 OpenAI 兼容向量模型，注册前调用一次 `/embeddings` 验证。 |

@@ -264,6 +264,41 @@ public sealed class LocalDocumentStore
 
     public int UploadChunkSizeBytes => _uploadChunkSizeBytes;
 
+    /// <summary>
+    /// 删除整个知识库的资料目录（<c>{RootPath}/{knowledgeBaseId:N}</c>）。
+    ///
+    /// <para>
+    /// 只在数据库事务提交<b>之后</b>调用：文件系统不参与事务，先删文件再回滚会留下
+    /// 「资料记录还在、原文件已经没了」的坏状态——那种状态比删除失败更难收拾。
+    /// </para>
+    ///
+    /// <para>
+    /// 整目录删除而不是逐个 File.Delete：知识库删掉后这个目录里不可能还有有效内容，
+    /// 逐个删反而容易漏掉历史版本、导入残留之类的文件。文件被解析任务占用时静默失败并返回 false。
+    /// </para>
+    /// </summary>
+    /// <returns>确实删掉了目录返回 true；目录本来就不存在也返回 true。</returns>
+    public bool DeleteKnowledgeBaseDirectory(Guid knowledgeBaseId)
+    {
+        // 目录名只由 GUID 拼出来，不含用户输入，因此不存在路径穿越。
+        var directory = Path.Combine(_rootPath, knowledgeBaseId.ToString("N"));
+        if (!Directory.Exists(directory)) return true;
+
+        try
+        {
+            Directory.Delete(directory, recursive: true);
+            return !Directory.Exists(directory);
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
     public long GetMaxSize(string extension) =>
         IsVideoExtension(extension) ? _maxVideoFileSizeBytes
         : IsAudioExtension(extension) ? _maxAudioFileSizeBytes

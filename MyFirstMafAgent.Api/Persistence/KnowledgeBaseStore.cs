@@ -7,10 +7,11 @@ using SqlSugar;
 
 namespace MyFirstMafAgent.Api.Persistence;
 
-public sealed class KnowledgeBaseStore(SqlSugarScope database) : IDocumentIndexSource
+public sealed class KnowledgeBaseStore(SqlSugarScope database) : IDocumentIndexSource, IKnowledgeBaseMaintenanceStore
 {
-    public static readonly Guid DefaultKnowledgeBaseId = Guid.Parse("11111111-1111-1111-1111-111111111111");
-    public const string DefaultKnowledgeBaseName = "默认知识库";
+    // 取值来自 Domain/Knowledge/KnowledgeBaseDefaults：应用层判断「是不是默认库」时不能反向依赖持久化层。
+    public static readonly Guid DefaultKnowledgeBaseId = KnowledgeBaseDefaults.DefaultKnowledgeBaseId;
+    public const string DefaultKnowledgeBaseName = KnowledgeBaseDefaults.DefaultName;
 
     private const string QueuedStatus = "Queued";
     private const string ProcessingStatus = "Processing";
@@ -533,6 +534,160 @@ public sealed class KnowledgeBaseStore(SqlSugarScope database) : IDocumentIndexS
         return ToKnowledgeBase(knowledgeBase);
     }
 
+    /// <summary>
+    /// 删除知识库及其全部从属数据：资料、切片、分块版本、摘要、索引、向量、笔记、专题、
+    /// 问答会话与消息、上传会话、Outbox 事件、插件映射。
+    ///
+    /// <para>
+    /// 顺序固定为「子表 → 父表」。运行时的表结构由 SqlSugar CodeFirst 建立、不带外键，
+    /// 但早期按 <c>database/schema.sql</c> 手工建过的库是有外键的，而且
+    /// <c>kb_documents.knowledge_base_id</c> 那一条没有 <c>ON DELETE CASCADE</c>——
+    /// 先删父行会直接抛 23503。按子表优先的顺序删，两种库都能过。
+    /// </para>
+    ///
+    /// <para>
+    /// 只负责数据库，磁盘文件由调用方在事务提交后再删：文件系统不在事务里，
+    /// 反过来做会留下「资料还在库里、文件已经没了」的坏状态。
+    /// </para>
+    /// </summary>
+    public async Task<KnowledgeBaseDeletionReport?> DeleteKnowledgeBaseAsync(
+        Guid knowledgeBaseId,
+        CancellationToken cancellationToken)
+    {
+        await database.Ado.BeginTranAsync();
+        try
+        {
+            var knowledgeBase = await database.Queryable<KnowledgeBaseSchemaEntity>()
+                .Where(entity => entity.Id == knowledgeBaseId)
+                .FirstAsync(cancellationToken);
+            if (knowledgeBase is null)
+            {
+                await database.Ado.RollbackTranAsync();
+                return null;
+            }
+
+            // 先把要删的主键收集齐：删完父表就查不出子表该删哪些了。
+            var documentIds = await database.Queryable<KnowledgeDocumentSchemaEntity>()
+                .Where(document => document.KnowledgeBaseId == knowledgeBaseId)
+                .Select(document => document.Id)
+                .ToListAsync(cancellationToken);
+            var indexIds = await database.Queryable<KnowledgeIndexSchemaEntity>()
+                .Where(index => index.KnowledgeBaseId == knowledgeBaseId)
+                .Select(index => index.Id)
+                .ToListAsync(cancellationToken);
+            var sessionIds = await database.Queryable<KnowledgeChatSessionSchemaEntity>()
+                .Where(session => session.KnowledgeBaseId == knowledgeBaseId)
+                .Select(session => session.Id)
+                .ToListAsync(cancellationToken);
+
+            var chunkCount = documentIds.Count == 0
+                ? 0
+                : await database.Queryable<KnowledgeChunkSchemaEntity>()
+                    .Where(chunk => documentIds.Contains(chunk.DocumentId))
+                    .CountAsync(cancellationToken);
+            var noteCount = await database.Queryable<NoteSchemaEntity>()
+                .Where(note => note.KnowledgeBaseId == knowledgeBaseId)
+                .CountAsync(cancellationToken);
+            var topicCount = await database.Queryable<TopicSchemaEntity>()
+                .Where(topic => topic.KnowledgeBaseId == knowledgeBaseId)
+                .CountAsync(cancellationToken);
+
+            // ── 向量：既按索引删，也按资料删 ──
+            // 正常情况下两者等价；但历史数据里可能存在「索引已换、向量行还挂在旧 index_id」的情况，
+            // 只按其中一种删会留下孤儿行。
+            if (indexIds.Count > 0)
+            {
+                await database.Deleteable<IndexVectorSchemaEntity>()
+                    .Where(vector => indexIds.Contains(vector.IndexId))
+                    .ExecuteCommandAsync(cancellationToken);
+            }
+
+            if (documentIds.Count > 0)
+            {
+                await database.Deleteable<IndexVectorSchemaEntity>()
+                    .Where(vector => documentIds.Contains(vector.DocumentId))
+                    .ExecuteCommandAsync(cancellationToken);
+                await database.Deleteable<KnowledgeChunkSchemaEntity>()
+                    .Where(chunk => documentIds.Contains(chunk.DocumentId))
+                    .ExecuteCommandAsync(cancellationToken);
+                await database.Deleteable<DocumentVersionSchemaEntity>()
+                    .Where(version => documentIds.Contains(version.DocumentId))
+                    .ExecuteCommandAsync(cancellationToken);
+                await database.Deleteable<DocumentSummarySchemaEntity>()
+                    .Where(summary => documentIds.Contains(summary.DocumentId))
+                    .ExecuteCommandAsync(cancellationToken);
+            }
+
+            // ── 问答会话：消息先删，否则历史库的级联外键会把会话删除挡下来 ──
+            if (sessionIds.Count > 0)
+            {
+                await database.Deleteable<KnowledgeChatMessageSchemaEntity>()
+                    .Where(message => sessionIds.Contains(message.SessionId))
+                    .ExecuteCommandAsync(cancellationToken);
+            }
+
+            await database.Deleteable<KnowledgeChatSessionSchemaEntity>()
+                .Where(session => session.KnowledgeBaseId == knowledgeBaseId)
+                .ExecuteCommandAsync(cancellationToken);
+
+            // ── 索引生命周期 ──
+            await database.Deleteable<KnowledgeIndexSchemaEntity>()
+                .Where(index => index.KnowledgeBaseId == knowledgeBaseId)
+                .ExecuteCommandAsync(cancellationToken);
+            await database.Deleteable<ActiveIndexSchemaEntity>()
+                .Where(active => active.KnowledgeBaseId == knowledgeBaseId)
+                .ExecuteCommandAsync(cancellationToken);
+            await database.Deleteable<ModelBindingSchemaEntity>()
+                .Where(binding => binding.KnowledgeBaseId == knowledgeBaseId)
+                .ExecuteCommandAsync(cancellationToken);
+
+            // ── 未消费的 Outbox 事件：知识库都没了，再让索引 Worker 去处理只会刷错误日志 ──
+            await database.Deleteable<OutboxEventSchemaEntity>()
+                .Where(outbox => outbox.KnowledgeBaseId == knowledgeBaseId)
+                .ExecuteCommandAsync(cancellationToken);
+
+            // ── 上传会话（含未完成的断点续传） ──
+            await database.Deleteable<KnowledgeUploadSessionSchemaEntity>()
+                .Where(session => session.KnowledgeBaseId == knowledgeBaseId)
+                .ExecuteCommandAsync(cancellationToken);
+
+            // ── 笔记 / 专题 / 插件映射 ──
+            await database.Deleteable<NoteSchemaEntity>()
+                .Where(note => note.KnowledgeBaseId == knowledgeBaseId)
+                .ExecuteCommandAsync(cancellationToken);
+            await database.Deleteable<TopicSchemaEntity>()
+                .Where(topic => topic.KnowledgeBaseId == knowledgeBaseId)
+                .ExecuteCommandAsync(cancellationToken);
+            await database.Deleteable<PluginPlatformItemSchemaEntity>()
+                .Where(item => item.KnowledgeBaseId == knowledgeBaseId)
+                .ExecuteCommandAsync(cancellationToken);
+
+            // ── 资料本体与知识库本体 ──
+            await database.Deleteable<KnowledgeDocumentSchemaEntity>()
+                .Where(document => document.KnowledgeBaseId == knowledgeBaseId)
+                .ExecuteCommandAsync(cancellationToken);
+            await database.Deleteable<KnowledgeBaseSchemaEntity>()
+                .Where(entity => entity.Id == knowledgeBaseId)
+                .ExecuteCommandAsync(cancellationToken);
+
+            await database.Ado.CommitTranAsync();
+
+            return new KnowledgeBaseDeletionReport(
+                knowledgeBaseId,
+                knowledgeBase.Name,
+                documentIds.Count,
+                chunkCount,
+                noteCount,
+                topicCount,
+                sessionIds.Count);
+        }
+        catch
+        {
+            await database.Ado.RollbackTranAsync();
+            throw;
+        }
+    }
+
     public async Task AddDocumentAsync(KnowledgeDocument document, CancellationToken cancellationToken)
     {
         var now = DateTimeOffset.UtcNow;
@@ -972,7 +1127,7 @@ public sealed class KnowledgeBaseStore(SqlSugarScope database) : IDocumentIndexS
         new(row.DocumentId, row.KnowledgeBaseId, row.FileName, row.Extension, row.ContentVersion, row.ContentHash, row.Status);
 
     private static KnowledgeBaseInfo ToKnowledgeBase(KnowledgeBaseSchemaEntity entity) =>
-        new(entity.Id, entity.Name, entity.CreatedAt);
+        new(entity.Id, entity.Name, entity.CreatedAt, entity.Id == DefaultKnowledgeBaseId);
 
     private static UploadSession ToUploadSession(KnowledgeUploadSessionSchemaEntity entity) =>
         new(entity.Id, entity.KnowledgeBaseId, entity.FileName, entity.Extension, entity.ContentType, entity.SizeBytes,
@@ -1048,7 +1203,12 @@ internal sealed class DocumentListRow
 }
 
 public sealed record KnowledgeDocument(Guid Id, Guid KnowledgeBaseId, string FileName, string Extension, string ContentType, long SizeBytes, string StoragePath, string Status);
-public sealed record KnowledgeBaseInfo(Guid Id, string Name, DateTimeOffset CreatedAt);
+
+/// <param name="IsDefault">
+/// 是否是默认知识库。界面据此隐藏「删除」入口——只靠接口返回 409 提示太晚，
+/// 用户点下去才发现不能删是糟糕的交互。
+/// </param>
+public sealed record KnowledgeBaseInfo(Guid Id, string Name, DateTimeOffset CreatedAt, bool IsDefault = false);
 public sealed record KnowledgeChunk(int Index, string Content, float[] Embedding);
 public sealed record UploadSession(Guid Id, Guid KnowledgeBaseId, string FileName, string Extension, string ContentType,
     long SizeBytes, long UploadedBytes, string StagingPath, string Status, Guid? DocumentId);

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Bell, CircleHelp, Search, Sparkles, X } from 'lucide-vue-next'
-import { assignDocumentTopic, checkApiHealth, checkInStudy, createKnowledgeBase as createKnowledgeBaseApi, createKnowledgeChatSession, createNote as createNoteApi, createTopic as createTopicApi, deleteDocument as deleteDocumentApi, deleteKnowledgeChatSession as deleteKnowledgeChatSessionApi, deleteKnowledgeChatSessions, deleteNote as deleteNoteApi, deleteTopic as deleteTopicApi, downloadDocument, exportKnowledgeChatSession, exportNotes as exportNotesApi, getAgentInfo, getAppSettings, getJobCounts, getStudySummary, listDocuments, listKnowledgeBases, listKnowledgeChatMessages, listKnowledgeChatSessions, listNotes, listTopics, renameKnowledgeChatSession as renameKnowledgeChatSessionApi, retryDocument as retryDocumentApi, saveAppSettings, searchKnowledgeBase, sendKnowledgeChatMessage, setNotePinned as setNotePinnedApi, updateNote as updateNoteApi, updateTopic as updateTopicApi, uploadDocument } from './services/api'
+import { assignDocumentTopic, checkApiHealth, checkInStudy, createKnowledgeBase as createKnowledgeBaseApi, createKnowledgeChatSession, createNote as createNoteApi, createTopic as createTopicApi, deleteDocument as deleteDocumentApi, deleteKnowledgeBase as deleteKnowledgeBaseApi, deleteKnowledgeChatSession as deleteKnowledgeChatSessionApi, deleteKnowledgeChatSessions, deleteNote as deleteNoteApi, deleteTopic as deleteTopicApi, downloadDocument, exportKnowledgeChatSession, exportNotes as exportNotesApi, getAgentInfo, getAppSettings, getJobCounts, getStudySummary, listDocuments, listKnowledgeBases, listKnowledgeChatMessages, listKnowledgeChatSessions, listNotes, listTopics, renameKnowledgeChatSession as renameKnowledgeChatSessionApi, retryDocument as retryDocumentApi, saveAppSettings, searchKnowledgeBase, sendKnowledgeChatMessage, setNotePinned as setNotePinnedApi, updateNote as updateNoteApi, updateTopic as updateTopicApi, uploadDocument } from './services/api'
 import type { AgentSettings, AppSettings, ChatToolOptions, KnowledgeBase, KnowledgeChatSession, NoteInput, NoteRecord, NoteSourceRecord, SaveSettingsPayload, SemanticSearchResult, StudySummary, Topic } from './services/api'
 import { defaultChatToolOptions } from './services/api'
 import { confirmAction, promptText } from './services/dialog'
@@ -12,6 +12,7 @@ import JobsView from './components/JobsView.vue'
 import LibraryView from './components/LibraryView.vue'
 import NotesView from './components/NotesView.vue'
 import OverviewView from './components/OverviewView.vue'
+import McpClientsView from './components/McpClientsView.vue'
 import PluginsView from './components/PluginsView.vue'
 import SearchOverlay from './components/SearchOverlay.vue'
 import SettingsView from './components/SettingsView.vue'
@@ -131,7 +132,7 @@ function openCitationMedia(payload: { documentId: string; fileName: string; seco
 
 const chatMessages = ref<AssistantMessage[]>([])
 const pendingJobCount = ref(0)
-const pageTitle = computed(() => ({ overview: '总览', materials: '我的资料', notes: '学习笔记', assistant: 'AI 知识问答', companions: 'AI 伴侣', avatar: '我的分身', topics: '我的专题', jobs: '任务中心', plugins: '插件', settings: '设置' })[currentView.value])
+const pageTitle = computed(() => ({ overview: '总览', materials: '我的资料', notes: '学习笔记', assistant: 'AI 知识问答', companions: 'AI 伴侣', avatar: '我的分身', topics: '我的专题', jobs: '任务中心', plugins: '插件', mcp: '接入的 AI 工具', settings: '设置' })[currentView.value])
 const displayName = computed(() => appSettings.value?.preferences.displayName || 'Lin')
 const dailyGoalMinutes = computed(() => appSettings.value?.preferences.dailyGoalMinutes ?? 60)
 const knowledgeBaseNameMap = computed<Record<string, string>>(() =>
@@ -848,6 +849,51 @@ async function requestNewKnowledgeBase() {
   }
 }
 
+/**
+ * 删除当前知识库。
+ *
+ * 这是不可恢复操作，所以走 danger 确认框，并在文案里点明「MCP 客户端不会自动放宽范围」——
+ * 用户很容易以为删掉库就等于回收了授权，实际只是那个客户端再也访问不到它。
+ */
+async function requestDeleteKnowledgeBase() {
+  const target = knowledgeBases.value.find(item => item.id === activeKnowledgeBaseId.value)
+  if (!target) return
+  if (target.isDefault) {
+    showToast('默认知识库不能删除：未指定知识库的上传与检索都以它为兜底。')
+    return
+  }
+
+  const confirmed = await confirmAction({
+    title: `删除知识库“${target.name}”？`,
+    message: '资料原文、切片与向量、笔记、专题、问答历史会一起删除，无法恢复。已连接到该知识库的 MCP 客户端不会自动放宽范围，但会再也访问不到它。',
+    confirmText: '永久删除',
+    tone: 'danger'
+  })
+  if (!confirmed) return
+
+  try {
+    const result = await deleteKnowledgeBaseApi(target.id)
+    // 先把本地列表里的这一项摘掉：即使下面的列表刷新失败，界面也不该继续显示一个已删除的库。
+    knowledgeBases.value = knowledgeBases.value.filter(item => item.id !== target.id)
+    try {
+      knowledgeBases.value = await listKnowledgeBases()
+    } catch {
+      // 刷新失败保留本地结果即可。
+    }
+
+    // 当前库被删掉后必须立刻切走，否则后续所有请求都会带着一个不存在的 ID。
+    if (activeKnowledgeBaseId.value === target.id) {
+      activeKnowledgeBaseId.value = ''
+      const next = knowledgeBases.value[0]
+      if (next) await changeKnowledgeBase(next.id)
+    }
+
+    showToast(`已删除“${result.name}”：资料 ${result.deletedDocuments} 篇、笔记 ${result.deletedNotes} 条、问答 ${result.deletedChatSessions} 段。`)
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : '删除知识库失败。')
+  }
+}
+
 function receiveFiles(files: FileList | null) {
   if (!files?.length) return
   const knowledgeBaseId = activeKnowledgeBaseId.value
@@ -1211,6 +1257,7 @@ async function exportHistorySession(sessionId: string) {
        @navigate="navigate"
        @select-knowledge-base="changeKnowledgeBase"
        @create-knowledge-base="requestNewKnowledgeBase"
+       @delete-knowledge-base="requestDeleteKnowledgeBase"
        @create-topic="requestCreateTopic"
        @select-topic="selectTopic"
        @edit-topics="navigate('topics')"
@@ -1232,11 +1279,12 @@ async function exportHistorySession(sessionId: string) {
         <LibraryView v-else-if="currentView === 'materials'" :materials="materials" :query="searchQuery" :topics="topics" :active-topic-id="activeTopicId" @upload="receiveFiles" @retry="retryProcessing" @delete="deleteMaterial" @download="downloadMaterial" @notice="showToast" @select-topic="selectTopic" @assign-topic="changeDocumentTopic" @read="openReaderFromMaterial" />
         <NotesView v-else-if="currentView === 'notes'" :notes="notes" :query="searchQuery" :api-online="apiOnline" :busy="notesSaving" :loading="notesLoading" :active-knowledge-base-id="activeKnowledgeBaseId" :topics="topics" @create="createNoteHandler" @update="updateNoteHandler" @delete="deleteNoteHandler" @pin="pinNoteHandler" @export-notes="exportNotesHandler" @read-source="openReaderById" @notice="showToast" />
         <TopicsView v-else-if="currentView === 'topics'" :topics="topics" :materials="materials" :api-online="apiOnline" :active-topic-id="activeTopicId" @create="requestCreateTopic" @rename="renameTopic" @delete="removeTopic" @open="selectTopic" />
-        <SettingsView v-else-if="currentView === 'settings'" :settings="appSettings" :api-online="apiOnline" :busy="isSettingsSaving" :loading="isSettingsLoading" :knowledge-base-names="knowledgeBaseNameMap" :knowledge-bases="knowledgeBases" :active-knowledge-base-id="activeKnowledgeBaseId" @save="saveSettings" @reload="loadAppSettings" @imported="onKnowledgeBaseImported" />
+        <SettingsView v-else-if="currentView === 'settings'" :settings="appSettings" :api-online="apiOnline" :busy="isSettingsSaving" :loading="isSettingsLoading" :knowledge-base-names="knowledgeBaseNameMap" :knowledge-bases="knowledgeBases" :active-knowledge-base-id="activeKnowledgeBaseId" @save="saveSettings" @reload="loadAppSettings" @imported="onKnowledgeBaseImported" @navigate="navigate" />
         <AssistantView v-else-if="currentView === 'assistant'" :messages="chatMessages" :busy="isChatBusy || isChatHistoryMutating" :api-online="apiOnline" :sessions="knowledgeChatSessions" :active-session-id="activeKnowledgeChatSessionId" :sessions-loading="isChatSessionListLoading" :history-loading="isChatHistoryLoading" :tool-options="chatToolOptions" :tools-available="chatToolsAvailable" @send="sendMessage" @new-chat="startNewChat" @select-session="selectKnowledgeChatSession" @rename-session="renameHistorySession" @delete-session="deleteHistorySession" @delete-sessions="deleteSelectedHistorySessions" @export-session="exportHistorySession" @save-as-note="saveAssistantNoteHandler" @play-media="openCitationMedia" @update:tool-options="updateChatToolOptions" />
         <AvatarView v-else-if="currentView === 'avatar'" :api-online="apiOnline" @notice="showToast" />
         <JobsView v-else-if="currentView === 'jobs'" :api-online="apiOnline" @notice="showToast" @counts="pendingJobCount = $event" />
         <PluginsView v-else-if="currentView === 'plugins'" :api-online="apiOnline" :knowledge-bases="knowledgeBases" :active-knowledge-base-id="activeKnowledgeBaseId" @notice="showToast" />
+        <McpClientsView v-else-if="currentView === 'mcp'" :api-online="apiOnline" :knowledge-bases="knowledgeBases" :active-knowledge-base-id="activeKnowledgeBaseId" @notice="showToast" @back="navigate('settings')" />
         <CompanionView v-else />
       </div>
       <footer v-if="currentView !== 'assistant'" class="page-footer"><span>知间 <span>·</span> 让每一份学习都有迹可循</span><span>本地优先，安心记录 <span class="footer-leaf">✳</span></span></footer>

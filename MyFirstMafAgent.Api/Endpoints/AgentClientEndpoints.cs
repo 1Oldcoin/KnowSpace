@@ -33,6 +33,77 @@ public static class AgentClientEndpoints
             })
         }));
 
+        // 「谁连着、调了多少次」的单一入口：界面一次请求就能渲染整页，
+        // 不必先拿列表再逐客户端拉调用明细（那会变成 N+1，而且明细有 500 条上限）。
+        group.MapGet("/overview", async (
+            int? windowHours,
+            AgentClientService service,
+            IAgentCallLogStore callLog,
+            CancellationToken cancellationToken) =>
+        {
+            var hours = Math.Clamp(windowHours ?? 24, 1, 24 * 30);
+            var now = DateTimeOffset.UtcNow;
+            var since = now.AddHours(-hours);
+
+            var clients = await service.ListAsync(cancellationToken);
+            var summaries = await callLog.SummarizeAsync(since, cancellationToken);
+            var byClient = summaries.ToDictionary(summary => summary.ClientId, StringComparer.Ordinal);
+            var onlineSince = now.AddMinutes(-AgentClientPresence.OnlineWindowMinutes);
+
+            // 「在线」是近似值：MCP 服务端是无状态的，没有长连接可查。
+            // 判定口径写在返回体里，界面据此显示"最近活跃"而不是"已连接"。
+            bool IsOnline(AgentClient client) =>
+                client.Enabled && client.LastSeenAt is { } seen && seen >= onlineSince;
+
+            return Results.Ok(new
+            {
+                windowHours = hours,
+                onlineWindowMinutes = AgentClientPresence.OnlineWindowMinutes,
+                generatedAt = now,
+                totals = new
+                {
+                    clients = clients.Count,
+                    enabled = clients.Count(client => client.Enabled),
+                    disabled = clients.Count(client => !client.Enabled),
+                    online = clients.Count(IsOnline),
+                    calls = summaries.Sum(summary => summary.Total),
+                    success = summaries.Sum(summary => summary.Success),
+                    denied = summaries.Sum(summary => summary.Denied),
+                    failed = summaries.Sum(summary => summary.Failed)
+                },
+                clients = clients
+                    .OrderByDescending(IsOnline)
+                    .ThenByDescending(client => client.LastSeenAt ?? DateTimeOffset.MinValue)
+                    .Select(client => new
+                    {
+                        client.Id,
+                        client.Name,
+                        client.Description,
+                        client.KeyPrefix,
+                        client.Capabilities,
+                        client.AllowedKnowledgeBaseIds,
+                        client.AllowedTools,
+                        client.RequestsPerMinute,
+                        client.Enabled,
+                        client.CreatedAt,
+                        client.UpdatedAt,
+                        client.LastSeenAt,
+                        client.LastSeenAddress,
+                        online = IsOnline(client),
+                        usage = byClient.TryGetValue(client.Id, out var summary)
+                            ? new
+                            {
+                                summary.Total,
+                                summary.Success,
+                                summary.Denied,
+                                summary.Failed,
+                                summary.LastCallAt
+                            }
+                            : null
+                    })
+            });
+        });
+
         group.MapGet("/calls", async (
             string? clientId,
             int? limit,

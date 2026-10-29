@@ -26,6 +26,20 @@
 
 ### 第一步：建一个客户端，拿到密钥
 
+最省事的方式是界面：**设置 → AI 工具与 MCP → 管理接入客户端**（左侧导航「接入的 AI 工具」）。
+那里能新建客户端、勾选能力与工具白名单、限制可见知识库、轮换密钥、看调用统计与审计明细，全部不用敲命令。
+
+单页一次拿全量统计：
+
+```powershell
+curl.exe -s "http://127.0.0.1:5056/api/agent-clients/overview?windowHours=24"
+```
+
+返回每个客户端的 `online`（**近似值**：`enabled` 且最近 5 分钟内有调用）、`usage.total/success/denied/failed/lastCallAt`，
+以及 `totals`。MCP 服务端是无状态的（`Stateless = true`），没有长连接可查，所以界面上写的是「最近活跃」而不是「已连接」。
+
+脚本化建客户端：
+
 ```powershell
 curl.exe -s -X POST http://127.0.0.1:5056/api/agent-clients `
   -H "Content-Type: application/json" `
@@ -106,6 +120,51 @@ curl.exe -s http://127.0.0.1:5056/api/agent-clients/catalog
 
 ## 4. 三级收窄：能力 → 工具白名单 → 知识库白名单
 
+在动手之前，先把两个容易卡住的前提说清楚。
+
+### 4.1 `X-Api-Token` 是什么，从哪来
+
+它是**管理面 `/api` 的令牌**，跟给外部 Agent 用的 `maf_` 密钥完全是两回事：
+
+| 令牌 | 谁的凭据 | 放在哪 | 能做什么 |
+| --- | --- | --- | --- |
+| `X-Api-Token` | **你（界面/管理员）** | 请求头 | 建库、传资料、建 MCP 客户端、改白名单 |
+| `X-Api-Key: maf_…` | **外部 Agent** | 请求头 | 只能调工具，不能碰 `/api` |
+
+它由谁产生，取决于你怎么跑起来的：
+
+| 启动方式 | 令牌来源 | 怎么拿到 |
+| --- | --- | --- |
+| 桌面版（安装包 / `npm start`） | Electron 每次启动随机生成 32 字节，注入 `DESKTOP_API_TOKEN` | 应用运行期间读 `%LOCALAPPDATA%\MyFirstMafAgentData\runtime\token`（退出时自动删除） |
+| 自己 `dotnet run` | 环境变量 `DESKTOP_API_TOKEN`（或 `MAF_SERVER_TOKEN`） | 你启动时自己设的，自己知道 |
+| 裸机 / Docker 服务端 | 环境变量 `MAF_SERVER_TOKEN` | `deploy/linux/myfirstmafagent.env` 或 `.env` |
+
+三种都读不到时（`Hosting:Profile=Desktop` 且没设任何令牌），管理面**不鉴权**，也不需要这个头——这正是桌面调试态。
+
+桌面版的一行取法：
+
+```powershell
+$root  = Join-Path $env:LOCALAPPDATA 'MyFirstMafAgentData'
+$info  = Get-Content (Join-Path $root 'runtime\desktop.json') -Raw | ConvertFrom-Json   # 含随机端口
+$token = (Get-Content (Join-Path $root 'runtime\token') -Raw).Trim()
+$base  = "$($info.url)/api"
+```
+
+服务端 / 自己跑的实例则是固定地址 + 环境变量里的令牌：
+
+```powershell
+$base  = 'http://127.0.0.1:5056/api'
+$token = $env:MAF_SERVER_TOKEN
+```
+
+后面所有 `curl` 示例都假设你已经有了这两个变量。
+
+### 4.2 建库不需要 `curl`
+
+上一节那句 `POST /api/knowledge-bases` 只是接口事实，**日常不需要手敲**：界面侧栏工作区那一行的 **「+」** 就是"新建知识库"，**垃圾桶图标**是"删除当前知识库"（默认库置灰）。curl 只在写脚本或排查时用。
+
+### 4.3 客户端配置长什么样
+
 ```jsonc
 {
   "name": "Claude Desktop",
@@ -122,6 +181,96 @@ curl.exe -s http://127.0.0.1:5056/api/agent-clients/catalog
 - **可选参数也一样受校验**：`chat_search_history` / `list_chat_sessions` 不强制要知识库，但只要显式传了 `knowledgeBaseId`，网关就会拿它对照白名单——否则「可选」就成了绕过范围的后门（真实修过：`AgentCallGate` 曾经对 `UsesKnowledgeBase: false` 的工具直接放行）。
 - `get_document_content` 只带资料 ID，网关会回查资料属于哪个知识库再判定。
 - `list_knowledge_bases` 只返回范围内的库（连名字也不外泄）。
+- **知识库被删除后，客户端范围不会自动放宽**：白名单里那个 GUID 仍然存在，只是再也匹配不到任何知识库。所以「删掉库」不等于「回收授权」——受限客户端会退化成什么都访问不了，需要手工改它的白名单。这是刻意的：把空列表当作「不限」会让一次删除变成一次提权。删除知识库不会走 MCP，只有界面与 `DELETE /api/knowledge-bases/{id}` 两条路（都需要界面令牌），MCP 侧不提供建库/删库工具。
+
+### 4.4 三条路具体怎么操作
+
+先说一个现状：**前端目前没有 MCP 客户端管理界面**。设置页只有"粘贴 `maf_` 密钥 → 生成客户端配置"这一块，`allowedKnowledgeBaseIds` 的编辑入口只在插件页（那是给插件用的，不是给外部 Agent）。所以今天能改白名单的实际路径只有下面三条里的 A 和 B——C 是应急手段。
+
+| 路 | 需要什么 | 适合 |
+| --- | --- | --- |
+| A `PUT /api/agent-clients/{id}` | 一个终端 + `X-Api-Token` | 任何情况；精确、可脚本化 |
+| B OAuth 同意页勾选 | 客户端支持 OAuth；能打开同意页 | 一次性授权，不用记 GUID |
+| C 宽松客户端自举 | 无 | 只想"先能连上"的临时验证 |
+
+#### 路 A：`PUT /api/agent-clients/{id}` —— 精确指定，脚本化
+
+```powershell
+# 1) 看现有客户端（列表里没有明文密钥，只有前缀）
+$clients = Invoke-RestMethod "$base/agent-clients" -Headers @{ 'X-Api-Token' = $token }
+$clients.clients | Format-Table id, name, keyPrefix, capabilities, allowedKnowledgeBaseIds, requestsPerMinute
+
+# 2) 看现有知识库，拿到 GUID
+$kbs = Invoke-RestMethod "$base/knowledge-bases" -Headers @{ 'X-Api-Token' = $token }
+$kbs | Format-Table id, name, isDefault
+$keep = ($kbs | Where-Object { $_.name -eq '工作笔记' }).id
+
+# 3) 改白名单（没写的字段保持原值；allowedKnowledgeBaseIds 传了就整体覆盖）
+$body = @{
+    capabilities            = @('knowledge:read')
+    allowedKnowledgeBaseIds = @($keep)      # 空数组 @() = 不限制
+    allowedTools            = @()
+    requestsPerMinute       = 60
+} | ConvertTo-Json
+Invoke-RestMethod "$base/agent-clients/$($clients.clients[0].id)" -Method Put `
+    -Headers @{ 'X-Api-Token' = $token } -ContentType 'application/json' -Body $body
+```
+
+`PUT` 的语义是"部分更新"：`name`、`description`、`capabilities`、`allowedTools`、`requestsPerMinute` 没写的字段保持原值（`null` = 不修改），
+但 `allowedKnowledgeBaseIds` 只要传了就整体覆盖——传 `@()` 是"清空 = 不限制"，不是"不变"。想把受限改回不限制，必须显式传空数组。
+
+> **PowerShell 的坑**：`@($keep)` 序列化成 `["guid"]`（数组），而 `$keep` 直接赋值会序列化成 `"guid"`（字符串），后者接口会 400。
+> 只有一个知识库时也必须写 `@($keep)`。
+
+如果连客户端都还没有，先建一个（响应里的 `key` 只出现这一次）：
+
+```powershell
+$created = Invoke-RestMethod "$base/agent-clients" -Method Post `
+    -Headers @{ 'X-Api-Token' = $token } -ContentType 'application/json' -Body (@{
+        name                    = 'Claude Code'
+        capabilities            = @('knowledge:read')
+        allowedKnowledgeBaseIds = @($keep)
+        allowedTools            = @()
+        requestsPerMinute       = 60
+    } | ConvertTo-Json)
+"密钥（只显示一次）： $($created.key)"
+```
+
+#### 路 B：OAuth 同意页勾选
+
+```text
+客户端发起 OAuth 授权 → 浏览器打开 https://<你的域名>/oauth/authorize?…
+  → 页面「可访问的知识库」区勾选需要的库（默认全勾）
+  → 「同意授权」
+```
+
+勾选结果会直接写进该客户端的 `allowedKnowledgeBaseIds`，不需要任何 curl。
+前提是能打开同意页：Desktop Profile 下从本机浏览器打开即可；Server Profile 走 `ConsentAccessGuard`（回环来源，或带 `X-Api-Token` 的请求），
+公网直接访问会 403，详见 `docs/MCP-REMOTE-DESIGN.md` §3.2。
+
+**注意**：同意页的勾选框默认是**全选**，顺手点「同意」会把新加的库一并授权。只想给一部分时，先取消全选再逐个勾。
+
+#### 路 C：先用宽松客户端自举 —— 应急
+
+1. 建一个 `allowedKnowledgeBaseIds` 为**空**的客户端（空 = 不限制），能力只给 `knowledge:read`。
+2. 用它调 `list_knowledge_bases`，拿到全部 GUID。
+3. 再按路 A 把这个客户端收窄。
+
+**别把这个宽松客户端留在生产上**——它拥有完整的知识库读权限。
+
+#### 改完怎么验证
+
+```powershell
+# 受限客户端应当只看到自己范围内的库
+# 桌面版：$mcp = "$($info.url)/mcp"；服务端：$mcp = 'http://127.0.0.1:5056/mcp'
+$mcp = 'http://127.0.0.1:5056/mcp'
+curl.exe -s $mcp -H "Content-Type: application/json" -H "X-Api-Key: maf_xxx" `
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_knowledge_bases","arguments":{}}}'
+```
+
+返回的数组条数应当等于你配的 GUID 个数。再传一个范围外的 `knowledgeBaseId` 去调 `search_knowledge_base`，
+应当收到 `-32003` 与一句列明允许范围的错误，而不是空结果——空结果会被误读成"库里没这篇"。
+
 
 ---
 
@@ -155,6 +304,7 @@ curl.exe -s http://127.0.0.1:5056/api/agent-clients/catalog
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/agent-clients` | 列表（只给前缀，不含密钥） |
+| GET | `/api/agent-clients/overview?windowHours=` | 列表 + 在线近似值 + 窗口内调用统计（界面用的单请求聚合） |
 | GET | `/api/agent-clients/catalog` | 能力与工具清单 |
 | GET | `/api/agent-clients/{id}` | 单个客户端 |
 | GET | `/api/agent-clients/calls?clientId=&limit=` | 调用审计（时间倒序） |

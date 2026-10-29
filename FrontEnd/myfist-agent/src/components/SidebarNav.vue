@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { BookOpen, Command, FileText, Fingerprint, FolderOpen, Heart, House, ListChecks, MessageSquareText, NotebookPen, Plug, Plus, Settings2, Sparkles } from 'lucide-vue-next'
+import { BookOpen, Command, FileText, Fingerprint, FolderOpen, Heart, House, ListChecks, MessageSquareText, NotebookPen, Plug, Plus, Settings2, Sparkles, Trash2 } from 'lucide-vue-next'
 import type { KnowledgeBase, Topic } from '../services/api'
 import type { ViewName } from '../types'
 
@@ -19,11 +19,15 @@ const emit = defineEmits<{
   navigate: [view: ViewName]
   selectKnowledgeBase: [id: string]
   createKnowledgeBase: []
+  deleteKnowledgeBase: []
   createTopic: []
   selectTopic: [id: string]
   editTopics: []
 }>()
 const activeKnowledgeBase = computed(() => props.knowledgeBases.find(item => item.id === props.activeKnowledgeBaseId))
+// 默认知识库是「没指定知识库」时的兜底目标，后端会拒绝删除。入口直接置灰，
+// 比让用户点了再弹一个「不能删」的错误更省事。
+const canDeleteActiveKnowledgeBase = computed(() => !!activeKnowledgeBase.value && activeKnowledgeBase.value.isDefault !== true)
 const primaryNav = computed(() => [
   { id: 'overview' as const, label: '总览', icon: House },
   { id: 'materials' as const, label: '我的资料', icon: FolderOpen, count: String(props.materialCount) },
@@ -45,6 +49,7 @@ const topicColorClass = (color: string) => ['lavender', 'mint', 'peach', 'blue',
       <div class="workspace-avatar">{{ activeKnowledgeBase?.name.slice(0, 1) ?? '知' }}</div>
       <label class="workspace-label"><strong>当前知识库</strong><select :value="activeKnowledgeBaseId" aria-label="切换知识库" :disabled="knowledgeBases.length === 0" @change="emit('selectKnowledgeBase', ($event.target as HTMLSelectElement).value)"><option v-for="knowledgeBase in knowledgeBases" :key="knowledgeBase.id" :value="knowledgeBase.id">{{ knowledgeBase.name }}</option></select></label>
       <button class="workspace-add-button" aria-label="新建知识库" title="新建知识库" @click="emit('createKnowledgeBase')"><Plus :size="16" /></button>
+      <button class="workspace-add-button workspace-delete-button" aria-label="删除当前知识库" :title="canDeleteActiveKnowledgeBase ? '删除当前知识库' : '默认知识库不能删除'" :disabled="!canDeleteActiveKnowledgeBase" @click="emit('deleteKnowledgeBase')"><Trash2 :size="15" /></button>
     </div>
 
     <div class="sidebar-label">工作台</div>
