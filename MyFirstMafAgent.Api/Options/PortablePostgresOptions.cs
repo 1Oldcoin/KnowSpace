@@ -80,27 +80,23 @@ public sealed class PortablePostgresOptions
     public string Password { get; set; } = "postgres";
 
     /// <summary>
-    /// 客户端连接池上限。<b>默认 16，不要上调。</b>
+    /// 客户端连接池上限。默认 50。
     ///
     /// <para>
-    /// 这里曾经是 50，而 PostgreSQL 的 <c>max_connections</c> 默认也是 100——两个数字互不相干，
-    /// 却让「连接池上限」看起来像个安全值。实际峰值并发只有个位数
-    /// （<c>Jobs:MaxConcurrentJobs</c> 默认 4 + 3 个后台 Worker + HTTP 请求），
-    /// 池子开到 50 却<b>永远收不回去</b>：每个新的 ExecutionContext 都会让 SqlSugar 在
-    /// <c>AsyncLocal</c> 里新建一个 <c>SqlSugarClient</c>，连带一条 Npgsql 物理连接；
-    /// <c>IsAutoCloseConnection</c> 只把连接还进池，不关它。于是「只增不减」，
-    /// 挂机几小时后池子被灌满，50 个空闲 backend 常驻，
-    /// 在任务管理器里就是几十个 postgres.exe 进程 + 数百 MB 工作集。
+    /// 这里曾经有个错误结论：以为把上限从 50 压到 16 就能「封顶」泄漏。
+    /// 实测证明那是错的——泄漏的成因是<b>长寿命执行上下文把连接扣在 AsyncLocal 里不还</b>
+    /// （见 <see cref="IConnectionReleaser"/>），与上限无关；把上限压到 16 只是让
+    /// 池子被灌满的时间从几小时缩短到 25 分钟，故障来得更快。所以上限恢复为 50，
+    /// 真正的修复是每一轮后台循环结束时主动归还连接。
     /// </para>
     ///
     /// <para>
-    /// 真正的收敛靠下面两个空闲回收参数，而不是靠把上限调大。
-    /// 上限的作用只是<b>封顶</b>：万一再出现泄漏，16 条也不会把
-    /// <c>max_connections</c> 吃掉一半。改成 16 后即使池子被灌满，
-    /// 空闲连接也会在 5 分钟内被回收。
+    /// 下面的空闲回收参数只对<b>已归还到池中</b>的连接生效：一条被 AsyncLocal 扣住的连接
+    /// 在 Npgsql 看来是「已借出」，永远不算 idle，清扫线程碰不到它。
+    /// 这就是为什么单靠 300 秒的 <c>Connection Idle Lifetime</c> 没能止住泄漏。
     /// </para>
     /// </summary>
-    public int MaxPoolSize { get; set; } = 16;
+    public int MaxPoolSize { get; set; } = 50;
 
     /// <summary>
     /// 连接在池中空闲多久后被关闭（秒）。默认 300 秒。

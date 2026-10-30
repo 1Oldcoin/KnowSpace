@@ -4,6 +4,7 @@ using MyFirstMafAgent.Api.Domain.Knowledge;
 using MyFirstMafAgent.Api.Domain.Notes;
 using MyFirstMafAgent.Api.Domain.Study;
 using MyFirstMafAgent.Api.Domain.Topics;
+using MyFirstMafAgent.Api.Application;
 using MyFirstMafAgent.Api.Application.Agents;
 using MyFirstMafAgent.Api.Application.Health;
 using MyFirstMafAgent.Api.Application.Jobs;
@@ -30,6 +31,19 @@ public static class PersistenceModule
             DbType = DbType.PostgreSQL,
             IsAutoCloseConnection = true
         }));
+
+        // 长寿命后台循环每轮结束时必须归还连接，否则连接池会被慢性占满（见接口注释）。
+        services.AddSingleton<IConnectionReleaser, SqlSugarConnectionReleaser>();
+
+        // 健康探针使用**独立的、不进连接池**的连接：直接回答「PostgreSQL 本身活着吗」。
+        services.AddSingleton<IDatabaseHealthProbe>(_ => new SqlSugarDatabaseHealthProbe(connectionString));
+
+        // 池探针走共享 SqlSugarScope：回答「应用还能从业务连接池拿到连接吗」。
+        // 这两者一起才能区分「数据库挂了」与「我们把池耗尽了」。
+        services.AddSingleton<IDatabasePoolProbe, SqlSugarPoolProbe>();
+
+        // 池被耗尽时进程内无法回收（连接握在别的托管对象手里），只能重建进程。
+        services.AddHostedService<DatabasePoolWatchdog>();
 
         // 旧结构（Documents/Chats/Companions）仍使用这两个聚合根存储。
         services.AddSingleton<KnowledgeBaseStore>();
@@ -73,7 +87,6 @@ public static class PersistenceModule
         services.AddSingleton<IKnowledgeBaseDirectory, SqlSugarKnowledgeBaseDirectory>();
         services.AddSingleton<KnowledgePackageStore>();
         services.AddSingleton<IKnowledgePackageStore>(sp => sp.GetRequiredService<KnowledgePackageStore>());
-        services.AddSingleton<IDatabaseHealthProbe, SqlSugarDatabaseHealthProbe>();
 
         // 插件安装态（启用/配置/授权/范围）与调用审计。
         services.AddSingleton<SqlSugarPluginRegistry>();

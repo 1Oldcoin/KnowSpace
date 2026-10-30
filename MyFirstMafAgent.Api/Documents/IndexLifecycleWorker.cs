@@ -12,6 +12,7 @@ namespace MyFirstMafAgent.Api.Documents;
 public sealed class IndexLifecycleWorker(
     IndexLifecycleManager lifecycle,
     IOptions<IndexingOptions> options,
+    IConnectionReleaser connectionReleaser,
     ILogger<IndexLifecycleWorker> logger) : BackgroundService
 {
     // 必须在独立 ExecutionContext 中运行，否则会与其它 Worker 共用同一条数据库连接。
@@ -44,6 +45,9 @@ public sealed class IndexLifecycleWorker(
             {
                 logger.LogError(exception, "Index lifecycle worker encountered an error.");
             }
+
+            // 长寿命上下文：每轮结束必须归还连接，否则会在连接池里永久占一条（见 IConnectionReleaser）。
+            connectionReleaser.Release();
 
             try
             {

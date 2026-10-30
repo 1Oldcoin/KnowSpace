@@ -22,6 +22,7 @@ namespace MyFirstMafAgent.Api.Documents;
 public sealed class LexicalIndexWorker(
     KnowledgeBaseStore store,
     IOptions<IndexingOptions> options,
+    IConnectionReleaser connectionReleaser,
     ILogger<LexicalIndexWorker> logger) : BackgroundService
 {
     /// <summary>每批处理的切片数量：批量太小会把数据库往返放大，太大则单事务过重。</summary>
@@ -63,6 +64,9 @@ public sealed class LexicalIndexWorker(
             {
                 logger.LogError(exception, "Lexical token backfill encountered an error.");
             }
+
+            // 长寿命上下文：每轮结束必须归还连接，否则会在连接池里永久占一条（见 IConnectionReleaser）。
+            connectionReleaser.Release();
 
             try
             {

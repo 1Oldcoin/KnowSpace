@@ -252,6 +252,8 @@ public static class ApiHost
     /// 否则「连接串写错了」会变成一条看不懂的 <c>ArgumentException</c>。
     /// </para>
     /// </summary>
+    internal const int ConnectionAcquisitionTimeoutSeconds = 5;
+
     internal static string ApplyPoolDefaults(string connectionString, IConfiguration configuration)
     {
         var options = configuration.GetSection(PortablePostgresOptions.SectionName)
@@ -267,6 +269,13 @@ public static class ApiHost
                 builder.ConnectionIdleLifetime = Math.Max(0, options.ConnectionIdleLifetimeSeconds);
             if (!ConnectionStringDeclaresKey(connectionString, "connectionpruninginterval"))
                 builder.ConnectionPruningInterval = Math.Max(1, options.ConnectionPruningIntervalSeconds);
+
+            // 连接**获取**超时（不是命令超时）。本地/容器内的 PostgreSQL 建连都是毫秒级，
+            // 15 秒的唯一效果就是让「连接池已满」这种已知失败拖上 15 秒才报错——
+            // 现象就是界面转圈 15 秒然后报错，看门狗也要等好几个周期才反应过来。
+            // 5 秒足够任何真实建连，而且失败得干脆。
+            if (!ConnectionStringDeclaresKey(connectionString, "timeout", "connectiontimeout"))
+                builder.Timeout = ConnectionAcquisitionTimeoutSeconds;
 
             return builder.ConnectionString;
         }

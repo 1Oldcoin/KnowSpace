@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using MyFirstMafAgent.Api.Application;
 using MyFirstMafAgent.Api.Application.Jobs;
 using MyFirstMafAgent.Api.Domain.Jobs;
 using Xunit;
@@ -442,6 +443,16 @@ public sealed class JobSchedulerTests
     }
 
     /// <summary>
+    /// 连接归还替身：调度器每轮结束都会调用它，测试里没有真实连接池，直接空转。
+    /// </summary>
+    private sealed class NoOpConnectionReleaser : IConnectionReleaser
+    {
+        public int ReleaseCount { get; private set; }
+
+        public void Release() => ReleaseCount++;
+    }
+
+    /// <summary>
     /// 内存队列替身：语义与 SqlSugar 实现保持一致（CAS 领取、租约、重试策略）。
     /// </summary>
     private sealed class FakeJobQueue : IJobQueue
@@ -801,6 +812,7 @@ public sealed class JobSchedulerTests
                 _provider.GetRequiredService<JobWakeSignal>(),
                 Quota,
                 _provider.GetRequiredService<IOptions<JobOptions>>(),
+                new NoOpConnectionReleaser(),
                 NullLogger<JobScheduler>.Instance);
         }
 

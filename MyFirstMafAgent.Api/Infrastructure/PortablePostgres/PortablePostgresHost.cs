@@ -967,7 +967,9 @@ public sealed class PortablePostgresHost : IAsyncDisposable
             MaxPoolSize = Math.Max(1, options.MaxPoolSize),
             ConnectionIdleLifetime = Math.Max(0, options.ConnectionIdleLifetimeSeconds),
             ConnectionPruningInterval = Math.Max(1, options.ConnectionPruningIntervalSeconds),
-            Timeout = 15,
+            // 连接**获取**超时（不是命令超时）：本地便携库建连是毫秒级，
+            // 15 秒的唯一效果是让「连接池已满」拖 15 秒才报错（界面就转圈 15 秒）。
+            Timeout = 5,
             CommandTimeout = 120,
             // 便携库只在 127.0.0.1 上明文跑，协商 SSL 纯属多一个往返。
             SslMode = SslMode.Disable,

@@ -53,6 +53,13 @@ const SHUTDOWN_TIMEOUT_MS = 90_000;
 const WATCHDOG_INTERVAL_MS = 15_000;
 /** 连续失败这么多次才判定“后端丢了”，避免单次抖动或数据库 checkpoint 卡顿触发重连。 */
 const WATCHDOG_FAILURE_THRESHOLD = 3;
+/**
+ * 连续多少次 /api/health 失败就重启后端。
+ *
+ * 比上面的阈值更宽松：后端进程还在，只是数据库层不可用，重启是有代价的（要重开数据库），
+ * 所以要确认它真的不会自己好了再动手。15s × 6 ≈ 1.5 分钟。
+ */
+const HEALTH_FAILURE_THRESHOLD = 6;
 /** 自动恢复的冷却时间，避免恢复失败时高频重试。 */
 const RECOVERY_COOLDOWN_MS = 5_000;
 /** 连续恢复失败上限：达到后弹框告知用户，而不是无限重启。 */
@@ -81,6 +88,8 @@ let updater = null;
 /** 看护定时器与连续失败计数（见 WATCHDOG_* 常量）。 */
 let watchdogTimer = null;
 let probeFailures = 0;
+/** /api/health 连续失败次数：与 probeFailures 分开计，因为两者代表不同故障。 */
+let healthFailures = 0;
 /** 恢复流程互斥：同一时刻只跑一个，避免定时器与 exit 回调同时触发拉起两个后端。 */
 let recoveryInFlight = null;
 let lastRecoveryAt = 0;
@@ -829,6 +838,31 @@ async function probeBackend(url, token) {
 }
 
 /**
+ * 探测后端「能不能干活」：只有数据库可用、且业务连接池还能拿到连接时才 200。
+ *
+ * 单独一个函数的理由：它和 probeBackend 回答的是不同问题。
+ * probeBackend 只看进程活不活；进程活着但连接池被耗尽时它照样 200，
+ * 于是以前那种「挂一会儿就连不上」的故障永远不会被看门狗发现。
+ */
+async function probeHealth(url, token) {
+  const controller = new AbortController();
+  // 后端自身的建连超时是 5 秒，这里给 8 秒，避免把「慢」误判成「坏」。
+  const timer = setTimeout(() => controller.abort(), 8000);
+
+  try {
+    const response = await fetch(`${url}/api/health`, {
+      headers: token ? { [TOKEN_HEADER]: token } : {},
+      signal: controller.signal
+    });
+    return response.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * 后台服务可能早就以命令行 / 系统服务的方式跑着了。
  * 这时读发现文件、探活一次，通了就直接接管——绝不再拉起第二个后端
  * （两个实例会抢同一个便携 PostgreSQL、同一份数据目录，还会抢同一个端口）。
@@ -1000,9 +1034,27 @@ function startWatchdog() {
     const probe = await probeBackend(apiBaseUrl, apiToken);
     if (probe) {
       probeFailures = 0;
+
+      // 后端进程还在，但它可能已经不能查库了——这种情况 /api/desktop/info 依然 200，
+      // 光看它永远发现不了。实测故障：连接池被耗尽后所有查库请求 5 秒后失败，
+      // 而 /api/desktop/info 一直正常，用户只能手动关掉再打开。
+      // 所以再问一次 /api/health：它只有在「数据库可用、且业务连接池还能拿到连接」时才 200。
+      const healthy = await probeHealth(apiBaseUrl, apiToken);
+      if (healthy) {
+        healthFailures = 0;
+        return;
+      }
+
+      healthFailures += 1;
+      log(`watchdog: health failed (${healthFailures}/${HEALTH_FAILURE_THRESHOLD})`);
+      if (healthFailures >= HEALTH_FAILURE_THRESHOLD) {
+        healthFailures = 0;
+        await recoverBackend('数据库连接不可用', { allowSpawn: true });
+      }
       return;
     }
 
+    healthFailures = 0;
     probeFailures += 1;
     log(`watchdog: probe failed (${probeFailures}/${WATCHDOG_FAILURE_THRESHOLD})`);
     if (probeFailures >= WATCHDOG_FAILURE_THRESHOLD) {

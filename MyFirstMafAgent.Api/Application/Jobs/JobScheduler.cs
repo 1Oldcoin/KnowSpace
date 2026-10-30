@@ -26,6 +26,7 @@ public sealed class JobScheduler(
     JobWakeSignal wake,
     JobTypeQuota quota,
     IOptions<JobOptions> options,
+    IConnectionReleaser connectionReleaser,
     ILogger<JobScheduler> logger) : BackgroundService
 {
     private readonly string _workerId = "w_" + Environment.ProcessId + "_" + Guid.NewGuid().ToString("N")[..6];
@@ -158,6 +159,15 @@ public sealed class JobScheduler(
                 {
                     break;
                 }
+            }
+            finally
+            {
+                // 每一轮结束都把连接还给连接池。
+                // 槽位是**长寿命执行上下文**（整个进程生命周期只有这一个），而 SqlSugar 把连接
+                // 缓存在 AsyncLocal 里；不主动归还的话，每轮领取/心跳借走的那条会永久挂在这个上下文上。
+                // 实测：挂机 25 分钟后堆出 16 条（= MaxPoolSize）永不释放的 idle 会话，
+                // 其中 12 条的最后语句就是这里的 ClaimAsync，池满后整个 API 再也拿不到连接。
+                connectionReleaser.Release();
             }
         }
 

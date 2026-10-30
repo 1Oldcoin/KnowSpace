@@ -8,6 +8,7 @@ namespace MyFirstMafAgent.Api.Application.Avatar;
 /// </summary>
 public sealed class AvatarIngestionWorker(
     IServiceScopeFactory scopeFactory,
+    IConnectionReleaser connectionReleaser,
     ILogger<AvatarIngestionWorker> logger) : BackgroundService
 {
     private static readonly TimeSpan IdleDelay = TimeSpan.FromSeconds(2);
@@ -72,6 +73,11 @@ public sealed class AvatarIngestionWorker(
                 {
                     break;
                 }
+            }
+            finally
+            {
+                // 长寿命上下文：每轮结束必须归还连接，否则会在连接池里永久占一条（见 IConnectionReleaser）。
+                connectionReleaser.Release();
             }
         }
 
