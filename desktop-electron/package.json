@@ -1,6 +1,6 @@
 {
   "name": "myfirstmafagent-desktop",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "private": true,
   "description": "鐭ラ棿-鏈湴鐭ヨ瘑搴?妗岄潰澹筹細鍘熺敓 Electron 涓昏繘绋?+ .NET API sidecar",
   "author": "鐭ラ棿",
