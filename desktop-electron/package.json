@@ -1,9 +1,9 @@
-﻿{
+{
   "name": "myfirstmafagent-desktop",
   "version": "1.0.5",
   "private": true,
-  "description": "閻儵妫?閺堫剙婀撮惌銉ㄧ槕鎼?濡楀矂娼版竟绛圭窗閸樼喓鏁?Electron 娑撴槒绻樼粙?+ .NET API sidecar",
-  "author": "閻儵妫?,
+  "description": "鐭ラ棿-鏈湴鐭ヨ瘑搴?妗岄潰澹筹細鍘熺敓 Electron 涓昏繘绋?+ .NET API sidecar",
+  "author": "鐭ラ棿",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
