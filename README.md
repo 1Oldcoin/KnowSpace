@@ -392,6 +392,7 @@ powershell -ExecutionPolicy Bypass -File scripts\Merge-To-Main.ps1 -TagName v1.0
 | **接入客户端管理页** | 新增「接入的 AI 工具」页（设置页有入口）：新建客户端、勾能力与工具白名单、限定可见知识库、轮换密钥、看调用统计与审计明细。同时新增 `GET /api/agent-clients/overview` 聚合接口 |
 | **删除知识库** | 侧栏知识库右侧新增删除按钮，会连同资料、切片、向量、笔记、专题、问答历史与磁盘文件一起清理；默认知识库不可删 |
 | **安装包瘦身** | 283 → 278 MB：不再把构建机上跑过的 PostgreSQL 数据目录打进安装包 |
+| **数据库连接池收敛** | `MaxPoolSize` 50 → **16**，并启用空闲回收（300 秒 / 60 秒扫描）。修掉「挂机几小时后 PostgreSQL 冒出 50 个 idle 会话、几十个 `postgres.exe`、1.4 GB 工作集」的问题；实测稳态 7~8 条。外部连接串也会自动补上这三个参数，详见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) §2.1 |
 
 关于「统计当前被连接的应用」：MCP 是**无状态** Streamable HTTP，服务端没有长连接可查，
 所以页面上的口径是「**最近活跃**」= 已启用且最近 5 分钟内有有效调用，不写成「已连接」。

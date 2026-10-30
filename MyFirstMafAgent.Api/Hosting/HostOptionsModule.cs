@@ -140,6 +140,14 @@ public static class HostOptionsModule
                     && !string.IsNullOrWhiteSpace(options.Username)
                     && !string.IsNullOrWhiteSpace(options.Database)),
                 "PortablePostgres 的端口、超时、用户名与数据库名必须有效。")
+            // 连接池上限只用来封顶，不设下限会让人把它当成「调优旋钮」往上调——
+            // 调大只会让泄漏更快吃掉 max_connections，缓过来更慢。
+            .Validate(options => options.MaxPoolSize is >= 1 and <= 100,
+                "PortablePostgres:MaxPoolSize 必须在 1~100 之间（默认 16）。这个值是上限而非目标，调大没有好处。")
+            .Validate(options => options.ConnectionIdleLifetimeSeconds is >= 0 and <= 86400,
+                "PortablePostgres:ConnectionIdleLifetimeSeconds 必须在 0~86400 之间（默认 300，0 = 永不回收）。")
+            .Validate(options => options.ConnectionPruningIntervalSeconds is >= 1 and <= 3600,
+                "PortablePostgres:ConnectionPruningIntervalSeconds 必须在 1~3600 之间（默认 60）。")
             .ValidateOnStart();
     }
 

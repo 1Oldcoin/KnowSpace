@@ -28,6 +28,32 @@ Electron 自身已经跨平台，所以「桌面版」不需要后端做额外�
 
 Whisper 模型（141 MB 起）**不随包分发**，运行时可下载或从设置页导入。
 
+### 2.1 数据库连接池（1.0.3 起）
+
+`PortablePostgres` 段里有三个连接池参数，**不要上调**：
+
+| 键 | 默认 | 作用 |
+| --- | --- | --- |
+| `MaxPoolSize` | `16` | 池上限（封顶，不是目标值） |
+| `ConnectionIdleLifetimeSeconds` | `300` | 空闲连接多久后被关闭；`0` = 永不回收 |
+| `ConnectionPruningIntervalSeconds` | `60` | 回收线程的扫描间隔 |
+
+**为什么需要这三个参数（这是一个真实踩过的坑）**：1.0.2 之前 `MaxPoolSize` 写死 50，且关闭了空闲回收。桌面版挂机 1.4 小时后，PostgreSQL 里出现 **50 个 idle 客户端会话**——全部 `ClientRead` 空闲、最长已空闲 1 小时 37 分，而数据库本身只有 12 MB、峰值并发个位数。根因是 SqlSugar 的 `SqlSugarScope` 会为每个新的 `ExecutionContext`（HTTP 请求、后台 Worker 循环、任务槽位）在 `AsyncLocal` 里缓存一个 `SqlSugarClient`，各自带一条 Npgsql 物理连接；`IsAutoCloseConnection` 只把连接**还进池**而不关闭它，于是「只增不减」直到撞上上限。任务管理器里看到的几十个 `postgres.exe` 和 1.4 GB 工作集就是这么来的。
+
+**外部库同样会中招**：Npgsql 的默认值是 `MaxPoolSize = 100` + `ConnectionIdleLifetime = 0`（永不回收），比便携库原配置还糟。所以 `ApiHost.ApplyPoolDefaults` 会给外部连接串补上这三个键——**只补用户没写的**，显式配了的一律尊重。实测（`ConnectionPoolDefaultsTests`）：裸连接串补齐 16/300/60，写了 `Maximum Pool Size=7` 则原样保留 7。
+
+> ⚠️ 这里有个反直觉的陷阱：**不能用 `NpgsqlConnectionStringBuilder.ContainsKey("Maximum Pool Size")` 判断用户是否配过**。实测 Npgsql 9.0.4 对任何**合法键名**都返回 `true`，即使连接串里根本没这个键——它判断的是「这个名字合法吗」，不是「用户写了吗」。代码里改用解析原始连接串的 `ConnectionStringDeclaresKey`，并有测试锁住这个行为。
+>
+> 另外关键词必须写**带空格**的 `Maximum Pool Size`；写成 `maximumpoolsize` 会让 `new NpgsqlConnectionStringBuilder(...)` 直接抛 `ArgumentException`。
+
+**实测收敛效果**（同一台机器、同一个数据库）：
+
+| 场景 | 连接数 |
+| --- | --- |
+| 1.0.2（上限 50、不回收） | 涨到 **50** 并停在那儿，最长空闲 2 小时 |
+| 1.0.3（上限 16、300 秒回收） | 稳态 **7~8**，40 并发压测峰值也只到 8 |
+| 1.0.3（回收周期调到 45 秒验证） | 压测后 **8 → 3**，最长空闲从 2 分 26 秒降到 0.16 秒 |
+
 ## 3. 支持的平台矩阵
 
 | RID | 便携数据库 | ffmpeg | 现状 |
