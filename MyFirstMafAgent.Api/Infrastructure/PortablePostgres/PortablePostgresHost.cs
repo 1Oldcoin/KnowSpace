@@ -148,13 +148,36 @@ public sealed class PortablePostgresHost : IAsyncDisposable
 
         // 上一次进程异常退出时数据库可能仍在运行：优先复用，避免端口冲突和数据目录争用。
         var runningPort = TryReadRunningInstancePort(dataDirectory);
-        if (runningPort is { } port && await CanConnectAsync(port, "postgres", options, cancellationToken))
+        if (runningPort is { } port)
         {
-            log?.Invoke($"检测到已在运行的 PostgreSQL（端口 {port}，数据目录 {dataDirectory}），直接复用。");
-            var reused = new PortablePostgresHost(
-                binDirectory, dataDirectory, logDirectory, port, options.Database, options, startedByUs: false, log);
-            await reused.EnsureDatabaseAndVectorAsync(cancellationToken);
-            return reused;
+            if (await CanConnectAsync(port, "postgres", options, cancellationToken))
+            {
+                log?.Invoke($"检测到已在运行的 PostgreSQL（端口 {port}，数据目录 {dataDirectory}），直接复用。");
+                var reused = new PortablePostgresHost(
+                    binDirectory, dataDirectory, logDirectory, port, options.Database, options, startedByUs: false, log);
+                await reused.EnsureDatabaseAndVectorAsync(cancellationToken);
+                return reused;
+            }
+
+            // pid 文件里的进程还活着，但连不上——典型场景是「上一次关机被宿主强杀，
+            // pg_ctl stop 执行到一半」。此时数据目录的 postmaster.pid 仍然有效，
+            // 若继续往下走会在**同一个数据目录**上再起一个实例：pg_ctl 会因为
+            // postmaster.pid 已存在而失败，异常一路冒到 Program.cs 变成未处理异常
+            // （退出码 0xE0434352），而 Electron 的 stdio 是 ignore，堆栈完全看不到。
+            // 表现就是「关闭后再打开，应用起不来 / 连不上」。
+            // 正确做法是等旧实例退干净，再决定是否要强制清理。
+            log?.Invoke($"检测到残留的 PostgreSQL（端口 {port}）但尚未接受连接，等待它退出…");
+            if (await WaitForStaleInstanceToExitAsync(dataDirectory, cancellationToken, log))
+            {
+                log?.Invoke("残留实例已退出，继续启动。");
+            }
+            else
+            {
+                log?.Invoke("残留实例在等待时间内未退出，强制结束进程树后继续。");
+                KillPostmasterByPidFile(dataDirectory, log);
+                // 给操作系统一点时间回收端口与文件句柄。
+                await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+            }
         }
 
         await EnsureClusterInitializedAsync(binDirectory, dataDirectory, logDirectory, options, log, cancellationToken);
@@ -1020,6 +1043,90 @@ public sealed class PortablePostgresHost : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// 等一个「还活着但已经连不上」的旧实例真正退出。
+    ///
+    /// <para>
+    /// 存在的理由：关机时 <c>pg_ctl stop -m fast</c> 最长等 60 秒做 checkpoint，
+    /// 而桌面宿主只等 20 秒就强杀 API，于是 <c>pg_ctl</c> 被中断、PostgreSQL 处于
+    /// 「进程还在、端口还在、但不接受新连接」的中间态。这时如果直接启动新实例，
+    /// <c>pg_ctl start</c> 会因为数据目录里的 <c>postmaster.pid</c> 拒绝启动，
+    /// 上层看到的就是一条没有堆栈的启动崩溃。
+    /// </para>
+    ///
+    /// <para>返回 true 表示已确认退出（或 pid 文件已消失），可以安全继续启动。</para>
+    /// </summary>
+    private static async Task<bool> WaitForStaleInstanceToExitAsync(
+        string dataDirectory,
+        CancellationToken cancellationToken,
+        Action<string>? log,
+        TimeSpan? timeout = null)
+    {
+        var limit = timeout ?? TimeSpan.FromSeconds(45);
+        var deadline = DateTime.UtcNow + limit;
+
+        while (DateTime.UtcNow < deadline)
+        {
+            if (cancellationToken.IsCancellationRequested) return false;
+            if (!IsPidFileProcessAlive(dataDirectory)) return true;
+            await Task.Delay(500, cancellationToken);
+        }
+
+        return !IsPidFileProcessAlive(dataDirectory);
+    }
+
+    /// <summary>pid 文件里的进程是否仍然活着且确实是 postgres。</summary>
+    private static bool IsPidFileProcessAlive(string dataDirectory)
+    {
+        var pidFile = Path.Combine(dataDirectory, PidFileName);
+        if (!File.Exists(pidFile)) return false;
+
+        try
+        {
+            var firstLine = File.ReadAllLines(pidFile).FirstOrDefault()?.Trim();
+            if (!int.TryParse(firstLine, out var pid)) return false;
+
+            using var process = Process.GetProcessById(pid);
+            if (process.HasExited) return false;
+            return process.ProcessName.Contains("postgres", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or InvalidOperationException or IOException
+                or UnauthorizedAccessException or NotSupportedException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 按数据目录里的 <c>postmaster.pid</c> 结束进程树。
+    ///
+    /// <para>
+    /// 只对**本数据目录**的 pid 文件动手，所以不可能误杀机器上其它 PostgreSQL 实例。
+    /// </para>
+    /// </summary>
+    private static void KillPostmasterByPidFile(string dataDirectory, Action<string>? log)
+    {
+        var pidFile = Path.Combine(dataDirectory, PidFileName);
+        if (!File.Exists(pidFile)) return;
+
+        try
+        {
+            if (!int.TryParse(File.ReadAllLines(pidFile).FirstOrDefault()?.Trim(), out var pid)) return;
+            using var process = Process.GetProcessById(pid);
+            if (process.HasExited) return;
+
+            process.Kill(entireProcessTree: true);
+            log?.Invoke($"已强制结束 PostgreSQL 进程（PID {pid}）。");
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or InvalidOperationException or IOException
+                or UnauthorizedAccessException or NotSupportedException)
+        {
+            log?.Invoke($"强制结束 PostgreSQL 进程失败：{exception.Message}");
+        }
+    }
+
     private static int FindAvailablePort(int preferred)
     {
         for (var offset = 0; offset < 32; offset++)
@@ -1152,27 +1259,7 @@ public sealed class PortablePostgresHost : IAsyncDisposable
     }
 
     /// <summary>兜底：pg_ctl 停不掉（例如 pid 文件丢失）时直接结束 postmaster 进程树。</summary>
-    private void KillPostmaster()
-    {
-        var pidFile = Path.Combine(_dataDirectory, PidFileName);
-        if (!File.Exists(pidFile)) return;
-
-        try
-        {
-            if (!int.TryParse(File.ReadAllLines(pidFile).FirstOrDefault()?.Trim(), out var pid)) return;
-            using var process = Process.GetProcessById(pid);
-            if (process.HasExited) return;
-
-            process.Kill(entireProcessTree: true);
-            _log?.Invoke($"已强制结束 PostgreSQL 进程（PID {pid}）。");
-        }
-        catch (Exception exception) when (
-            exception is ArgumentException or InvalidOperationException or IOException
-                or UnauthorizedAccessException or NotSupportedException)
-        {
-            _log?.Invoke($"强制结束 PostgreSQL 进程失败：{exception.Message}");
-        }
-    }
+    private void KillPostmaster() => KillPostmasterByPidFile(_dataDirectory, _log);
 
     public async ValueTask DisposeAsync()
     {

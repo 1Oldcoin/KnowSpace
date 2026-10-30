@@ -31,7 +31,17 @@ const APP_DISPLAY_NAME = '知间-本地知识库';
 const API_EXE_NAME = 'Zhijian.Api.exe';
 const READY_TIMEOUT_MS = 180_000;
 const HEALTH_TIMEOUT_MS = 180_000;
-const SHUTDOWN_TIMEOUT_MS = 20_000;
+/**
+ * 等后端自己退出的时长。
+ *
+ * 后端收到 /api/desktop/shutdown 后会走优雅停止，其中 <c>pg_ctl stop -m fast</c>
+ * 最长可以等 60 秒做 checkpoint（见 PortablePostgresHost.StopAsync）。
+ * 原来这里是 20 秒，比 PG 那一步还短，于是每次关闭都变成「等 20 秒 → 强杀」，
+ * 而强杀会把 pg_ctl 腰断，留下一个「进程还在、但不接受连接」的 PostgreSQL——
+ * 下次启动就会因为数据目录里残留的 postmaster.pid 而起不来。
+ * 所以这个值必须明显大于后端的停止预算。
+ */
+const SHUTDOWN_TIMEOUT_MS = 90_000;
 /**
  * 后端存活看护。
  *
@@ -186,6 +196,15 @@ function resolveFixedLocalPort(exePath) {
     log(`ignoring invalid MAF_FIXED_LOCAL_PORT='${rawFromEnv}'`);
   }
 
+  // 用户数据目录里记住的端口。
+  //
+  // 这一层是为了解决一个具体的事故：以前端口只写在安装目录的 appsettings.json
+  // （Server:FixedLocalPort），而升级安装会整目录替换 resources/api，用户手工改过的
+  // 端口就被静默重置了。表现是「升级后 MCP 配置里的地址全失效」，而 MCP 客户端只会
+  // 说一句连不上。把端口放到 {数据根}/runtime/local-port.json 后，升级不再影响它。
+  const persisted = readPersistedLocalPort();
+  if (persisted !== null) return persisted;
+
   try {
     const settingsPath = path.join(path.dirname(exePath), 'appsettings.json');
     if (!fs.existsSync(settingsPath)) return 0;
@@ -198,6 +217,30 @@ function resolveFixedLocalPort(exePath) {
   }
 
   return 0;
+}
+
+/** 用户数据目录里记住的「专属端口」文件；升级安装不会碰到它。 */
+function localPortPath() {
+  return path.join(userDataRoot(), 'runtime', 'local-port.json');
+}
+
+function readPersistedLocalPort() {
+  const info = readJsonFile(localPortPath());
+  const port = Number.parseInt(info?.port, 10);
+  if (Number.isInteger(port) && port > 0 && port < 65536) return port;
+  return null;
+}
+
+/** 把这次实际采用的端口记下来，下次启动优先用它。 */
+function persistLocalPort(port) {
+  if (!Number.isInteger(port) || port <= 0 || port >= 65536) return;
+  try {
+    const target = localPortPath();
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, JSON.stringify({ port }, null, 2));
+  } catch (error) {
+    log(`persist local port failed: ${error.message}`);
+  }
 }
 
 /**
@@ -229,10 +272,26 @@ async function chooseListenUrl(exePath) {
 
   if (await canBindPort(fixedPort)) {
     log(`using fixed local port ${fixedPort}`);
+    // 记住它：升级安装会整目录替换 resources/api（连带 appsettings.json），
+    // 把端口落到用户数据目录才能保证「升级后 MCP 配置里的地址仍然有效」。
+    persistLocalPort(fixedPort);
     return `http://127.0.0.1:${fixedPort}`;
   }
 
-  log(`fixed local port ${fixedPort} is already in use; falling back to a random loopback port`);
+  // 专属端口被占用时**不要直接跳到随机端口**。
+  // 随机端口每次重启都可能变，用户写死的 MCP 配置、书签、脚本就跟着失效——
+  // 这正是「地址总在变」的根源。改为在专属端口附近找确定性的备用端口，
+  // 这样即使被占用，地址依然是可预测的（5056 → 5057 → 5058 …）。
+  for (let offset = 1; offset <= 16; offset += 1) {
+    const candidate = fixedPort + offset;
+    if (candidate > 65535) break;
+    if (await canBindPort(candidate)) {
+      log(`fixed local port ${fixedPort} is in use; using deterministic fallback port ${candidate}`);
+      return `http://127.0.0.1:${candidate}`;
+    }
+  }
+
+  log(`fixed local port ${fixedPort} and its 16 neighbours are all in use; falling back to a random loopback port`);
   return 'http://127.0.0.1:0';
 }
 
@@ -246,6 +305,25 @@ function startApi(exePath, readyFile, listenUrl) {
 
   log(`starting API sidecar on ${listenUrl}`);
 
+  // 以前这里固定 stdio:'ignore'，后端的未处理异常堆栈全部被丢掉：崩溃只剩下一个
+  // 0xE0434352（.NET 未处理异常）退出码，「关掉再打开就起不来」因此无从排查。
+  // 现在把子进程的 stdout/stderr 写进日志文件；写不进去也不阻止启动。
+  let consoleTarget = 'ignore';
+  try {
+    const logDirectory = path.join(app.getPath('userData'), 'logs');
+    fs.mkdirSync(logDirectory, { recursive: true });
+    const consoleLog = path.join(logDirectory, 'api-console.log');
+    // 简易轮转：超过 2 MB 就清空，避免长年运行无限增长。
+    try {
+      if (fs.statSync(consoleLog).size > 2 * 1024 * 1024) fs.truncateSync(consoleLog, 0);
+    } catch {
+      // 文件还不存在。
+    }
+    consoleTarget = fs.openSync(consoleLog, 'a');
+  } catch (error) {
+    log(`failed to open api console log: ${error.message}`);
+  }
+
   const child = spawn(exePath, [
     '--urls', listenUrl,
     '--no-browser',
@@ -258,7 +336,7 @@ function startApi(exePath, readyFile, listenUrl) {
     // 关窗口不关后台：子进程必须脱离父进程的管道与控制台，
     // 否则父进程一退出它就会收到 EPIPE。日志由 API 自己写文件。
     detached: true,
-    stdio: 'ignore'
+    stdio: ['ignore', consoleTarget, consoleTarget]
   });
 
   child.on('exit', (code, signal) => {
@@ -673,11 +751,59 @@ async function stopApi() {
   }
 
   log('API sidecar did not stop in time, killing');
+
+  // 强杀之前必须先把便携数据库停干净。
+  // 否则 pg_ctl stop 会被连同 API 一起腰断，留下「postgres 进程还在、端口还在、
+  // 但不接受新连接」的中间态；下次启动时数据目录里的 postmaster.pid 仍然有效，
+  // pg_ctl start 会直接拒绝启动，上层看到的就是一个没有堆栈的启动崩溃。
+  // --stop-portable-postgres 是安装器用的同一个同步钩子，只停库、不启动 Web 主机。
+  await stopPortablePostgresQuietly();
+
   try {
     apiProcess.kill();
   } catch (error) {
     log(`kill failed: ${error.message}`);
   }
+}
+
+/**
+ * 同步地把便携 PostgreSQL 停干净（最长等 90 秒）。
+ * 失败只记日志：这一步是「尽量干净」，不能因为停不掉就不杀进程。
+ */
+async function stopPortablePostgresQuietly() {
+  const exePath = resolveApiExecutable();
+  if (!exePath) return;
+
+  await new Promise((resolve) => {
+    let done = false;
+    const finish = (message) => {
+      if (done) return;
+      done = true;
+      log(message);
+      resolve();
+    };
+
+    try {
+      const child = spawn(exePath, ['--stop-portable-postgres'], {
+        cwd: path.dirname(exePath),
+        windowsHide: true,
+        stdio: 'ignore'
+      });
+      child.once('exit', (code) => finish(`portable PostgreSQL stop hook exited (code=${code})`));
+      child.once('error', (error) => finish(`portable PostgreSQL stop hook failed: ${error.message}`));
+      // 兜底：钩子本身也可能卡住，但不要拖住退出流程。
+      setTimeout(() => {
+        try {
+          child.kill();
+        } catch {
+          // 忽略。
+        }
+        finish('portable PostgreSQL stop hook timed out');
+      }, 90_000).unref?.();
+    } catch (error) {
+      finish(`portable PostgreSQL stop hook could not start: ${error.message}`);
+    }
+  });
 }
 
 /**
