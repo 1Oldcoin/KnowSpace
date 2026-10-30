@@ -6,6 +6,7 @@ using MyFirstMafAgent.Api.Infrastructure;
 using MyFirstMafAgent.Api.Infrastructure.Persistence;
 using MyFirstMafAgent.Api.Infrastructure.PortablePostgres;
 using MyFirstMafAgent.Api.Options;
+using Npgsql;
 
 namespace MyFirstMafAgent.Api;
 
@@ -92,6 +93,13 @@ public static class ApiHost
         var connectionString = builder.Configuration.GetConnectionString("KnowledgeBase");
         if (string.IsNullOrWhiteSpace(connectionString))
             throw new InvalidOperationException("Set ConnectionStrings:KnowledgeBase (for example via ConnectionStrings__KnowledgeBase) before starting the API.");
+
+        // 外部连接串是用户自己写的，通常只有 Host/Port/Database/Username/Password。
+        // Npgsql 的默认值里 ConnectionIdleLifetime=0（永不回收），于是「连接只增不减」的
+        // 问题在外部库上同样会发生，而且用户完全看不到原因：进程活多久，池子就涨到多大。
+        // 这里统一补上池子参数；用户显式写了的键不覆盖（NpgsqlConnectionStringBuilder
+        // 用 ContainsKey 判断，能区分「没写」和「写了默认值」）。
+        connectionString = ApplyPoolDefaults(connectionString, builder.Configuration);
 
         // 外部数据库预检：便携库没被拉起时，先用一条真实连接确认它真的能用。
         // 否则“库没启动/口令错”会在 5 秒后表现为一条 SqlSugar 堆栈，而用户看不出是哪种。
@@ -211,5 +219,85 @@ public static class ApiHost
         {
             app.Logger.LogWarning(exception, "Failed to open browser at {Url}", url);
         }
+    }
+
+    /// <summary>
+    /// 给外部连接串补上连接池参数。用户没写的键才补，写了的一律尊重。
+    ///
+    /// <para>
+    /// 为什么必须补：Npgsql 的默认值是 <c>ConnectionIdleLifetime = 0</c>（永不回收）+
+    /// <c>MaxPoolSize = 100</c>。而本应用的用法会持续产生新的 ExecutionContext
+    /// （HTTP 请求、后台 Worker 循环、任务槽位），SqlSugar 在每个上下文里缓存一个
+    /// <c>SqlSugarClient</c>，各自带一条物理连接且只还不关。于是「只增不减」，
+    /// 挂机几小时后池子被灌满，任务管理器里出现几十个 postgres.exe。
+    /// 用户自己写的连接串基本不会包含这两个键，所以必须由程序兜底。
+    /// </para>
+    ///
+    /// <para>
+    /// <b>不能用 <c>builder.ContainsKey("Maximum Pool Size")</c> 判断用户是否写过。</b>
+    /// 实测（Npgsql 9.0.4）：对任何<b>合法键名</b>，即使连接串里根本没有这个键，
+    /// <c>ContainsKey</c> 也返回 <c>true</c>——它是"这个名字合法吗"，不是"用户写了吗"。
+    /// 照它写会让下面的赋值全部跳过，用户配的值反而原样保留、默认值永不生效。
+    /// 只能回原始串做解析判断。
+    /// </para>
+    ///
+    /// <para>
+    /// 另一个坑：这种解析只认 <b>带空格</b> 的拼写（<c>Maximum Pool Size</c>）。
+    /// 写成 <c>maximumpoolsize</c> 会让 <c>new NpgsqlConnectionStringBuilder(...)</c>
+    /// 直接抛 <c>ArgumentException</c>。所以两种拼写都要在别名里覆盖。
+    /// </para>
+    ///
+    /// <para>
+    /// 解析失败时原样返回，交给后面的预检去报错——这里不该抢先抛异常，
+    /// 否则「连接串写错了」会变成一条看不懂的 <c>ArgumentException</c>。
+    /// </para>
+    /// </summary>
+    internal static string ApplyPoolDefaults(string connectionString, IConfiguration configuration)
+    {
+        var options = configuration.GetSection(PortablePostgresOptions.SectionName)
+            .Get<PortablePostgresOptions>() ?? new PortablePostgresOptions();
+
+        try
+        {
+            var builder = new NpgsqlConnectionStringBuilder(connectionString);
+
+            if (!ConnectionStringDeclaresKey(connectionString, "maximumpoolsize", "maxpoolsize"))
+                builder.MaxPoolSize = Math.Max(1, options.MaxPoolSize);
+            if (!ConnectionStringDeclaresKey(connectionString, "connectionidlelifetime"))
+                builder.ConnectionIdleLifetime = Math.Max(0, options.ConnectionIdleLifetimeSeconds);
+            if (!ConnectionStringDeclaresKey(connectionString, "connectionpruninginterval"))
+                builder.ConnectionPruningInterval = Math.Max(1, options.ConnectionPruningIntervalSeconds);
+
+            return builder.ConnectionString;
+        }
+        catch (ArgumentException)
+        {
+            return connectionString;
+        }
+    }
+
+    /// <summary>
+    /// 判断原始连接串里是否**显式写了**某个键。大小写、空格、下划线都不敏感。
+    ///
+    /// <para>
+    /// 用原始文本而不是 <c>NpgsqlConnectionStringBuilder.ContainsKey</c>，原因见
+    /// <see cref="ApplyPoolDefaults"/> 的说明：那个方法对合法键名恒返回 true。
+    /// </para>
+    /// </summary>
+    internal static bool ConnectionStringDeclaresKey(string connectionString, params string[] aliases)
+    {
+        foreach (var segment in connectionString.Split(';', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var separator = segment.IndexOf('=');
+            if (separator <= 0) continue;
+
+            var name = segment[..separator].Trim().Replace(" ", "").Replace("_", "");
+            foreach (var alias in aliases)
+            {
+                if (name.Equals(alias, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+        }
+
+        return false;
     }
 }

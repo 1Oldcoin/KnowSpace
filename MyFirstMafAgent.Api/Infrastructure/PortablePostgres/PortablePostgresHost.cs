@@ -938,7 +938,12 @@ public sealed class PortablePostgresHost : IAsyncDisposable
             Password = options.Password,
             ApplicationName = "MyFirstMafAgent.Api",
             Pooling = true,
-            MaxPoolSize = 50,
+            // 上限只是封顶，不是目标。真正的收敛靠下面两个空闲回收参数：
+            // 没有它们时连接「只增不减」，挂机几小时就会把池子灌满，
+            // 每个新 ExecutionContext 都会让 SqlSugar 在 AsyncLocal 里新建一条物理连接。
+            MaxPoolSize = Math.Max(1, options.MaxPoolSize),
+            ConnectionIdleLifetime = Math.Max(0, options.ConnectionIdleLifetimeSeconds),
+            ConnectionPruningInterval = Math.Max(1, options.ConnectionPruningIntervalSeconds),
             Timeout = 15,
             CommandTimeout = 120,
             // 便携库只在 127.0.0.1 上明文跑，协商 SSL 纯属多一个往返。

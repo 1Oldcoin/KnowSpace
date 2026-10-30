@@ -79,6 +79,42 @@ public sealed class PortablePostgresOptions
 
     public string Password { get; set; } = "postgres";
 
+    /// <summary>
+    /// 客户端连接池上限。<b>默认 16，不要上调。</b>
+    ///
+    /// <para>
+    /// 这里曾经是 50，而 PostgreSQL 的 <c>max_connections</c> 默认也是 100——两个数字互不相干，
+    /// 却让「连接池上限」看起来像个安全值。实际峰值并发只有个位数
+    /// （<c>Jobs:MaxConcurrentJobs</c> 默认 4 + 3 个后台 Worker + HTTP 请求），
+    /// 池子开到 50 却<b>永远收不回去</b>：每个新的 ExecutionContext 都会让 SqlSugar 在
+    /// <c>AsyncLocal</c> 里新建一个 <c>SqlSugarClient</c>，连带一条 Npgsql 物理连接；
+    /// <c>IsAutoCloseConnection</c> 只把连接还进池，不关它。于是「只增不减」，
+    /// 挂机几小时后池子被灌满，50 个空闲 backend 常驻，
+    /// 在任务管理器里就是几十个 postgres.exe 进程 + 数百 MB 工作集。
+    /// </para>
+    ///
+    /// <para>
+    /// 真正的收敛靠下面两个空闲回收参数，而不是靠把上限调大。
+    /// 上限的作用只是<b>封顶</b>：万一再出现泄漏，16 条也不会把
+    /// <c>max_connections</c> 吃掉一半。改成 16 后即使池子被灌满，
+    /// 空闲连接也会在 5 分钟内被回收。
+    /// </para>
+    /// </summary>
+    public int MaxPoolSize { get; set; } = 16;
+
+    /// <summary>
+    /// 连接在池中空闲多久后被关闭（秒）。默认 300 秒。
+    ///
+    /// <para>
+    /// 这是治「只增不减」的关键参数。0 表示永不回收——那就会回到旧行为：
+    /// 进程活多久，池子就涨到多大（上限为 <see cref="MaxPoolSize"/>）。
+    /// </para>
+    /// </summary>
+    public int ConnectionIdleLifetimeSeconds { get; set; } = 300;
+
+    /// <summary>空闲连接回收线程的扫描间隔（秒）。默认 60 秒。</summary>
+    public int ConnectionPruningIntervalSeconds { get; set; } = 60;
+
     public string Database { get; set; } = "myfirstmafagent";
 
     /// <summary>
