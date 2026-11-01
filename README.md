@@ -4,7 +4,7 @@
 
 **本地优先的个人知识库** —— 资料入库、向量检索、带引用的问答，并把知识库通过 MCP 开放给外部 AI 工具。
 
-[![Release](https://img.shields.io/badge/release-1.0.3-2ea44f)](https://github.com/1Oldcoin/KnowSpace/releases/tag/v1.0.3)
+[![Release](https://img.shields.io/badge/release-1.0.4-2ea44f)](https://github.com/1Oldcoin/KnowSpace/releases/tag/v1.0.4)
 [![.NET](https://img.shields.io/badge/.NET-10.0-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
 [![Vue](https://img.shields.io/badge/Vue-3.5-42b883?logo=vuedotjs&logoColor=white)](https://vuejs.org/)
 [![Electron](https://img.shields.io/badge/Electron-33-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
@@ -116,8 +116,9 @@ graph TD
 | 产物 | 给谁 |
 | --- | --- |
 | `Zhijian-x.y.z-setup.exe` | Windows 桌面版（自带便携 PostgreSQL，双击即用） |
-| `Zhijian-linux-x64-x.y.z.tar.gz` | Linux 裸机 / systemd（自包含，目标机不需要装 .NET） |
-| `Zhijian-x.y.z-docker-context.tar.gz` | Docker（完整构建上下文，解压即 `docker compose up -d --build`，本机无需 .NET SDK / Node） |
+| `Zhijian-linux-x64-x.y.z.tar.gz` | Linux 完整版（自包含 API + 前端界面 + `deploy/linux`，目标机不需要装 .NET；PostgreSQL 由 `install.sh` 装） |
+| `Zhijian-linux-x64-x.y.z-minimal.tar.gz` | Linux 精简版（只有 API，不带前端界面，适合纯接口 / 反代部署） |
+| `Zhijian-x.y.z-docker-context.tar.gz` | Docker（完整构建上下文，解压即 `docker compose up -d --build`；本版未随 Release 提供，需自行构建） |
 
 `latest.yml` 与 `.blockmap` 只服务于 Electron 自动更新，手工部署不用管。
 
@@ -174,14 +175,15 @@ docker compose exec app bash /app/scripts/Test-IntegratedStack.sh --pg-password 
 
 ### 方式三：Linux 裸机（systemd，不用 Docker）
 
-Linux 只有**一份**产物：一个自包含的 tar.gz（目标机不需要装 .NET），直接从
-[Releases](https://github.com/1Oldcoin/KnowSpace/releases) 下载 `Zhijian-linux-x64-x.y.z.tar.gz` 即可，
-不需要自己打包。
+Linux 提供**两份**产物，都是自包含的 tar.gz（目标机不需要装 .NET）：
+[Releases](https://github.com/1Oldcoin/KnowSpace/releases) 的 `Zhijian-linux-x64-x.y.z.tar.gz`
+是完整版（带前端界面与 `deploy/linux`），`Zhijian-linux-x64-x.y.z-minimal.tar.gz` 是精简版
+（只有 API，不含前端静态文件，适合纯接口 / 反代部署）。不需要自己打包。
 
 ```bash
-scp Zhijian-linux-x64-1.0.3.tar.gz user@host:/tmp/
+scp Zhijian-linux-x64-1.0.4.tar.gz user@host:/tmp/
 ssh user@host
-tar xzf /tmp/Zhijian-linux-x64-1.0.3.tar.gz -C /tmp/
+tar xzf /tmp/Zhijian-linux-x64-1.0.4.tar.gz -C /tmp/
 sudo bash /tmp/Zhijian-linux-x64/deploy/linux/install.sh --source /tmp/Zhijian-linux-x64/app
 ```
 
@@ -202,8 +204,8 @@ sudo bash /tmp/Zhijian-linux-x64/deploy/linux/install.sh --source /tmp/Zhijian-l
 
 </details>
 
-> **Linux 只有这一份产物**：前端是 `wwwroot/` 里的静态文件，由 API 自己托管，不存在「有 UI 版 / 无 UI 版」的区分。
-> Electron 壳只服务 Windows 安装包。
+> **Linux 两份产物只差前端静态文件**：完整版把前端放在 `wwwroot/`，由 API 自己托管；
+> 精简版删掉 `wwwroot/`，只保留接口与后台能力。Electron 壳只服务 Windows 安装包。
 >
 > 但**裸机上浏览器打不开可用界面**：`install.sh` 写入的 env 里有 `MAF_SERVER_TOKEN`，`/api` 因此要求
 > `X-Api-Token`，而浏览器里没人注入它。日常用 curl 管理（见 `docs/MCP-ACCESS.md` §4.4），
@@ -345,7 +347,7 @@ powershell -ExecutionPolicy Bypass -File scripts\Publish-Release.ps1 -Version 1.
 
 ## 版本与分支
 
-当前发布版本：**1.0.3**（Windows 安装包 / Linux 包 / Docker 镜像均来自同一份代码）。
+当前发布版本：**1.0.4**（Windows 安装包 / Linux 包 / Docker 镜像均来自同一份代码）。
 
 | 分支 | 定位 | 规则 |
 | --- | --- | --- |
@@ -381,6 +383,28 @@ powershell -ExecutionPolicy Bypass -File scripts\Merge-To-Main.ps1 -TagName v1.0
 
 脚本做的事：检查工作区干净 → `fetch` → 本地 `master` 快进到 `github/main` → `merge --no-ff dev` → 推送 `master:main` → 把 `dev` 也指到合并提交并推送（避免下次出现「假落后」）→ 可选重打标签。默认会列出待合并的提交并要求确认，`-Yes` 跳过；`-NoPush` 只做本地合并；本地 `master` 有未推送提交时默认拒绝继续。
 
+### 1.0.4 更新要点
+
+这一版修的是三条**真实被量出来的故障路径**：「进程活着但查不了库」「关掉再打开连不上」，
+外加包体积与异步阻塞清理。
+
+| 项 | 变化 |
+| --- | --- |
+| **连接池耗尽自愈** | `/api/health` 拆成两个口径：PostgreSQL 是否活着（独立、不走池的连接）与应用还能不能拿到连接（共享作用域）。新增 `DatabasePoolWatchdog`，每 15 秒探测一次；独立探针正常而共享池连续 4 次失败时自动重建连接作用域，把「进程还活着、接口还返回 200、但所有查询都失败」的状态救回来 |
+| **获取连接超时** | 15 秒 → 5 秒，失败不再先转 15 秒才暴露 |
+| **请求级连接释放** | 新增 `ConnectionReleaseMiddleware`，成功 / 异常 / 客户端中断三条路径都释放本次请求的池化连接；结束时若还有未提交事务，先回滚并打一条点名端点的警告——这是找到「`BeginTran` 忘记 `Commit`/`Rollback`」的唯一线索 |
+| **空闲回收** | `MaxPoolSize` 维持 50（降成 16 只会让故障早 3 倍到来）；新增 `ConnectionIdleLifetimeSeconds=300` 与 `ConnectionPruningIntervalSeconds=60`，外部连接串只补用户没写的键 |
+| **关掉再打开连不上** | 关闭等待从 20 秒延长到覆盖 PG 停止预算；启动时先确认旧 PG 实例已退出再起新的，不再对同一数据目录起第二个实例；后端 stderr 落盘（崩溃堆栈不再丢失）；桌面端口持久化到 `{数据根}\runtime\local-port.json` |
+| **包体积** | 发布体积 652.5 MB → 449.5 MB（-31%）：移除零引用的 `ElBruno.QwenTTS.VoiceCloning`；不再随包带 `ffplay` / `ffprobe`（代码只调用 `ffmpeg`，关键帧时间戳来自 `showinfo`，仓库保留完整三件套，可用 `-KeepExtraFfmpegTools` 找回） |
+| **异步阻塞** | `PluginInstaller` 的重试等待从 `Thread.Sleep`（最长 480 / 900 ms）改为 `await Task.Delay(ct)` |
+| **Linux 产物** | 新增精简版 `Zhijian-linux-x64-x.y.z-minimal.tar.gz`（只有 API，不含前端静态文件） |
+
+实测数据（本机、真实数据库、`application_name` 隔离）：150 条顺序请求与 320 条并发请求（8 通道）全部成功，
+后端连接数保持 8 条；故意遗弃 10 个事务会让连接从 3 条涨到 13 条，中间件会点名对应端点。
+
+> **如实说明**：本版**没有**定位到「连接池被永久占满」的触发源（同一份数据库、全新实例跑数小时稳定在 4~8 条），
+> 所以做的是可观测 + 自愈，不是根因修复。
+
 ### 1.0.3 更新要点
 
 这一版的主题是**"桌面端不再需要手动重启"**，外加补齐 MCP 接入的缺口。
@@ -392,7 +416,7 @@ powershell -ExecutionPolicy Bypass -File scripts\Merge-To-Main.ps1 -TagName v1.0
 | **接入客户端管理页** | 新增「接入的 AI 工具」页（设置页有入口）：新建客户端、勾能力与工具白名单、限定可见知识库、轮换密钥、看调用统计与审计明细。同时新增 `GET /api/agent-clients/overview` 聚合接口 |
 | **删除知识库** | 侧栏知识库右侧新增删除按钮，会连同资料、切片、向量、笔记、专题、问答历史与磁盘文件一起清理；默认知识库不可删 |
 | **安装包瘦身** | 283 → 278 MB：不再把构建机上跑过的 PostgreSQL 数据目录打进安装包 |
-| **数据库连接池收敛** | `MaxPoolSize` 50 → **16**，并启用空闲回收（300 秒 / 60 秒扫描）。修掉「挂机几小时后 PostgreSQL 冒出 50 个 idle 会话、几十个 `postgres.exe`、1.4 GB 工作集」的问题；实测稳态 7~8 条。外部连接串也会自动补上这三个参数，详见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) §2.1 |
+| **数据库连接池收敛** | `MaxPoolSize` 50 → **16**，并启用空闲回收（300 秒 / 60 秒扫描）。修掉「挂机几小时后 PostgreSQL 冒出 50 个 idle 会话、几十个 `postgres.exe`、1.4 GB 工作集」的问题；实测稳态 7~8 条。外部连接串也会自动补上这三个参数，详见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) §2.1。**1.0.4 已把上限改回 50**（降上限只会让故障早 3 倍到来），保留空闲回收并增加连接池看护重建 |
 
 关于「统计当前被连接的应用」：MCP 是**无状态** Streamable HTTP，服务端没有长连接可查，
 所以页面上的口径是「**最近活跃**」= 已启用且最近 5 分钟内有有效调用，不写成「已连接」。
