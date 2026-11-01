@@ -33,4 +33,39 @@ public sealed class SqlSugarConnectionReleaser(SqlSugarScope database, ILogger<S
             logger.LogDebug(exception, "Releasing the pooled connection failed");
         }
     }
+
+    public bool ReleaseAfterRequest()
+    {
+        var hadResidualTransaction = false;
+
+        try
+        {
+            // 请求已经结束，还开着的事务不可能再被提交：回滚是唯一正确的处置。
+            // 不回滚直接关连接，Npgsql 也会隐式回滚，但那样我们什么都看不见；
+            // 显式回滚 + 返回 true，才能在上层留下一条可追查的警告。
+            if (database.Ado.Transaction is not null)
+            {
+                hadResidualTransaction = true;
+                database.Ado.RollbackTran();
+            }
+
+            database.Ado.Close();
+        }
+        catch (Exception exception)
+        {
+            // 兜底失败也必须继续关连接：宁可把这条连接废弃，也不要留在池里当垃圾。
+            logger.LogDebug(exception, "Rolling back / releasing the request connection failed");
+
+            try
+            {
+                database.Ado.Close();
+            }
+            catch (Exception closeException)
+            {
+                logger.LogDebug(closeException, "Closing the request connection failed");
+            }
+        }
+
+        return hadResidualTransaction;
+    }
 }

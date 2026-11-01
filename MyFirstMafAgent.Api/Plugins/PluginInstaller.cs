@@ -206,7 +206,7 @@ public sealed class PluginInstaller(
         if (Directory.Exists(target))
         {
             var trash = Path.Combine(paths.StagingRoot, "trash-" + Guid.NewGuid().ToString("N"));
-            if (TryMoveDirectory(target, trash))
+            if (await TryMoveDirectoryAsync(target, trash, cancellationToken).ConfigureAwait(false))
             {
                 PluginPaths.TryDeleteDirectory(trash, logger);
             }
@@ -221,7 +221,7 @@ public sealed class PluginInstaller(
 
         try
         {
-            CopyDirectoryWithRetry(packageDirectory, target);
+            await CopyDirectoryWithRetryAsync(packageDirectory, target, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
@@ -352,7 +352,7 @@ public sealed class PluginInstaller(
     /// 把目录挪到暂存区，容忍 Windows 上"进程刚退出、句柄还没释放"的短暂占用。
     /// 共 4 次尝试（0/120/240/480 毫秒），仍失败才返回 false。
     /// </summary>
-    private static bool TryMoveDirectory(string source, string destination)
+    private static async Task<bool> TryMoveDirectoryAsync(string source, string destination, CancellationToken cancellationToken)
     {
         for (var attempt = 0; attempt < 4; attempt++)
         {
@@ -364,7 +364,10 @@ public sealed class PluginInstaller(
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
                 if (attempt == 3) return false;
-                Thread.Sleep(120 * (1 << attempt));
+
+                // 用 await Task.Delay 而不是 Thread.Sleep：本方法处在异步安装流程中，
+                // Thread.Sleep 会白白占住一个线程池线程（最多 480ms）。
+                await Task.Delay(120 * (1 << attempt), cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -375,7 +378,7 @@ public sealed class PluginInstaller(
     /// 复制插件文件，容忍"上一次的子进程刚被杀掉、句柄还没释放"造成的占用。
     /// 共 3 次尝试（0/300/900 毫秒）。
     /// </summary>
-    private static void CopyDirectoryWithRetry(string source, string destination)
+    private static async Task CopyDirectoryWithRetryAsync(string source, string destination, CancellationToken cancellationToken)
     {
         for (var attempt = 0; ; attempt++)
         {
@@ -386,7 +389,7 @@ public sealed class PluginInstaller(
             }
             catch (Exception exception) when (attempt < 2 && exception is IOException or UnauthorizedAccessException)
             {
-                Thread.Sleep(300 * (1 << attempt));
+                await Task.Delay(300 * (1 << attempt), cancellationToken).ConfigureAwait(false);
             }
         }
     }

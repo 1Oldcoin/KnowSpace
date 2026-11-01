@@ -55,6 +55,8 @@ param(
     [switch]$SkipFrontend,
     # Keep native binaries of other platforms (default: prune them, they are 100-300 MB).
     [switch]$KeepForeignRids,
+    # Keep ffprobe/ffplay next to ffmpeg (default: prune them, they are ~200 MB and unused).
+    [switch]$KeepExtraFfmpegTools,
     # By default the existing App_Data (uploads, plugins, media assets) is preserved.
     # Pass this switch to wipe it and start from an empty data folder.
     [switch]$FreshData,
@@ -308,6 +310,41 @@ function Remove-ForeignRids([string]$output) {
     Write-Host "  pruned $removed other-platform file(s)/folder(s)" -ForegroundColor DarkGray
 }
 
+# ffmpeg ships as a bundle of three ~100 MB executables: ffmpeg, ffprobe and ffplay.
+# Only `ffmpeg` is ever invoked: transcoding, audio normalisation and keyframe extraction
+# all run through ffmpeg itself (frame timestamps come from its `showinfo` filter, so
+# ffprobe is not needed either). `ffplay` is an interactive player that a server-side
+# knowledge base has no use for at all, and `ffprobe`/`ffplay` alone cost ~200 MB of the
+# ~650 MB package.
+#
+# Pruning them from the PUBLISH OUTPUT only - the repository still keeps the full set,
+# so switching back is a flag away. Use -KeepExtraFfmpegTools to retain them.
+function Remove-UnusedFfmpegTools([string]$output) {
+    if ($KeepExtraFfmpegTools) {
+        Write-Host '  -KeepExtraFfmpegTools: keeping ffprobe/ffplay' -ForegroundColor Yellow
+        return
+    }
+
+    $removedCount = 0
+    $removedBytes = 0
+    $toolRoot = Join-Path $output 'ExternalTools\ffmpeg'
+    if (-not (Test-Path $toolRoot)) { return }
+
+    foreach ($file in Get-ChildItem $toolRoot -Recurse -File) {
+        $base = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
+        if ($base -ne 'ffplay' -and $base -ne 'ffprobe') { continue }
+
+        $removedBytes += $file.Length
+        Remove-Item $file.FullName -Force
+        $removedCount++
+    }
+
+    if ($removedCount -gt 0) {
+        $megabytes = [math]::Round($removedBytes / 1MB, 1)
+        Write-Host "  pruned $removedCount unused ffmpeg tool(s) ($megabytes MB)" -ForegroundColor DarkGray
+    }
+}
+
 Write-Step 'Check dotnet'
 dotnet --version | Out-Null
 Assert-ExitCode 'dotnet'
@@ -343,6 +380,7 @@ if ($Target -eq 'console' -or $Target -eq 'all') {
     Publish-Project $apiProject $output
     Copy-Frontend $output
     Remove-ForeignRids $output
+    Remove-UnusedFfmpegTools $output
     Assert-RuntimeFiles $output
     Write-Readme $output
     Write-Host "Console output: $output" -ForegroundColor Green
@@ -357,6 +395,7 @@ if ($Target -eq 'desktop' -or $Target -eq 'all') {
     Publish-Project $apiProject $output
     Copy-Frontend $output
     Remove-ForeignRids $output
+    Remove-UnusedFfmpegTools $output
     Assert-RuntimeFiles $output
     Write-Readme $output
     Write-Host "Sidecar output: $output" -ForegroundColor Green

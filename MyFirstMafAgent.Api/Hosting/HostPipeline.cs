@@ -56,6 +56,10 @@ public static class HostPipeline
             }
         });
 
+        // 请求级连接兜底：必须在所有会查库的中间件与端点之前注册，
+        // 它的 finally 才能覆盖每一个请求的收尾（包括异常与取消）。
+        app.UseConnectionRelease();
+
         app.UseExceptionHandler(errorApp => errorApp.Run(async context =>
         {
             var exception = context.Features.Get<IExceptionHandlerFeature>()?.Error;

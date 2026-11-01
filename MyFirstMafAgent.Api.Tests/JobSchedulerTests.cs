@@ -450,6 +450,12 @@ public sealed class JobSchedulerTests
         public int ReleaseCount { get; private set; }
 
         public void Release() => ReleaseCount++;
+
+        public bool ReleaseAfterRequest()
+        {
+            ReleaseCount++;
+            return false;
+        }
     }
 
     /// <summary>

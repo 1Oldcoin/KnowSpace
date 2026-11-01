@@ -77,6 +77,8 @@ let mainWindow = null;
 let splashWindow = null;
 let splashShowTimer = null;
 let splashClosed = false;
+/** will-download 是挂在 session 上的全局监听：重建窗口时不要再注册一遍（会重复弹保存框）。 */
+let downloadHandlerInstalled = false;
 /** 最后一次设置的状态文案：页面加载完成后用它补写（见 createSplash）。 */
 let lastSplashPhase = '';
 let apiProcess = null;
@@ -484,21 +486,26 @@ function createWindow(baseUrl) {
 
   // 浏览器兜底下载（例如导出知识库包）也要让用户自己选目录：
   // 不接管的话 Electron 会默默丢进系统下载目录，用户既没选过、也找不到。
-  session.defaultSession.on('will-download', (_event, item) => {
-    const target = dialog.showSaveDialogSync(mainWindow, {
-      title: '保存文件',
-      defaultPath: path.join(app.getPath('downloads'), item.getFilename()),
-      buttonLabel: '保存'
+  // 只在第一次建窗时注册：second-instance 重建窗口会再次走到这里，
+  // 重复注册会让同一次下载弹两个保存对话框。
+  if (!downloadHandlerInstalled) {
+    downloadHandlerInstalled = true;
+    session.defaultSession.on('will-download', (_event, item) => {
+      const target = dialog.showSaveDialogSync(mainWindow, {
+        title: '保存文件',
+        defaultPath: path.join(app.getPath('downloads'), item.getFilename()),
+        buttonLabel: '保存'
+      });
+
+      if (!target) {
+        item.cancel();
+        return;
+      }
+
+      item.setSavePath(target);
+      item.once('done', (_doneEvent, state) => log(`download ${item.getFilename()} -> ${target} (${state})`));
     });
-
-    if (!target) {
-      item.cancel();
-      return;
-    }
-
-    item.setSavePath(target);
-    item.once('done', (_doneEvent, state) => log(`download ${item.getFilename()} -> ${target} (${state})`));
-  });
+  }
 
   mainWindow.once('ready-to-show', () => {
     if (mainWindow) mainWindow.show();
@@ -733,6 +740,14 @@ async function stopApi() {
   intentionalStop = true;
   stopWatchdog();
 
+  // 先把子进程句柄抓到本地变量：startApi 的 exit 回调会把全局 apiProcess 置 null，
+  // 下面「等它退出」的循环期间子进程完全可能刚好退出。继续读全局变量的话，
+  // 下一轮就是 null.exitCode → TypeError；异常被 before-quit 的 async 监听器吞掉，
+  // 后面的 app.exit(0) 永远不执行，进程会变成「没有窗口、没有后端、却占着单实例锁」
+  // 的僵尸壳——用户之后再点图标，新进程在 requestSingleInstanceLock 处静默退出，
+  // 表现就是「启动不了」（2026-10-31 实测到过一次）。
+  const child = apiOwned ? apiProcess : null;
+
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 5000);
@@ -748,11 +763,11 @@ async function stopApi() {
   }
 
   // 后台可能不是本窗口拉起的：那种情况下后端自己会退，窗口不等它。
-  if (!apiOwned || !apiProcess || apiProcess.exitCode !== null) return;
+  if (!child || child.exitCode !== null) return;
 
   const deadline = Date.now() + SHUTDOWN_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    if (apiProcess.exitCode !== null) {
+    if (child.exitCode !== null) {
       log('API sidecar stopped gracefully');
       return;
     }
@@ -769,7 +784,7 @@ async function stopApi() {
   await stopPortablePostgresQuietly();
 
   try {
-    apiProcess.kill();
+    child.kill();
   } catch (error) {
     log(`kill failed: ${error.message}`);
   }
@@ -1081,7 +1096,16 @@ async function bootstrap() {
   }
 
   app.on('second-instance', () => {
-    if (!mainWindow) return;
+    // 窗口已经不在、但进程还活着（例如上一次退出被中断，只剩一个壳）：
+    // 把主窗口重新建出来。否则用户再点一次图标，只会在 requestSingleInstanceLock
+    // 那里拿到「已有一个实例」，而这个实例什么都不画——表现就是「启动不了」。
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      if (!isQuitting && apiBaseUrl) {
+        log('second instance requested while no window; recreating main window');
+        createWindow(apiBaseUrl);
+      }
+      return;
+    }
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.focus();
   });
@@ -1170,18 +1194,37 @@ async function bootstrap() {
     if (isQuitting) return;
     event.preventDefault();
     isQuitting = true;
-    stopWatchdog();
-    updater?.dispose();
 
-    // 默认关窗口不关后台：用户可能把它当常驻服务用。
-    // 只有设置页勾了「关闭所有服务」才让后端自己退出（含它启动的便携数据库）。
-    if (readPrefs().stopBackendOnExit) {
-      await stopApi();
-    } else {
-      log('leaving backend running (stopBackendOnExit=false)');
+    // 硬退出兜底：退出清理里任何一步抛异常或卡住，都不能让进程留下来。
+    // 留下来的代价不是「没关干净」，而是进程继续占着单实例锁——用户下次双击
+    // 只会看到一个瞬间退出、什么都不画的进程，只能去任务管理器杀它。
+    //
+    // 超时不能短于最坏合法路径：等 sidecar 退出 90s（SHUTDOWN_TIMEOUT_MS）+ 停便携库 90s，
+    // 再留 20s 余量。设短了会在一次「慢但正确」的关库里把 pg_ctl 拦腰打断，
+    // 留下不干净的 PostgreSQL——下次启动反而更慢。
+    const hardExit = setTimeout(() => {
+      log('quit cleanup timed out; forcing exit');
+      app.exit(1);
+    }, SHUTDOWN_TIMEOUT_MS * 2 + 20_000);
+    hardExit.unref?.();
+
+    try {
+      stopWatchdog();
+      updater?.dispose();
+
+      // 默认关窗口不关后台：用户可能把它当常驻服务用。
+      // 只有设置页勾了「关闭所有服务」才让后端自己退出（含它启动的便携数据库）。
+      if (readPrefs().stopBackendOnExit) {
+        await stopApi();
+      } else {
+        log('leaving backend running (stopBackendOnExit=false)');
+      }
+    } catch (error) {
+      log(`quit cleanup failed: ${error.stack || error.message}`);
+    } finally {
+      clearTimeout(hardExit);
+      app.exit(0);
     }
-
-    app.exit(0);
   });
 
   app.on('window-all-closed', () => {
